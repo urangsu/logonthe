@@ -1,9 +1,12 @@
 {
-  "min_delay": 0.0,
-  "max_delay": 8.0,
-  "max_pages": 5,
-  "browser_mode": "new",
-  "default_keywords": ["재테크", "주식", "맛집", "일상"],
-  "comment_template": "{좋은|유익한|멋진} 포스팅 잘 읽고 갑니다! {오늘도 행복한 하루 보내세요|응원합니다|감사합니다}!",
-  "secret_comment": false
+  "schema_version": 2,
+  "feed_source": "neighbor",
+  "max_feed_items": 20,
+  "like_enabled": true,
+  "comment_enabled": true,
+  "comment_template": "{좋은|유익한|멋진} 포스팅 잘 읽었습니다!",
+  "fixed_suffix": "오늘도 좋은 하루 보내세요 :)",
+  "secret_comment": false,
+  "browser_mode": "persistent",
+  "direct_urls": []
 }
