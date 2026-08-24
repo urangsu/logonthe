@@ -56,7 +56,6 @@ class FeedController:
         gemini_web_enabled = bool(self.config.get("gemini_web_enabled", True))
         gemini_mode = str(self.config.get("gemini_mode", "new"))
         gemini_custom_url = str(self.config.get("gemini_custom_url", "https://gemini.google.com/app/0a1545681329aa0a?hl=ko"))
-        auto_apply_ai_comment = bool(self.config.get("auto_apply_ai_comment", False))
 
         gemini_url = gemini_custom_url if (gemini_mode == "custom" and gemini_custom_url) else "https://gemini.google.com/app"
 
@@ -86,7 +85,7 @@ class FeedController:
 
             source.open()
 
-            # 2. PostProcessor 초기화
+            # 2. PostProcessor 초기화 (인터페이스 정확히 일치)
             processor = PostProcessor(
                 config=self.config,
                 like_enabled=like_enabled,
@@ -99,7 +98,6 @@ class FeedController:
                 gemini_browser_mode=gemini_browser_mode,
                 gemini_web_enabled=gemini_web_enabled,
                 gemini_url=gemini_url,
-                auto_apply_ai_comment=auto_apply_ai_comment,
                 gemini_page=gemini_page,
                 pacing_service=self.pacing,
                 command_bridge=self.command_bridge,

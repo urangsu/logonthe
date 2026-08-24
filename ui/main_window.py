@@ -253,15 +253,9 @@ class MainWindow(ctk.CTk):
 
         self.gemini_web_enabled_var = ctk.BooleanVar(value=self.config_service.get("gemini_web_enabled", True))
         ctk.CTkCheckBox(
-            ai_head, text="🤖 Gemini 자동 댓글 생성 연동",
+            ai_head, text="🤖 Gemini 자동 댓글 생성 연동 (실패 시 로컬 문맥 분석 엔진으로 자동 전환)",
             variable=self.gemini_web_enabled_var, font=ctk.CTkFont(weight="bold"), text_color="#38BDF8"
         ).pack(side="left", padx=2)
-
-        self.auto_apply_var = ctk.BooleanVar(value=self.config_service.get("auto_apply_ai_comment", False))
-        ctk.CTkCheckBox(
-            ai_head, text="생성 완료 시 댓글창에 자동 채우기",
-            variable=self.auto_apply_var, font=ctk.CTkFont(size=12)
-        ).pack(side="left", padx=15)
 
         # Gemini 브라우저 모드 선택 (기존 실행 중인 Chrome vs 프로그램 전용)
         ai_mode_frame = ctk.CTkFrame(ai_card, fg_color="transparent")
@@ -542,8 +536,7 @@ class MainWindow(ctk.CTk):
             "ai_prompt_style": "warm_short",
 
             "gemini_browser_mode": self.gemini_browser_mode_var.get(),
-            "gemini_web_enabled": self.gemini_web_enabled_var.get(),
-            "auto_apply_ai_comment": self.auto_apply_var.get()
+            "gemini_web_enabled": self.gemini_web_enabled_var.get()
         }
         self.config_service.save(cfg_data)
 
