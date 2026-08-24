@@ -59,18 +59,20 @@ class BrowserSession:
     단일 지속적 BrowserContext 기반의 세션 관리자
     - feed_page: 네이버 피드 목록 탐색 및 스크롤 전용
     - detail_page: 네이버 개별 게시글 상세 진입 및 공감/댓글 처리 전용
-    - gemini_page: Google Gemini 웹 자동화 전용 탭
+    - gemini_page: Google Gemini 웹 자동화 전용 탭 (기존 탭 지능형 탐색 및 재사용)
     """
     def __init__(
         self,
         headless: bool = False,
         user_data_dir: str = USER_DATA_DIR,
         viewport_width: int = 430,
-        viewport_height: int = 900
+        viewport_height: int = 900,
+        cdp_url: Optional[str] = None
     ):
         self.headless = headless
         self.user_data_dir = os.path.abspath(user_data_dir)
         self.viewport = {"width": viewport_width, "height": viewport_height}
+        self.cdp_url = cdp_url
 
         self.playwright: Optional[Playwright] = None
         self.context: Optional[BrowserContext] = None
@@ -79,6 +81,23 @@ class BrowserSession:
         self.gemini_page: Optional[Page] = None
 
     def start(self) -> BrowserContext:
+        # 1. CDP 원격 디버깅 연결 시도 (사용자가 실행 중인 실제 크롬에 직접 연결할 경우)
+        if self.cdp_url:
+            logger.log(f"[SESSION] 기존 실행 중인 크롬(CDP: {self.cdp_url})에 연결 중...")
+            try:
+                self.playwright = sync_playwright().start()
+                browser = self.playwright.chromium.connect_over_cdp(self.cdp_url)
+                if browser.contexts:
+                    self.context = browser.contexts[0]
+                else:
+                    self.context = browser.new_context()
+
+                self._init_pages_from_context()
+                return self.context
+            except Exception as e:
+                logger.log(f"[SESSION] CDP 연결 실패, 영구 프로필 모드로 전환합니다: {e}", "WARNING")
+
+        # 2. 영구 프로필 모드 (Persistent Context)
         if not ProfileLockManager.acquire(self.user_data_dir):
             raise RuntimeError(
                 f"프로필 디렉토리({self.user_data_dir})가 이미 다른 작업에서 사용 중입니다.\n"
@@ -103,19 +122,40 @@ class BrowserSession:
                 ]
             )
 
-            # 첫 번째 페이지: feed_page
-            if self.context.pages:
-                self.feed_page = self.context.pages[0]
-            else:
-                self.feed_page = self.context.new_page()
-
-            # 두 번째 페이지: detail_page
-            self.detail_page = self.context.new_page()
-
+            self._init_pages_from_context()
             return self.context
         except Exception as e:
             self.close()
             raise e
+
+    def _init_pages_from_context(self):
+        """컨텍스트 내에 기존 열려 있는 탭들을 지능적으로 분석하여 feed_page, gemini_page 등에 매핑"""
+        if not self.context:
+            return
+
+        pages = [p for p in self.context.pages if not p.is_closed()]
+
+        # 기존 탭 중 Gemini 탭이 있는지 확인
+        for p in pages:
+            try:
+                if "gemini.google.com" in (p.url or ""):
+                    logger.log("[SESSION] 기존 브라우저에 열려 있는 Gemini 탭을 감지하여 연동합니다.")
+                    self.gemini_page = p
+                    break
+            except Exception:
+                pass
+
+        # feed_page 매핑 (Gemini 탭이 아닌 첫 번째 탭)
+        remaining = [p for p in pages if p != self.gemini_page]
+        if remaining:
+            self.feed_page = remaining[0]
+            if len(remaining) > 1:
+                self.detail_page = remaining[1]
+            else:
+                self.detail_page = self.context.new_page()
+        else:
+            self.feed_page = self.context.new_page()
+            self.detail_page = self.context.new_page()
 
     def get_feed_page(self) -> Page:
         if not self.feed_page or self.feed_page.is_closed():
@@ -132,10 +172,33 @@ class BrowserSession:
         return self.detail_page
 
     def get_gemini_page(self) -> Page:
-        """Gemini 전용 탭 반환 (필요 시 생성)"""
-        if not self.gemini_page or self.gemini_page.is_closed():
-            if self.context:
-                self.gemini_page = self.context.new_page()
+        """기존에 열려 있는 Gemini 탭을 최우선 재사용하고, 없으면 신규 탭 생성"""
+        if self.gemini_page and not self.gemini_page.is_closed():
+            return self.gemini_page
+
+        if self.context:
+            # 1. 컨텍스트 내 열린 탭 전체 검색
+            for p in self.context.pages:
+                try:
+                    if not p.is_closed() and "gemini.google.com" in (p.url or ""):
+                        logger.log("[SESSION] 열려 있는 Gemini 탭을 발견하여 재사용합니다.")
+                        self.gemini_page = p
+                        return self.gemini_page
+                except Exception:
+                    pass
+
+            # 2. feed/detail이 아닌 유휴 탭이 이미 열려 있는지 검색
+            for p in self.context.pages:
+                try:
+                    if not p.is_closed() and p != self.feed_page and p != self.detail_page:
+                        self.gemini_page = p
+                        return self.gemini_page
+                except Exception:
+                    pass
+
+            # 3. 없으면 신규 탭 생성
+            self.gemini_page = self.context.new_page()
+
         return self.gemini_page
 
     def is_connected(self) -> bool:
