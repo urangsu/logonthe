@@ -3,7 +3,7 @@ from typing import Optional
 from playwright.sync_api import Page
 from app.models import (
     FeedPost, PostProcessResult, LikeProcessResult, CommentProcessResult,
-    UserAction, CommentSubmitState, LikeState, FailureReason
+    UserAction, CommentSubmitState, LikeState, FailureReason, FeedSourceType
 )
 from app.state import StateManager, FeedState
 from naver.interaction import LikeInteractionService, CommentInteractionService
@@ -12,6 +12,7 @@ from services.draft import DraftService
 from services.ai_prompt import AIPromptBuilder
 from services.clipboard_bridge import ClipboardCommandBridge
 from services.gemini_web import GeminiWebBridge
+from services.gemini_existing_chrome import ExistingChromeGeminiBridge
 from services.pacing import PacingService
 from browser.session import interruptible_wait
 from src.logger import logger
@@ -24,14 +25,15 @@ class StopRequestedException(Exception):
 class PostProcessor:
     def __init__(
         self,
+        config,
         like_enabled: bool = True,
         comment_enabled: bool = True,
         comment_template: str = "",
-        fixed_suffix: str = "",
         secret_comment: bool = False,
         ai_clipboard_enabled: bool = True,
         ai_context_max_chars: int = 700,
-        ai_prompt_style: str = "natural",
+        ai_prompt_style: str = "warm_short",
+        gemini_browser_mode: str = "existing_chrome_mac",
         gemini_web_enabled: bool = True,
         gemini_url: str = "https://gemini.google.com/app",
         auto_apply_ai_comment: bool = False,
@@ -41,14 +43,15 @@ class PostProcessor:
         state_manager: Optional[StateManager] = None,
         stop_event: Optional[threading.Event] = None
     ):
+        self.config = config
         self.like_enabled = like_enabled
         self.comment_enabled = comment_enabled
         self.comment_template = comment_template
-        self.fixed_suffix = fixed_suffix
         self.secret_comment = secret_comment
         self.ai_clipboard_enabled = ai_clipboard_enabled
         self.ai_context_max_chars = ai_context_max_chars
         self.ai_prompt_style = ai_prompt_style
+        self.gemini_browser_mode = gemini_browser_mode
         self.gemini_web_enabled = gemini_web_enabled
         self.gemini_url = gemini_url
         self.auto_apply_ai_comment = auto_apply_ai_comment
@@ -59,7 +62,7 @@ class PostProcessor:
         self.stop_event = stop_event
 
     def process(self, detail_page: Page, post: FeedPost) -> PostProcessResult:
-        """단일 FeedPost에 대해 상세 이동 -> 맥락추출 -> Gemini 자동댓글 -> 공감 -> 초안입력 -> 사용자 승인/등록 수행"""
+        """단일 FeedPost에 대해 상세 이동 -> (댓글 활성 시에만) Gemini 생성 -> 공감 -> 초안입력 -> 사용자 승인/등록 수행"""
         result = PostProcessResult(post=post)
 
         if self.stop_event and self.stop_event.is_set():
@@ -81,44 +84,59 @@ class PostProcessor:
         if self.stop_event and self.stop_event.is_set():
             raise StopRequestedException()
 
-        # 2. 제목/본문 맥락 추출 및 Gemini 프롬프트 준비
-        context = ContentContextExtractor.extract(detail_page, post, max_chars=self.ai_context_max_chars)
-        post.title = context.title or post.title
-        post.excerpt = context.excerpt
-
-        ai_prompt = ""
-        if self.ai_clipboard_enabled or self.gemini_web_enabled:
-            ai_prompt = AIPromptBuilder.build(post.title, post.excerpt, style=self.ai_prompt_style)
-
-        if self.state_mgr:
-            self.state_mgr.update(
-                current_post_title=post.title or "",
-                current_post_excerpt=post.excerpt or "",
-                current_ai_prompt=ai_prompt,
-                ai_clipboard_ready=bool(ai_prompt)
-            )
-
-        # 3. Gemini Web Bridge 자동 생성 (활성화된 경우)
+        # 2. 제목/본문 맥락 추출 (댓글 기능이 켜져 있을 때만 Gemini 프롬프트 준비)
         gemini_answer = None
-        if self.gemini_web_enabled and self.gemini_page and ai_prompt:
+        suffix = DraftService.resolve_suffix(post.source, self.config)
+
+        if self.comment_enabled:
+            context = ContentContextExtractor.extract(detail_page, post, max_chars=self.ai_context_max_chars)
+            post.title = context.title or post.title
+            post.excerpt = context.excerpt
+
+            ai_prompt = ""
+            if self.ai_clipboard_enabled or self.gemini_web_enabled:
+                ai_prompt = AIPromptBuilder.build(post.title, post.excerpt, style=self.ai_prompt_style)
+
             if self.state_mgr:
-                self.state_mgr.update(message="Gemini 웹으로 자동 댓글 생성 중...")
-
-            try:
-                gemini_answer = GeminiWebBridge.generate_comment(
-                    page=self.gemini_page,
-                    prompt=ai_prompt,
-                    gemini_url=self.gemini_url,
-                    stop_event=self.stop_event
+                self.state_mgr.update(
+                    current_post_title=post.title or "",
+                    current_post_excerpt=post.excerpt or "",
+                    current_ai_prompt=ai_prompt,
+                    ai_clipboard_ready=bool(ai_prompt)
                 )
-            except Exception as e:
-                logger.log(f"[GEMINI] 자동 생성 실패 (수동 모드 전환): {e}", "WARNING")
 
-            # 네이버 탭 포커스 복귀
-            try:
-                detail_page.bring_to_front()
-            except Exception:
-                pass
+            # 3. Gemini 댓글 자동 생성 (댓글 기능이 켜져 있고 Gemini 연동 활성 시)
+            if self.gemini_web_enabled and ai_prompt:
+                if self.state_mgr:
+                    self.state_mgr.update(message="Gemini로 자동 댓글 생성 중...")
+
+                # 3-1. 기존 Chrome 브라우저 탭 연동 모드 (기본값)
+                if self.gemini_browser_mode == "existing_chrome_mac":
+                    try:
+                        gemini_answer = ExistingChromeGeminiBridge.generate_comment(
+                            prompt=ai_prompt,
+                            stop_event=self.stop_event
+                        )
+                    except Exception as e:
+                        logger.log(f"[GEMINI/EXTERNAL] 기존 Chrome 연동 실패: {e}", "WARNING")
+
+                # 3-2. 프로그램 전용 Playwright 브라우저 탭 모드
+                elif self.gemini_browser_mode == "managed_playwright" and self.gemini_page:
+                    try:
+                        gemini_answer = GeminiWebBridge.generate_comment(
+                            page=self.gemini_page,
+                            prompt=ai_prompt,
+                            gemini_url=self.gemini_url,
+                            stop_event=self.stop_event
+                        )
+                    except Exception as e:
+                        logger.log(f"[GEMINI/MANAGED] 생성 실패: {e}", "WARNING")
+
+                # 네이버 상세 페이지로 포커스 복귀
+                try:
+                    detail_page.bring_to_front()
+                except Exception:
+                    pass
 
         if self.stop_event and self.stop_event.is_set():
             raise StopRequestedException()
@@ -152,11 +170,11 @@ class PostProcessor:
 
         # 5. 댓글 처리 (Human-in-the-loop)
         if self.comment_enabled:
-            # 자동 적용 옵션이 켜져 있고 Gemini 결과가 있으면 Gemini 답변을 기본 초안으로 사용
+            # 꼬리말 적용 및 초안 결정
             if self.auto_apply_ai_comment and gemini_answer:
-                draft_text = gemini_answer
+                draft_text = DraftService.compose_body_and_suffix(gemini_answer, suffix)
             else:
-                draft_text = DraftService.generate(self.comment_template, self.fixed_suffix)
+                draft_text = DraftService.generate(self.comment_template, suffix)
 
             if self.state_mgr:
                 self.state_mgr.update(new_state=FeedState.FILLING_DRAFT, message="댓글 초안 입력 중...")
@@ -177,7 +195,7 @@ class PostProcessor:
                 if action == UserAction.STOP:
                     raise StopRequestedException()
                 elif action == UserAction.SKIP:
-                    logger.log(f"  ⏭️ [COMMENT] 사용자가 해당 글을 건너뛰었습니다 (Esc).")
+                    logger.log(f"  ⏭️ [COMMENT] 사용자가 해당 글을 건너뛰었습니다.")
                     cmt_res.status = CommentSubmitState.SKIPPED
                     if self.state_mgr:
                         self.state_mgr.update(new_state=FeedState.SKIPPING, inc_skip=True)

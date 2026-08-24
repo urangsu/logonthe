@@ -5,3 +5,4 @@ from services.pacing import PacingService, PacingKind, PacingResult
 from services.ai_prompt import AIPromptBuilder
 from services.clipboard_bridge import ClipboardCommandBridge
 from services.gemini_web import GeminiWebBridge
+from services.gemini_existing_chrome import ExistingChromeGeminiBridge

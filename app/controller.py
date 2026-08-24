@@ -15,7 +15,7 @@ from src.logger import logger
 class FeedController:
     """
     모바일 피드 어시스턴트 메인 컨트롤러:
-    - 브라우저 세션 생명주기 관리 (feed_page, detail_page, gemini_page)
+    - 브라우저 세션 생명주기 관리
     - FeedSource를 통한 포스트 디스커버리
     - PostProcessor를 통한 개별 포스트 공감/Gemini댓글 생성/승인 처리
     - PacingService를 통한 안전한 작업 간격 및 휴지 제어
@@ -44,15 +44,15 @@ class FeedController:
         like_enabled = bool(self.config.get("like_enabled", True))
         comment_enabled = bool(self.config.get("comment_enabled", True))
         comment_template = str(self.config.get("comment_template", ""))
-        fixed_suffix = str(self.config.get("fixed_suffix", ""))
         secret_comment = bool(self.config.get("secret_comment", False))
         direct_urls = self.config.get("direct_urls", [])
 
         ai_clipboard_enabled = bool(self.config.get("ai_clipboard_enabled", True))
         ai_context_max_chars = int(self.config.get("ai_context_max_chars", 700))
-        ai_prompt_style = str(self.config.get("ai_prompt_style", "natural"))
+        ai_prompt_style = str(self.config.get("ai_prompt_style", "warm_short"))
 
-        # Gemini Web Bridge 설정
+        # Gemini Bridge 설정
+        gemini_browser_mode = str(self.config.get("gemini_browser_mode", "existing_chrome_mac"))
         gemini_web_enabled = bool(self.config.get("gemini_web_enabled", True))
         gemini_mode = str(self.config.get("gemini_mode", "new"))
         gemini_custom_url = str(self.config.get("gemini_custom_url", "https://gemini.google.com/app/0a1545681329aa0a?hl=ko"))
@@ -69,7 +69,9 @@ class FeedController:
             self.session.start()
             feed_page = self.session.get_feed_page()
             detail_page = self.session.get_detail_page()
-            gemini_page = self.session.get_gemini_page() if gemini_web_enabled else None
+
+            # managed_playwright 모드일 때만 Playwright 내부 gemini_page 준비
+            gemini_page = self.session.get_gemini_page() if (gemini_web_enabled and gemini_browser_mode == "managed_playwright") else None
 
             # 1. Feed Source 초기화
             self.state_mgr.update(new_state=FeedState.OPENING_SOURCE, message=f"피드 소스({source_type.value}) 접속 중...")
@@ -86,14 +88,15 @@ class FeedController:
 
             # 2. PostProcessor 초기화
             processor = PostProcessor(
+                config=self.config,
                 like_enabled=like_enabled,
                 comment_enabled=comment_enabled,
                 comment_template=comment_template,
-                fixed_suffix=fixed_suffix,
                 secret_comment=secret_comment,
                 ai_clipboard_enabled=ai_clipboard_enabled,
                 ai_context_max_chars=ai_context_max_chars,
                 ai_prompt_style=ai_prompt_style,
+                gemini_browser_mode=gemini_browser_mode,
                 gemini_web_enabled=gemini_web_enabled,
                 gemini_url=gemini_url,
                 auto_apply_ai_comment=auto_apply_ai_comment,

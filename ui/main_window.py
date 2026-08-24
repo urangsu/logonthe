@@ -13,6 +13,7 @@ from app.controller import FeedController
 from services.config import ConfigService
 from services.history import HistoryStore
 from services.clipboard_bridge import ClipboardCommandBridge
+from services.gemini_existing_chrome import ExistingChromeGeminiBridge
 from browser.session import ProfileLockManager, BrowserSession, USER_DATA_DIR
 from src.logger import logger
 
@@ -71,8 +72,8 @@ class MainWindow(ctk.CTk):
         super().__init__()
 
         self.title("네이버 피드 어시스턴트 (Naver Feed Assistant)")
-        self.geometry("1020x960")
-        self.minsize(900, 820)
+        self.geometry("1040x980")
+        self.minsize(920, 840)
 
         self.config_service = ConfigService()
         self.history_store = HistoryStore()
@@ -106,7 +107,7 @@ class MainWindow(ctk.CTk):
 
         subtitle_lbl = ctk.CTkLabel(
             header,
-            text="Human-in-the-loop 피드 순회 · 안전 공감 · Gemini Web Bridge 연동 · Enter 승인",
+            text="Human-in-the-loop 피드 순회 · 안전 공감 · 기존 Chrome Gemini 연동 · Enter 승인",
             font=ctk.CTkFont(size=12),
             text_color="#81C784"
         )
@@ -164,21 +165,34 @@ class MainWindow(ctk.CTk):
         self.max_items_entry.insert(0, str(self.config_service.get("max_feed_items", 20)))
         add_mac_clipboard_support(self.max_items_entry, self)
 
-        # Template & Suffix
+        # Template & Suffixes
         tmpl_frame = ctk.CTkFrame(cfg_card)
         tmpl_frame.pack(fill="x", padx=10, pady=4)
 
         ctk.CTkLabel(tmpl_frame, text="댓글 기본 문구 (Spintax {A|B} 지원):", font=ctk.CTkFont(weight="bold")).pack(anchor="w", padx=8, pady=(2, 0))
-        self.tmpl_textbox = ctk.CTkTextbox(tmpl_frame, height=36, font=ctk.CTkFont(size=12))
+        self.tmpl_textbox = ctk.CTkTextbox(tmpl_frame, height=34, font=ctk.CTkFont(size=12))
         self.tmpl_textbox.pack(fill="x", padx=8, pady=2)
-        self.tmpl_textbox.insert("1.0", self.config_service.get("comment_template", "{좋은|유익한|멋진} 포스팅 잘 읽었습니다!"))
+        self.tmpl_textbox.insert("1.0", self.config_service.get("comment_template", "{사진 분위기가 너무 좋네요|정말 좋아 보여요|보기만 해도 기분 좋아지는 글이네요} :)"))
         add_mac_clipboard_support(self.tmpl_textbox, self)
 
-        ctk.CTkLabel(tmpl_frame, text="고정 끝말 (문구 뒤에 항상 붙는 맺음말):", font=ctk.CTkFont(weight="bold")).pack(anchor="w", padx=8, pady=(2, 0))
-        self.suffix_entry = ctk.CTkEntry(tmpl_frame, font=ctk.CTkFont(size=12))
-        self.suffix_entry.pack(fill="x", padx=8, pady=(1, 4))
-        self.suffix_entry.insert(0, self.config_service.get("fixed_suffix", "오늘도 좋은 하루 보내세요 :)"))
-        add_mac_clipboard_support(self.suffix_entry, self)
+        # 꼬리말 설정 (일반 꼬리말 + 추천 전용 꼬리말)
+        suffix_box = ctk.CTkFrame(tmpl_frame, fg_color="transparent")
+        suffix_box.pack(fill="x", padx=8, pady=2)
+
+        # 일반 꼬리말
+        ctk.CTkLabel(suffix_box, text="일반 꼬리말 (이웃/직접):", font=ctk.CTkFont(size=12, weight="bold")).grid(row=0, column=0, sticky="w", padx=2, pady=2)
+        self.general_suffix_entry = ctk.CTkEntry(suffix_box, font=ctk.CTkFont(size=12), width=340)
+        self.general_suffix_entry.grid(row=0, column=1, sticky="w", padx=4, pady=2)
+        self.general_suffix_entry.insert(0, self.config_service.get("general_suffix", self.config_service.get("fixed_suffix", "오늘도 좋은 하루 보내세요 :)")))
+        add_mac_clipboard_support(self.general_suffix_entry, self)
+
+        # 추천 피드 전용 꼬리말
+        self.recom_suffix_chk_var = ctk.BooleanVar(value=self.config_service.get("recommendation_suffix_enabled", True))
+        ctk.CTkCheckBox(suffix_box, text="추천 피드 전용 꼬리말:", variable=self.recom_suffix_chk_var, font=ctk.CTkFont(size=12, weight="bold")).grid(row=1, column=0, sticky="w", padx=2, pady=2)
+        self.recom_suffix_entry = ctk.CTkEntry(suffix_box, font=ctk.CTkFont(size=12), width=340)
+        self.recom_suffix_entry.grid(row=1, column=1, sticky="w", padx=4, pady=2)
+        self.recom_suffix_entry.insert(0, self.config_service.get("recommendation_suffix", "시간 되실 때 제 블로그에도 편하게 한 번 놀러 와주세요 :)"))
+        add_mac_clipboard_support(self.recom_suffix_entry, self)
 
         # 3. Pacing Settings Frame
         pacing_frame = ctk.CTkFrame(self)
@@ -239,7 +253,7 @@ class MainWindow(ctk.CTk):
 
         self.gemini_web_enabled_var = ctk.BooleanVar(value=self.config_service.get("gemini_web_enabled", True))
         ctk.CTkCheckBox(
-            ai_head, text="🤖 Gemini Web Bridge (자동 프롬프트 전송 + 답변 실시간 추출)",
+            ai_head, text="🤖 Gemini 자동 댓글 생성 연동",
             variable=self.gemini_web_enabled_var, font=ctk.CTkFont(weight="bold"), text_color="#38BDF8"
         ).pack(side="left", padx=2)
 
@@ -249,28 +263,27 @@ class MainWindow(ctk.CTk):
             variable=self.auto_apply_var, font=ctk.CTkFont(size=12)
         ).pack(side="left", padx=15)
 
-        # Gemini Mode Frame (새 대화 vs 지정 대화)
+        # Gemini 브라우저 모드 선택 (기존 실행 중인 Chrome vs 프로그램 전용)
         ai_mode_frame = ctk.CTkFrame(ai_card, fg_color="transparent")
         ai_mode_frame.pack(fill="x", padx=10, pady=2)
 
-        self.gemini_mode_var = ctk.StringVar(value=self.config_service.get("gemini_mode", "new"))
-        ctk.CTkLabel(ai_mode_frame, text="Gemini 대화 모드:").pack(side="left", padx=4)
+        ctk.CTkLabel(ai_mode_frame, text="Gemini 브라우저:").pack(side="left", padx=4)
+        self.gemini_browser_mode_var = ctk.StringVar(value=self.config_service.get("gemini_browser_mode", "existing_chrome_mac"))
 
         ctk.CTkRadioButton(
-            ai_mode_frame, text="매 글 새 대화 (기본 권장)",
-            variable=self.gemini_mode_var, value="new", command=self._on_gemini_mode_change
+            ai_mode_frame, text="현재 켜져 있는 일반 Chrome 탭 (권장)",
+            variable=self.gemini_browser_mode_var, value="existing_chrome_mac"
         ).pack(side="left", padx=6)
 
         ctk.CTkRadioButton(
-            ai_mode_frame, text="지정 대화 계속 사용 (URL 지정)",
-            variable=self.gemini_mode_var, value="custom", command=self._on_gemini_mode_change
+            ai_mode_frame, text="프로그램 전용 브라우저",
+            variable=self.gemini_browser_mode_var, value="managed_playwright"
         ).pack(side="left", padx=6)
 
-        self.gemini_url_entry = ctk.CTkEntry(ai_mode_frame, font=ctk.CTkFont(size=11), width=280)
-        self.gemini_url_entry.insert(0, self.config_service.get("gemini_custom_url", "https://gemini.google.com/app/0a1545681329aa0a?hl=ko"))
-        add_mac_clipboard_support(self.gemini_url_entry, self)
-        if self.gemini_mode_var.get() == "custom":
-            self.gemini_url_entry.pack(side="left", padx=4)
+        ctk.CTkButton(
+            ai_mode_frame, text="🔍 기존 Chrome Gemini 탭 연결 테스트", height=26,
+            fg_color="#334155", hover_color="#475569", command=self._test_chrome_connection
+        ).pack(side="left", padx=8)
 
         # Live Context & Result Box
         ai_preview_box = ctk.CTkFrame(ai_card, fg_color="#0F172A")
@@ -369,17 +382,23 @@ class MainWindow(ctk.CTk):
         self.log_textbox.pack(fill="both", expand=True, padx=6, pady=2)
         add_mac_clipboard_support(self.log_textbox, self)
 
+    def _test_chrome_connection(self):
+        diag = ExistingChromeGeminiBridge.test_connection()
+        if diag.get("connected", False):
+            js_info = "활성화됨 (100% 자동 답변 추출 가능)" if diag.get("js_enabled") else "비활성화 (Chrome [보기] > [개발자] > [Apple Events의 자바스크립트 허용] 체크 권장)"
+            msg = f"✅ Google Chrome Gemini 탭 연결 성공!\n\n- 제목: {diag.get('title')}\n- URL: {diag.get('url')}\n- JS 자동 제어: {js_info}"
+            messagebox.showinfo("Gemini 탭 연결 성공", msg)
+            logger.log(f"✅ [GEMINI/TEST] 연결 성공: {diag.get('title')} ({diag.get('url')})")
+        else:
+            msg = f"❌ Gemini 탭 연결 실패:\n{diag.get('message')}\n\nGoogle Chrome에서 https://gemini.google.com 탭이 열려 있는지 확인해 주세요."
+            messagebox.showwarning("Gemini 탭 연결 실패", msg)
+            logger.log(f"❌ [GEMINI/TEST] 연결 실패: {diag.get('message')}", "WARNING")
+
     def _on_source_change(self):
         if self.source_var.get() == FeedSourceType.DIRECT.value:
             self.direct_url_frame.pack(fill="x", padx=10, pady=3)
         else:
             self.direct_url_frame.pack_forget()
-
-    def _on_gemini_mode_change(self):
-        if self.gemini_mode_var.get() == "custom":
-            self.gemini_url_entry.pack(side="left", padx=4)
-        else:
-            self.gemini_url_entry.pack_forget()
 
     def _update_ui_state(self, state: BotRuntimeState):
         self.status_msg_lbl.configure(text=f"상태: {state.message}")
@@ -440,7 +459,7 @@ class MainWindow(ctk.CTk):
                 ctx = session.start()
                 page = ctx.new_page()
                 page.goto("https://nid.naver.com/nidlogin.login")
-                logger.log("💡 네이버 및 Gemini(Google) 로그인을 완료하신 뒤 창을 닫아주시면 세션이 영구 저장됩니다.")
+                logger.log("💡 네이버 로그인을 완료하신 뒤 창을 닫아주시면 세션이 영구 저장됩니다.")
 
                 while True:
                     try:
@@ -501,7 +520,10 @@ class MainWindow(ctk.CTk):
             "like_enabled": self.like_enabled_var.get(),
             "comment_enabled": self.comment_enabled_var.get(),
             "comment_template": self.tmpl_textbox.get("1.0", "end-1c").strip(),
-            "fixed_suffix": self.suffix_entry.get().strip(),
+            "general_suffix": self.general_suffix_entry.get().strip(),
+            "fixed_suffix": self.general_suffix_entry.get().strip(),
+            "recommendation_suffix_enabled": self.recom_suffix_chk_var.get(),
+            "recommendation_suffix": self.recom_suffix_entry.get().strip(),
             "secret_comment": self.secret_comment_var.get(),
             "direct_urls": direct_urls,
 
@@ -517,11 +539,10 @@ class MainWindow(ctk.CTk):
 
             "ai_clipboard_enabled": True,
             "ai_context_max_chars": 700,
-            "ai_prompt_style": "natural",
+            "ai_prompt_style": "warm_short",
 
+            "gemini_browser_mode": self.gemini_browser_mode_var.get(),
             "gemini_web_enabled": self.gemini_web_enabled_var.get(),
-            "gemini_mode": self.gemini_mode_var.get(),
-            "gemini_custom_url": self.gemini_url_entry.get().strip(),
             "auto_apply_ai_comment": self.auto_apply_var.get()
         }
         self.config_service.save(cfg_data)
