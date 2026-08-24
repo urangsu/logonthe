@@ -15,9 +15,9 @@ from src.logger import logger
 class FeedController:
     """
     모바일 피드 어시스턴트 메인 컨트롤러:
-    - 브라우저 세션 생명주기 관리
+    - 브라우저 세션 생명주기 관리 (feed_page, detail_page, gemini_page)
     - FeedSource를 통한 포스트 디스커버리
-    - PostProcessor를 통한 개별 포스트 공감/댓글 승인 처리
+    - PostProcessor를 통한 개별 포스트 공감/Gemini댓글 생성/승인 처리
     - PacingService를 통한 안전한 작업 간격 및 휴지 제어
     - History 저장 및 UI State 업데이트
     """
@@ -52,6 +52,14 @@ class FeedController:
         ai_context_max_chars = int(self.config.get("ai_context_max_chars", 700))
         ai_prompt_style = str(self.config.get("ai_prompt_style", "natural"))
 
+        # Gemini Web Bridge 설정
+        gemini_web_enabled = bool(self.config.get("gemini_web_enabled", True))
+        gemini_mode = str(self.config.get("gemini_mode", "new"))
+        gemini_custom_url = str(self.config.get("gemini_custom_url", "https://gemini.google.com/app/0a1545681329aa0a?hl=ko"))
+        auto_apply_ai_comment = bool(self.config.get("auto_apply_ai_comment", False))
+
+        gemini_url = gemini_custom_url if (gemini_mode == "custom" and gemini_custom_url) else "https://gemini.google.com/app"
+
         self.state_mgr.reset(total_targets=max_items)
         self.state_mgr.update(new_state=FeedState.STARTING_BROWSER, message="브라우저 세션 시작 중...")
 
@@ -61,6 +69,7 @@ class FeedController:
             self.session.start()
             feed_page = self.session.get_feed_page()
             detail_page = self.session.get_detail_page()
+            gemini_page = self.session.get_gemini_page() if gemini_web_enabled else None
 
             # 1. Feed Source 초기화
             self.state_mgr.update(new_state=FeedState.OPENING_SOURCE, message=f"피드 소스({source_type.value}) 접속 중...")
@@ -85,6 +94,10 @@ class FeedController:
                 ai_clipboard_enabled=ai_clipboard_enabled,
                 ai_context_max_chars=ai_context_max_chars,
                 ai_prompt_style=ai_prompt_style,
+                gemini_web_enabled=gemini_web_enabled,
+                gemini_url=gemini_url,
+                auto_apply_ai_comment=auto_apply_ai_comment,
+                gemini_page=gemini_page,
                 pacing_service=self.pacing,
                 command_bridge=self.command_bridge,
                 state_manager=self.state_mgr,

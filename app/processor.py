@@ -11,6 +11,7 @@ from naver.content_extractor import ContentContextExtractor
 from services.draft import DraftService
 from services.ai_prompt import AIPromptBuilder
 from services.clipboard_bridge import ClipboardCommandBridge
+from services.gemini_web import GeminiWebBridge
 from services.pacing import PacingService
 from browser.session import interruptible_wait
 from src.logger import logger
@@ -31,6 +32,10 @@ class PostProcessor:
         ai_clipboard_enabled: bool = True,
         ai_context_max_chars: int = 700,
         ai_prompt_style: str = "natural",
+        gemini_web_enabled: bool = True,
+        gemini_url: str = "https://gemini.google.com/app",
+        auto_apply_ai_comment: bool = False,
+        gemini_page: Optional[Page] = None,
         pacing_service: Optional[PacingService] = None,
         command_bridge: Optional[ClipboardCommandBridge] = None,
         state_manager: Optional[StateManager] = None,
@@ -44,13 +49,17 @@ class PostProcessor:
         self.ai_clipboard_enabled = ai_clipboard_enabled
         self.ai_context_max_chars = ai_context_max_chars
         self.ai_prompt_style = ai_prompt_style
+        self.gemini_web_enabled = gemini_web_enabled
+        self.gemini_url = gemini_url
+        self.auto_apply_ai_comment = auto_apply_ai_comment
+        self.gemini_page = gemini_page
         self.pacing = pacing_service
         self.command_bridge = command_bridge
         self.state_mgr = state_manager
         self.stop_event = stop_event
 
     def process(self, detail_page: Page, post: FeedPost) -> PostProcessResult:
-        """단일 FeedPost에 대해 상세 이동 -> 맥락추출/AI프롬프트 -> 공감 확인/처리 -> 댓글 초안입력 -> 사용자 승인/등록 수행"""
+        """단일 FeedPost에 대해 상세 이동 -> 맥락추출 -> Gemini 자동댓글 -> 공감 -> 초안입력 -> 사용자 승인/등록 수행"""
         result = PostProcessResult(post=post)
 
         if self.stop_event and self.stop_event.is_set():
@@ -78,7 +87,7 @@ class PostProcessor:
         post.excerpt = context.excerpt
 
         ai_prompt = ""
-        if self.ai_clipboard_enabled:
+        if self.ai_clipboard_enabled or self.gemini_web_enabled:
             ai_prompt = AIPromptBuilder.build(post.title, post.excerpt, style=self.ai_prompt_style)
 
         if self.state_mgr:
@@ -89,13 +98,38 @@ class PostProcessor:
                 ai_clipboard_ready=bool(ai_prompt)
             )
 
+        # 3. Gemini Web Bridge 자동 생성 (활성화된 경우)
+        gemini_answer = None
+        if self.gemini_web_enabled and self.gemini_page and ai_prompt:
+            if self.state_mgr:
+                self.state_mgr.update(message="Gemini 웹으로 자동 댓글 생성 중...")
+
+            try:
+                gemini_answer = GeminiWebBridge.generate_comment(
+                    page=self.gemini_page,
+                    prompt=ai_prompt,
+                    gemini_url=self.gemini_url,
+                    stop_event=self.stop_event
+                )
+            except Exception as e:
+                logger.log(f"[GEMINI] 자동 생성 실패 (수동 모드 전환): {e}", "WARNING")
+
+            # 네이버 탭 포커스 복귀
+            try:
+                detail_page.bring_to_front()
+            except Exception:
+                pass
+
+        if self.stop_event and self.stop_event.is_set():
+            raise StopRequestedException()
+
         # 액션 사이 Pacing 대기
         if self.pacing:
             p_res = self.pacing.wait_action()
             if p_res.interrupted:
                 raise StopRequestedException()
 
-        # 3. 공감(하트) 처리
+        # 4. 공감(하트) 처리
         if self.like_enabled:
             if self.state_mgr:
                 self.state_mgr.update(new_state=FeedState.CHECKING_LIKE, message="공감 상태 확인 중...")
@@ -116,9 +150,13 @@ class PostProcessor:
             if p_res.interrupted:
                 raise StopRequestedException()
 
-        # 4. 댓글 처리 (Human-in-the-loop)
+        # 5. 댓글 처리 (Human-in-the-loop)
         if self.comment_enabled:
-            draft_text = DraftService.generate(self.comment_template, self.fixed_suffix)
+            # 자동 적용 옵션이 켜져 있고 Gemini 결과가 있으면 Gemini 답변을 기본 초안으로 사용
+            if self.auto_apply_ai_comment and gemini_answer:
+                draft_text = gemini_answer
+            else:
+                draft_text = DraftService.generate(self.comment_template, self.fixed_suffix)
 
             if self.state_mgr:
                 self.state_mgr.update(new_state=FeedState.FILLING_DRAFT, message="댓글 초안 입력 중...")
@@ -129,9 +167,7 @@ class PostProcessor:
 
             if cmt_res.status == CommentSubmitState.DRAFTED:
                 if self.state_mgr:
-                    msg = "댓글 입력 대기 중 (Enter=등록 / Shift+Enter=줄바꿈 / Esc=건너뛰기)"
-                    if self.ai_clipboard_enabled:
-                        msg = "댓글 확인 대기 중 (AI 프롬프트 복사/클립보드 적용 가능 / Enter=등록)"
+                    msg = "댓글 확인 대기 중 (수정 후 Enter=등록 / Cmd+V=Gemini댓글 붙여넣기 / Esc=건너뛰기)"
                     self.state_mgr.update(new_state=FeedState.WAITING_USER, message=msg)
 
                 action = CommentInteractionService.wait_for_user_action(

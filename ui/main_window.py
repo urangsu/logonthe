@@ -71,8 +71,8 @@ class MainWindow(ctk.CTk):
         super().__init__()
 
         self.title("네이버 피드 어시스턴트 (Naver Feed Assistant)")
-        self.geometry("1000x940")
-        self.minsize(880, 800)
+        self.geometry("1020x960")
+        self.minsize(900, 820)
 
         self.config_service = ConfigService()
         self.history_store = HistoryStore()
@@ -106,7 +106,7 @@ class MainWindow(ctk.CTk):
 
         subtitle_lbl = ctk.CTkLabel(
             header,
-            text="Human-in-the-loop 피드 순회 · 안전 공감 · Gemini 복붙 보조 · Enter 승인",
+            text="Human-in-the-loop 피드 순회 · 안전 공감 · Gemini Web Bridge 연동 · Enter 승인",
             font=ctk.CTkFont(size=12),
             text_color="#81C784"
         )
@@ -169,7 +169,7 @@ class MainWindow(ctk.CTk):
         tmpl_frame.pack(fill="x", padx=10, pady=4)
 
         ctk.CTkLabel(tmpl_frame, text="댓글 기본 문구 (Spintax {A|B} 지원):", font=ctk.CTkFont(weight="bold")).pack(anchor="w", padx=8, pady=(2, 0))
-        self.tmpl_textbox = ctk.CTkTextbox(tmpl_frame, height=38, font=ctk.CTkFont(size=12))
+        self.tmpl_textbox = ctk.CTkTextbox(tmpl_frame, height=36, font=ctk.CTkFont(size=12))
         self.tmpl_textbox.pack(fill="x", padx=8, pady=2)
         self.tmpl_textbox.insert("1.0", self.config_service.get("comment_template", "{좋은|유익한|멋진} 포스팅 잘 읽었습니다!"))
         add_mac_clipboard_support(self.tmpl_textbox, self)
@@ -182,10 +182,10 @@ class MainWindow(ctk.CTk):
 
         # 3. Pacing Settings Frame
         pacing_frame = ctk.CTkFrame(self)
-        pacing_frame.pack(fill="x", padx=15, pady=4)
+        pacing_frame.pack(fill="x", padx=15, pady=3)
 
         p_head = ctk.CTkFrame(pacing_frame, fg_color="transparent")
-        p_head.pack(fill="x", padx=8, pady=(4, 2))
+        p_head.pack(fill="x", padx=8, pady=(3, 1))
 
         self.pacing_enabled_var = ctk.BooleanVar(value=self.config_service.get("pacing_enabled", True))
         ctk.CTkCheckBox(p_head, text="⏱️ 작업 간격 조절(Pacing) 사용", variable=self.pacing_enabled_var, font=ctk.CTkFont(weight="bold")).pack(side="left", padx=4)
@@ -230,78 +230,108 @@ class MainWindow(ctk.CTk):
         self.pause_max_entry.insert(0, str(self.config_service.get("random_pause_max", 20.0)))
         ctk.CTkLabel(p_body, text="초)").pack(side="left", padx=1)
 
-        # 4. Gemini Clipboard Assistant Card
+        # 4. Gemini Web Bridge & Assistant Card
         ai_card = ctk.CTkFrame(self, border_width=1, border_color="#334155")
-        ai_card.pack(fill="x", padx=15, pady=4)
+        ai_card.pack(fill="x", padx=15, pady=3)
 
         ai_head = ctk.CTkFrame(ai_card, fg_color="transparent")
-        ai_head.pack(fill="x", padx=10, pady=(6, 2))
+        ai_head.pack(fill="x", padx=10, pady=(4, 2))
 
-        self.ai_enabled_var = ctk.BooleanVar(value=self.config_service.get("ai_clipboard_enabled", True))
+        self.gemini_web_enabled_var = ctk.BooleanVar(value=self.config_service.get("gemini_web_enabled", True))
         ctk.CTkCheckBox(
-            ai_head, text="✨ Gemini 복붙 도우미 사용 (본문 맥락 프롬프트 자동 빌드)",
-            variable=self.ai_enabled_var, font=ctk.CTkFont(weight="bold"), text_color="#38BDF8"
+            ai_head, text="🤖 Gemini Web Bridge (자동 프롬프트 전송 + 답변 실시간 추출)",
+            variable=self.gemini_web_enabled_var, font=ctk.CTkFont(weight="bold"), text_color="#38BDF8"
         ).pack(side="left", padx=2)
 
+        self.auto_apply_var = ctk.BooleanVar(value=self.config_service.get("auto_apply_ai_comment", False))
+        ctk.CTkCheckBox(
+            ai_head, text="생성 완료 시 댓글창에 자동 채우기",
+            variable=self.auto_apply_var, font=ctk.CTkFont(size=12)
+        ).pack(side="left", padx=15)
+
+        # Gemini Mode Frame (새 대화 vs 지정 대화)
+        ai_mode_frame = ctk.CTkFrame(ai_card, fg_color="transparent")
+        ai_mode_frame.pack(fill="x", padx=10, pady=2)
+
+        self.gemini_mode_var = ctk.StringVar(value=self.config_service.get("gemini_mode", "new"))
+        ctk.CTkLabel(ai_mode_frame, text="Gemini 대화 모드:").pack(side="left", padx=4)
+
+        ctk.CTkRadioButton(
+            ai_mode_frame, text="매 글 새 대화 (기본 권장)",
+            variable=self.gemini_mode_var, value="new", command=self._on_gemini_mode_change
+        ).pack(side="left", padx=6)
+
+        ctk.CTkRadioButton(
+            ai_mode_frame, text="지정 대화 계속 사용 (URL 지정)",
+            variable=self.gemini_mode_var, value="custom", command=self._on_gemini_mode_change
+        ).pack(side="left", padx=6)
+
+        self.gemini_url_entry = ctk.CTkEntry(ai_mode_frame, font=ctk.CTkFont(size=11), width=280)
+        self.gemini_url_entry.insert(0, self.config_service.get("gemini_custom_url", "https://gemini.google.com/app/0a1545681329aa0a?hl=ko"))
+        add_mac_clipboard_support(self.gemini_url_entry, self)
+        if self.gemini_mode_var.get() == "custom":
+            self.gemini_url_entry.pack(side="left", padx=4)
+
+        # Live Context & Result Box
         ai_preview_box = ctk.CTkFrame(ai_card, fg_color="#0F172A")
-        ai_preview_box.pack(fill="x", padx=10, pady=4)
+        ai_preview_box.pack(fill="x", padx=10, pady=3)
 
         self.ai_post_title_lbl = ctk.CTkLabel(
             ai_preview_box, text="현재 글: (작업 시작 시 자동 추출)",
             font=ctk.CTkFont(size=12, weight="bold"), anchor="w", text_color="#E2E8F0"
         )
-        self.ai_post_title_lbl.pack(fill="x", padx=8, pady=(4, 1))
+        self.ai_post_title_lbl.pack(fill="x", padx=8, pady=(3, 1))
 
         self.ai_post_excerpt_lbl = ctk.CTkLabel(
             ai_preview_box, text="본문 요약: (작업 시작 시 자동 추출)",
             font=ctk.CTkFont(size=11), anchor="w", text_color="#94A3B8"
         )
-        self.ai_post_excerpt_lbl.pack(fill="x", padx=8, pady=(1, 4))
+        self.ai_post_excerpt_lbl.pack(fill="x", padx=8, pady=(1, 3))
 
         ai_btn_bar = ctk.CTkFrame(ai_card, fg_color="transparent")
-        ai_btn_bar.pack(fill="x", padx=10, pady=(2, 6))
+        ai_btn_bar.pack(fill="x", padx=10, pady=(2, 4))
 
         self.btn_copy_prompt = ctk.CTkButton(
-            ai_btn_bar, text="📋 AI 프롬프트 복사", height=30, fg_color="#0284C7", hover_color="#0369A1",
+            ai_btn_bar, text="📋 AI 프롬프트 복사", height=28, fg_color="#0284C7", hover_color="#0369A1",
             command=self._copy_ai_prompt
         )
         self.btn_copy_prompt.pack(side="left", padx=3)
 
         ctk.CTkButton(
-            ai_btn_bar, text="🌐 Gemini 열기", height=30, fg_color="#4F46E5", hover_color="#4338CA",
+            ai_btn_bar, text="🌐 Gemini 열기", height=28, fg_color="#4F46E5", hover_color="#4338CA",
             command=lambda: webbrowser.open("https://gemini.google.com/")
         ).pack(side="left", padx=3)
 
         self.btn_apply_clipboard = ctk.CTkButton(
-            ai_btn_bar, text="📥 클립보드 댓글 적용", height=30, fg_color="#0D9488", hover_color="#0F766E",
+            ai_btn_bar, text="📥 클립보드 댓글 적용", height=28, fg_color="#0D9488", hover_color="#0F766E",
             command=self._apply_clipboard_comment
         )
         self.btn_apply_clipboard.pack(side="left", padx=3)
 
         # 5. UX Shortcut Guide
         guide_box = ctk.CTkFrame(self, fg_color="#1E293B", corner_radius=6)
-        guide_box.pack(fill="x", padx=15, pady=3)
+        guide_box.pack(fill="x", padx=15, pady=2)
 
-        guide_text = "⌨️ [댓글 승인] Enter = 최종 등록  |  Shift+Enter = 줄바꿈  |  Esc = 이번 글 건너뛰기"
-        ctk.CTkLabel(guide_box, text=guide_text, font=ctk.CTkFont(size=12, weight="bold"), text_color="#FBBF24").pack(pady=4)
+        guide_text = "⌨️ [댓글 승인] Enter = 최종 등록  |  Shift+Enter = 줄바꿈  |  Cmd+V = 클립보드 붙여넣기  |  Esc = 이번 글 건너뛰기"
+        ctk.CTkLabel(guide_box, text=guide_text, font=ctk.CTkFont(size=12, weight="bold"), text_color="#FBBF24").pack(pady=3)
 
         # 6. Status Dashboard Frame
         dash_frame = ctk.CTkFrame(self)
-        dash_frame.pack(fill="x", padx=15, pady=3)
+        dash_frame.pack(fill="x", padx=15, pady=2)
 
         self.status_msg_lbl = ctk.CTkLabel(dash_frame, text="대기 중", font=ctk.CTkFont(size=13, weight="bold"), text_color="#FBBF24")
-        self.status_msg_lbl.pack(side="left", padx=10, pady=5)
+        self.status_msg_lbl.pack(side="left", padx=10, pady=4)
 
         self.badge_lbl = ctk.CTkLabel(
             dash_frame,
             text="처리: 0/0 | ❤️ 공감: 0 | 💬 댓글: 0 | ⏭️ 건너뜀: 0",
             font=ctk.CTkFont(size=12)
         )
-        self.badge_lbl.pack(side="right", padx=10, pady=5)
+        self.badge_lbl.pack(side="right", padx=10, pady=4)
 
         # 7. Action Buttons
         btn_frame = ctk.CTkFrame(self, fg_color="transparent")
-        btn_frame.pack(fill="x", padx=15, pady=4)
+        btn_frame.pack(fill="x", padx=15, pady=3)
 
         self.btn_start = ctk.CTkButton(
             btn_frame, text="▶ 피드 작업 시작", fg_color="#16A34A", hover_color="#15803D", height=38,
@@ -336,7 +366,7 @@ class MainWindow(ctk.CTk):
         ctk.CTkButton(log_head, text="로그 지우기", width=70, height=20, command=self._clear_log).pack(side="right")
 
         self.log_textbox = ctk.CTkTextbox(log_frame, font=ctk.CTkFont(family="Courier", size=12))
-        self.log_textbox.pack(fill="both", expand=True, padx=6, pady=3)
+        self.log_textbox.pack(fill="both", expand=True, padx=6, pady=2)
         add_mac_clipboard_support(self.log_textbox, self)
 
     def _on_source_change(self):
@@ -344,6 +374,12 @@ class MainWindow(ctk.CTk):
             self.direct_url_frame.pack(fill="x", padx=10, pady=3)
         else:
             self.direct_url_frame.pack_forget()
+
+    def _on_gemini_mode_change(self):
+        if self.gemini_mode_var.get() == "custom":
+            self.gemini_url_entry.pack(side="left", padx=4)
+        else:
+            self.gemini_url_entry.pack_forget()
 
     def _update_ui_state(self, state: BotRuntimeState):
         self.status_msg_lbl.configure(text=f"상태: {state.message}")
@@ -404,7 +440,7 @@ class MainWindow(ctk.CTk):
                 ctx = session.start()
                 page = ctx.new_page()
                 page.goto("https://nid.naver.com/nidlogin.login")
-                logger.log("💡 브라우저에서 네이버 로그인 완료 후 창을 닫아주시면 세션이 저장됩니다.")
+                logger.log("💡 네이버 및 Gemini(Google) 로그인을 완료하신 뒤 창을 닫아주시면 세션이 영구 저장됩니다.")
 
                 while True:
                     try:
@@ -479,9 +515,14 @@ class MainWindow(ctk.CTk):
             "random_pause_min": p_min,
             "random_pause_max": p_max,
 
-            "ai_clipboard_enabled": self.ai_enabled_var.get(),
+            "ai_clipboard_enabled": True,
             "ai_context_max_chars": 700,
-            "ai_prompt_style": "natural"
+            "ai_prompt_style": "natural",
+
+            "gemini_web_enabled": self.gemini_web_enabled_var.get(),
+            "gemini_mode": self.gemini_mode_var.get(),
+            "gemini_custom_url": self.gemini_url_entry.get().strip(),
+            "auto_apply_ai_comment": self.auto_apply_var.get()
         }
         self.config_service.save(cfg_data)
 

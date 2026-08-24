@@ -56,9 +56,10 @@ class ProfileLockManager:
 
 class BrowserSession:
     """
-    단일 지속적 BrowserContext 기반의 모바일 세션 관리자
-    - feed_page: 피드 목록 탐색 및 스크롤 전용
-    - detail_page: 개별 게시글 상세 진입 및 공감/댓글 처리 전용
+    단일 지속적 BrowserContext 기반의 세션 관리자
+    - feed_page: 네이버 피드 목록 탐색 및 스크롤 전용
+    - detail_page: 네이버 개별 게시글 상세 진입 및 공감/댓글 처리 전용
+    - gemini_page: Google Gemini 웹 자동화 전용 탭
     """
     def __init__(
         self,
@@ -75,6 +76,7 @@ class BrowserSession:
         self.context: Optional[BrowserContext] = None
         self.feed_page: Optional[Page] = None
         self.detail_page: Optional[Page] = None
+        self.gemini_page: Optional[Page] = None
 
     def start(self) -> BrowserContext:
         if not ProfileLockManager.acquire(self.user_data_dir):
@@ -84,7 +86,7 @@ class BrowserSession:
             )
 
         os.makedirs(self.user_data_dir, exist_ok=True)
-        logger.log(f"[SESSION] 모바일 세션 브라우저 시작 중... (프로필: {self.user_data_dir})")
+        logger.log(f"[SESSION] 브라우저 세션 시작 중... (프로필: {self.user_data_dir})")
 
         try:
             self.playwright = sync_playwright().start()
@@ -101,13 +103,13 @@ class BrowserSession:
                 ]
             )
 
-            # 첫 번째 페이지를 feed_page로 지정
+            # 첫 번째 페이지: feed_page
             if self.context.pages:
                 self.feed_page = self.context.pages[0]
             else:
                 self.feed_page = self.context.new_page()
 
-            # 두 번째 페이지를 detail_page로 생성
+            # 두 번째 페이지: detail_page
             self.detail_page = self.context.new_page()
 
             return self.context
@@ -129,12 +131,25 @@ class BrowserSession:
                 self.detail_page = self.context.new_page()
         return self.detail_page
 
+    def get_gemini_page(self) -> Page:
+        """Gemini 전용 탭 반환 (필요 시 생성)"""
+        if not self.gemini_page or self.gemini_page.is_closed():
+            if self.context:
+                self.gemini_page = self.context.new_page()
+        return self.gemini_page
+
     def is_connected(self) -> bool:
         if not self.context or not self.context.browser:
             return self.context is not None
         return self.context.browser.is_connected()
 
     def close(self):
+        try:
+            if self.gemini_page and not self.gemini_page.is_closed():
+                self.gemini_page.close()
+        except Exception:
+            pass
+
         try:
             if self.detail_page and not self.detail_page.is_closed():
                 self.detail_page.close()
@@ -161,6 +176,7 @@ class BrowserSession:
 
         self.feed_page = None
         self.detail_page = None
+        self.gemini_page = None
         self.context = None
         self.playwright = None
 

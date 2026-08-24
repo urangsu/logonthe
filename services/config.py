@@ -28,11 +28,17 @@ DEFAULT_CONFIG_V2: Dict[str, Any] = {
     "random_pause_min": 8.0,
     "random_pause_max": 20.0,
 
-    # AI Gemini Clipboard Assistant
+    # AI Gemini Assistant
     "ai_clipboard_enabled": True,
     "ai_context_max_chars": 700,
     "ai_prompt_style": "natural",
-    "append_fixed_suffix_to_ai": False
+    "append_fixed_suffix_to_ai": False,
+
+    # Gemini Web Bridge (자동 웹 프롬프트/답변 추출)
+    "gemini_web_enabled": True,
+    "gemini_mode": "new",  # "new" (새 대화) 또는 "custom" (지정 대화 URL)
+    "gemini_custom_url": "https://gemini.google.com/app/0a1545681329aa0a?hl=ko",
+    "auto_apply_ai_comment": False
 }
 
 
