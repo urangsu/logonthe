@@ -2,8 +2,9 @@ import time
 import threading
 from typing import Optional, Tuple
 from playwright.sync_api import Page, Locator
-from app.models import LikeState, LikeProcessResult, CommentSubmitState, CommentProcessResult, UserAction, FailureReason
+from app.models import LikeState, LikeProcessResult, CommentSubmitState, CommentProcessResult, UserAction, FailureReason, WorkerCommandType
 from naver.resolver import MobileDOMResolver
+from services.clipboard_bridge import ClipboardCommandBridge
 from browser.session import interruptible_wait
 from src.logger import logger
 
@@ -20,7 +21,6 @@ class LikeInteractionService:
             if not btn or btn.count() == 0:
                 return LikeState.UNKNOWN
 
-            # Playwright Locator JavaScript evaluation
             state_str = btn.evaluate("""
                 el => {
                     const outer = el.outerHTML || '';
@@ -146,6 +146,30 @@ class CommentInteractionService:
             }
         """)
 
+    @staticmethod
+    def replace_editor_text(page: Page, text: str) -> bool:
+        """댓글 에디터 내용을 새로운 텍스트(클립보드/AI 결과)로 교체 및 포커스"""
+        if not text or not text.strip():
+            return False
+
+        try:
+            editor = MobileDOMResolver.get_comment_editor(page)
+            if editor.count() == 0:
+                return False
+
+            clean_t = text.strip()
+            # markdown code fence 제거 (``` 또는 ```text)
+            if clean_t.startswith("```"):
+                clean_t = clean_t.strip("`")
+                if clean_t.startswith("text") or clean_t.startswith("markdown"):
+                    clean_t = clean_t.split("\n", 1)[-1]
+
+            editor.fill(clean_t.strip())
+            editor.focus()
+            return True
+        except Exception:
+            return False
+
     @classmethod
     def prepare_comment_draft(
         cls,
@@ -193,7 +217,6 @@ class CommentInteractionService:
 
         try:
             editor.wait_for(state="visible", timeout=5000)
-            # Playwright locator.fill() on contenteditable
             editor.fill(draft_text)
 
             # 비밀댓글 설정
@@ -216,21 +239,42 @@ class CommentInteractionService:
             logger.log(f"  ❌ [COMMENT] 초안 입력 실패: {e}", "ERROR")
             return CommentProcessResult(status=CommentSubmitState.FAILED, error=str(e))
 
-    @staticmethod
-    def wait_for_user_action(page: Page, stop_event: Optional[threading.Event] = None) -> UserAction:
-        """사용자의 키보드 입력(Enter=SUBMIT, Esc=SKIP, Stop=STOP)을 비차단 폴링으로 대기"""
+    @classmethod
+    def wait_for_user_action(
+        cls,
+        page: Page,
+        stop_event: Optional[threading.Event] = None,
+        command_bridge: Optional[ClipboardCommandBridge] = None
+    ) -> UserAction:
+        """
+        사용자의 키보드 입력(Enter=SUBMIT, Esc=SKIP, Stop=STOP) 및
+        UI 스레드로부터의 비동기 명령(APPLY_CLIPBOARD_COMMENT)을 대기
+        """
         while True:
             if stop_event and stop_event.is_set():
                 return UserAction.STOP
 
+            # 1. UI 스레드로부터 전달된 클립보드 적용 명령 처리
+            if command_bridge:
+                cmd = command_bridge.pop_command()
+                if cmd and cmd.kind == WorkerCommandType.APPLY_CLIPBOARD_COMMENT:
+                    if cls.replace_editor_text(page, cmd.text):
+                        logger.log("  📋 [COMMENT] 클립보드 텍스트를 댓글 에디터에 적용했습니다.")
+
+            # 2. 키보드 액션 확인
             try:
                 action_str = page.evaluate("() => window.__NAVER_FEED_ACTION__")
                 if action_str == "SUBMIT":
-                    return UserAction.SUBMIT
+                    final_t = cls.read_final_text(page)
+                    # 빈 댓글 검증 (빈 상태에서 Enter 시 등록 금지)
+                    if not final_t:
+                        logger.log("  ⚠️ [COMMENT] 댓글 내용이 비어 있어 등록하지 않았습니다. 내용을 입력한 뒤 Enter를 눌러주세요.", "WARNING")
+                        page.evaluate("() => { window.__NAVER_FEED_ACTION__ = null; }")
+                    else:
+                        return UserAction.SUBMIT
                 elif action_str == "SKIP":
                     return UserAction.SKIP
             except Exception:
-                # 브라우저가 닫힌 경우 등
                 return UserAction.STOP
 
             time.sleep(0.1)
@@ -265,7 +309,7 @@ class CommentInteractionService:
             submit_btn.scroll_into_view_if_needed(timeout=1500)
             submit_btn.click(timeout=1500)
 
-            # 성공 신호 검증 (최대 3초간 폴링)
+            # 성공 신호 검증 (최대 3.5초간 폴링)
             verified = False
             start_t = time.time()
             while time.time() - start_t < 3.5:
@@ -275,12 +319,10 @@ class CommentInteractionService:
                 try:
                     editor = MobileDOMResolver.get_comment_editor(page)
                     txt = editor.inner_text().strip() if editor.count() > 0 else ""
-                    # 1. 에디터가 비워졌거나
                     if not txt or txt != final_text:
                         verified = True
                         break
 
-                    # 2. 본문 댓글 목록에 내가 쓴 텍스트가 등장했는지 확인
                     if page.locator(f".u_cbox_contents:has-text('{final_text[:15]}')").count() > 0:
                         verified = True
                         break

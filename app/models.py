@@ -1,6 +1,6 @@
 from dataclasses import dataclass, field
-from enum import Enum, auto
-from typing import Optional, Dict, Any
+from enum import Enum
+from typing import Optional
 
 
 class FeedSourceType(str, Enum):
@@ -45,6 +45,16 @@ class FailureReason(str, Enum):
     BROWSER_DISCONNECTED = "browser_disconnected"
 
 
+class WorkerCommandType(str, Enum):
+    APPLY_CLIPBOARD_COMMENT = "apply_clipboard_comment"
+
+
+@dataclass
+class WorkerCommand:
+    kind: WorkerCommandType
+    text: str = ""
+
+
 @dataclass
 class FeedPost:
     key: str  # Canonical identifier e.g. "blogId:logNo"
@@ -54,6 +64,7 @@ class FeedPost:
     log_no: Optional[str] = None
     title: Optional[str] = None
     author: Optional[str] = None
+    excerpt: Optional[str] = None
 
 
 @dataclass

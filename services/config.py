@@ -15,23 +15,35 @@ DEFAULT_CONFIG_V2: Dict[str, Any] = {
     "fixed_suffix": "오늘도 좋은 하루 보내세요 :)",
     "secret_comment": False,
     "browser_mode": "persistent",
-    "direct_urls": []
+    "direct_urls": [],
+
+    # Pacing (작업 간격 및 랜덤 휴지)
+    "pacing_enabled": True,
+    "action_delay_min": 1.0,
+    "action_delay_max": 2.5,
+    "next_post_delay_min": 2.0,
+    "next_post_delay_max": 5.0,
+    "random_pause_enabled": True,
+    "random_pause_chance": 0.10,
+    "random_pause_min": 8.0,
+    "random_pause_max": 20.0,
+
+    # AI Gemini Clipboard Assistant
+    "ai_clipboard_enabled": True,
+    "ai_context_max_chars": 700,
+    "ai_prompt_style": "natural",
+    "append_fixed_suffix_to_ai": False
 }
 
 
 def migrate_config_v1_to_v2(old_data: Dict[str, Any]) -> Dict[str, Any]:
-    """기존 v1 config 구조를 v2 schema로 안전하게 변환"""
+    """기존 config 구조를 v2 schema로 안전하게 변환"""
     cfg = DEFAULT_CONFIG_V2.copy()
-    
-    # 댓글 템플릿 마이그레이션
-    if "comment_template" in old_data:
-        cfg["comment_template"] = old_data["comment_template"]
-    if "secret_comment" in old_data:
-        cfg["secret_comment"] = bool(old_data["secret_comment"])
-    if "browser_mode" in old_data:
-        cfg["browser_mode"] = old_data["browser_mode"]
-    
-    # max_pages(페이지당 약 10개) -> max_feed_items 변환
+
+    for k, v in old_data.items():
+        if k in cfg:
+            cfg[k] = v
+
     if "max_pages" in old_data:
         try:
             cfg["max_feed_items"] = max(5, int(old_data["max_pages"]) * 10)

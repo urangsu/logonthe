@@ -7,6 +7,8 @@ from browser.session import BrowserSession, interruptible_wait
 from naver.sources import NeighborFeedSource, RecommendationFeedSource, DirectUrlSource, FeedSource
 from services.config import ConfigService
 from services.history import HistoryStore
+from services.pacing import PacingService
+from services.clipboard_bridge import ClipboardCommandBridge
 from src.logger import logger
 
 
@@ -16,6 +18,7 @@ class FeedController:
     - 브라우저 세션 생명주기 관리
     - FeedSource를 통한 포스트 디스커버리
     - PostProcessor를 통한 개별 포스트 공감/댓글 승인 처리
+    - PacingService를 통한 안전한 작업 간격 및 휴지 제어
     - History 저장 및 UI State 업데이트
     """
     def __init__(
@@ -23,13 +26,16 @@ class FeedController:
         config: ConfigService,
         history: HistoryStore,
         state_mgr: StateManager,
-        stop_event: threading.Event
+        stop_event: threading.Event,
+        command_bridge: Optional[ClipboardCommandBridge] = None
     ):
         self.config = config
         self.history = history
         self.state_mgr = state_mgr
         self.stop_event = stop_event
+        self.command_bridge = command_bridge
         self.session: Optional[BrowserSession] = None
+        self.pacing = PacingService(config=config, stop_event=stop_event, state_manager=state_mgr)
 
     def run(self):
         source_type_str = self.config.get("feed_source", FeedSourceType.NEIGHBOR.value)
@@ -41,6 +47,10 @@ class FeedController:
         fixed_suffix = str(self.config.get("fixed_suffix", ""))
         secret_comment = bool(self.config.get("secret_comment", False))
         direct_urls = self.config.get("direct_urls", [])
+
+        ai_clipboard_enabled = bool(self.config.get("ai_clipboard_enabled", True))
+        ai_context_max_chars = int(self.config.get("ai_context_max_chars", 700))
+        ai_prompt_style = str(self.config.get("ai_prompt_style", "natural"))
 
         self.state_mgr.reset(total_targets=max_items)
         self.state_mgr.update(new_state=FeedState.STARTING_BROWSER, message="브라우저 세션 시작 중...")
@@ -72,6 +82,11 @@ class FeedController:
                 comment_template=comment_template,
                 fixed_suffix=fixed_suffix,
                 secret_comment=secret_comment,
+                ai_clipboard_enabled=ai_clipboard_enabled,
+                ai_context_max_chars=ai_context_max_chars,
+                ai_prompt_style=ai_prompt_style,
+                pacing_service=self.pacing,
+                command_bridge=self.command_bridge,
                 state_manager=self.state_mgr,
                 stop_event=self.stop_event
             )
@@ -119,6 +134,15 @@ class FeedController:
                     self.history.record_result(result)
 
                     if self.stop_event.is_set():
+                        break
+
+                    # 4. 다음 글로 넘어가기 전 Pacing 대기 및 Random Pause
+                    p_res = self.pacing.wait_next_post()
+                    if p_res.interrupted or self.stop_event.is_set():
+                        break
+
+                    p_pause = self.pacing.maybe_pause()
+                    if p_pause and p_pause.interrupted or self.stop_event.is_set():
                         break
 
             if self.stop_event.is_set():

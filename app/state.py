@@ -20,6 +20,8 @@ class FeedState(Enum):
     RECORDING = auto()
     SKIPPING = auto()
     LOADING_MORE = auto()
+    PACING = auto()
+    PAUSED = auto()
     STOPPING = auto()
     STOPPED = auto()
     COMPLETED = auto()
@@ -36,6 +38,12 @@ class BotRuntimeState:
     comments_count: int = 0
     skipped_count: int = 0
     message: str = "대기 중"
+
+    # AI Context & Prompt state
+    current_post_title: str = ""
+    current_post_excerpt: str = ""
+    current_ai_prompt: str = ""
+    ai_clipboard_ready: bool = False
 
 
 class StateManager:
@@ -55,7 +63,11 @@ class StateManager:
         inc_comment: bool = False,
         inc_skip: bool = False,
         inc_processed: bool = False,
-        total_targets: Optional[int] = None
+        total_targets: Optional[int] = None,
+        current_post_title: Optional[str] = None,
+        current_post_excerpt: Optional[str] = None,
+        current_ai_prompt: Optional[str] = None,
+        ai_clipboard_ready: Optional[bool] = None
     ):
         if new_state is not None:
             self.state.current_state = new_state
@@ -73,6 +85,14 @@ class StateManager:
             self.state.processed_count += 1
         if total_targets is not None:
             self.state.total_target_count = total_targets
+        if current_post_title is not None:
+            self.state.current_post_title = current_post_title
+        if current_post_excerpt is not None:
+            self.state.current_post_excerpt = current_post_excerpt
+        if current_ai_prompt is not None:
+            self.state.current_ai_prompt = current_ai_prompt
+        if ai_clipboard_ready is not None:
+            self.state.ai_clipboard_ready = ai_clipboard_ready
 
         for cb in self._listeners:
             try:

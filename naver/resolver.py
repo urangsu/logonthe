@@ -13,14 +13,12 @@ class MobileDOMResolver:
     @staticmethod
     def get_feed_cards(page: Page) -> Locator:
         """피드 목록 내 게시글 카드 Locator 반환"""
-        # Primary: Semantic list item or card wrapper
         cards = page.locator("li[class*='card_wrapper'], li[class*='item__'], div[class*='card_wrapper']")
         return cards
 
     @staticmethod
     def get_card_post_link(card: Locator) -> Locator:
         """피드 카드 내부의 게시글 상세 링크 Locator 반환"""
-        # 1. data attribute / role / href
         link = card.locator("a[data-click-area*='card'], a[class*='link__'], a[href*='m.blog.naver.com/']").first
         return link
 
@@ -44,11 +42,51 @@ class MobileDOMResolver:
             pass
         return None
 
+    # --- 포스트 상세 본문 및 제목 추출 (Context Extraction) ---
+    @staticmethod
+    def get_post_title(page: Page) -> Optional[str]:
+        """게시글 상세 페이지의 제목 추출"""
+        title_selectors = [
+            ".se-title-text",
+            "div.tit_area h3",
+            "div.post_title",
+            "div.tit_area",
+            "h3.tit_h3",
+            "title"
+        ]
+        for sel in title_selectors:
+            loc = page.locator(sel).first
+            if loc.count() > 0:
+                try:
+                    txt = loc.inner_text().strip()
+                    if txt:
+                        return txt
+                except Exception:
+                    continue
+        return None
+
+    @staticmethod
+    def get_post_content_locator(page: Page) -> Locator:
+        """게시글 본문 컨테이너 Locator 반환"""
+        content_selectors = [
+            ".se-main-container",
+            ".se-viewer",
+            "#postViewArea",
+            ".post_ct",
+            ".post_view",
+            "div.post_content",
+            "article"
+        ]
+        for sel in content_selectors:
+            loc = page.locator(sel).first
+            if loc.count() > 0:
+                return loc
+        return page.locator(".se-viewer, #postViewArea").first
+
     # --- 포스트 상세 (Detail Page) 공감(하트) ---
     @staticmethod
     def get_like_button(page: Page) -> Locator:
         """게시글 상세 페이지의 공감(하트) 버튼 Locator 반환"""
-        # 1. button with text/role/data-click-area
         selectors = [
             "button.u_likeit_button",
             "button[data-click-area='pst.like']",
@@ -85,12 +123,10 @@ class MobileDOMResolver:
     @staticmethod
     def get_comment_editor(page: Page) -> Locator:
         """댓글 ContentEditable 입력창 Locator 반환"""
-        # 1. Stable ID
         loc = page.locator("#naverComment__write_textarea")
         if loc.count() > 0:
             return loc
 
-        # 2. contenteditable mention
         fallback = page.locator("div.u_cbox_text[contenteditable='true'], textarea.u_cbox_text").first
         return fallback
 

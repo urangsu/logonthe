@@ -1,10 +1,25 @@
 {
-  "feed_source": "recommendation",
+  "schema_version": 2,
+  "feed_source": "neighbor",
   "max_feed_items": 20,
-  "like_enabled": false,
+  "like_enabled": true,
   "comment_enabled": true,
   "comment_template": "{좋은|유익한|멋진} 포스팅 잘 읽었습니다!",
   "fixed_suffix": "오늘도 좋은 하루 보내세요 :)",
   "secret_comment": false,
-  "direct_urls": []
+  "browser_mode": "persistent",
+  "direct_urls": [],
+  "pacing_enabled": true,
+  "action_delay_min": 1.0,
+  "action_delay_max": 2.5,
+  "next_post_delay_min": 2.0,
+  "next_post_delay_max": 5.0,
+  "random_pause_enabled": true,
+  "random_pause_chance": 0.1,
+  "random_pause_min": 8.0,
+  "random_pause_max": 20.0,
+  "ai_clipboard_enabled": true,
+  "ai_context_max_chars": 700,
+  "ai_prompt_style": "natural",
+  "append_fixed_suffix_to_ai": false
 }
