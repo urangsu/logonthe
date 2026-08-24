@@ -9,6 +9,7 @@ from services.config import ConfigService
 from services.history import HistoryStore
 from services.pacing import PacingService
 from services.clipboard_bridge import ClipboardCommandBridge
+from services.blog_popularity import BlogPopularityService
 from src.logger import logger
 
 
@@ -59,6 +60,9 @@ class FeedController:
 
         gemini_url = gemini_custom_url if (gemini_mode == "custom" and gemini_custom_url) else "https://gemini.google.com/app"
 
+        # 세션 캐시 초기화
+        BlogPopularityService.clear_cache()
+
         self.state_mgr.reset(total_targets=max_items)
         self.state_mgr.update(new_state=FeedState.STARTING_BROWSER, message="브라우저 세션 시작 중...")
 
@@ -71,6 +75,11 @@ class FeedController:
 
             # managed_playwright 모드일 때만 Playwright 내부 gemini_page 준비
             gemini_page = self.session.get_gemini_page() if (gemini_web_enabled and gemini_browser_mode == "managed_playwright") else None
+
+            # 일 방문자 통계 가드 활성화 시 stats_page 준비
+            stats_page = None
+            if like_enabled and self.config.get("daily_visitor_guard_enabled", True):
+                stats_page = self.session.get_stats_page()
 
             # 1. Feed Source 초기화
             self.state_mgr.update(new_state=FeedState.OPENING_SOURCE, message=f"피드 소스({source_type.value}) 접속 중...")
@@ -85,7 +94,7 @@ class FeedController:
 
             source.open()
 
-            # 2. PostProcessor 초기화 (인터페이스 정확히 일치)
+            # 2. PostProcessor 초기화
             processor = PostProcessor(
                 config=self.config,
                 like_enabled=like_enabled,
@@ -99,6 +108,7 @@ class FeedController:
                 gemini_web_enabled=gemini_web_enabled,
                 gemini_url=gemini_url,
                 gemini_page=gemini_page,
+                stats_page=stats_page,
                 pacing_service=self.pacing,
                 command_bridge=self.command_bridge,
                 state_manager=self.state_mgr,

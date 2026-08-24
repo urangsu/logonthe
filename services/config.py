@@ -31,7 +31,14 @@ DEFAULT_CONFIG_V2: Dict[str, Any] = {
     "random_pause_min": 8.0,
     "random_pause_max": 20.0,
 
-    # AI Gemini Assistant
+    # Like Popularity Guard (공감수 999+ 및 일방문자 1만+ 가드)
+    "like_popularity_guard_enabled": True,
+    "like_count_skip_threshold": 999,
+    "daily_visitor_guard_enabled": True,
+    "daily_visitor_skip_threshold": 10000,
+    "daily_visitor_unknown_policy": "skip_like",
+
+    # AI Gemini & Human-Like Composer Assistant
     "ai_clipboard_enabled": True,
     "ai_context_max_chars": 700,
     "ai_prompt_style": "warm_short",
@@ -41,8 +48,7 @@ DEFAULT_CONFIG_V2: Dict[str, Any] = {
     "gemini_browser_mode": "existing_chrome_mac",
     "gemini_web_enabled": True,
     "gemini_mode": "new",
-    "gemini_custom_url": "https://gemini.google.com/app/0a1545681329aa0a?hl=ko",
-    "auto_apply_ai_comment": False
+    "gemini_custom_url": "https://gemini.google.com/app/0a1545681329aa0a?hl=ko"
 }
 
 

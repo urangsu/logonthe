@@ -10,6 +10,7 @@ from naver.interaction import LikeInteractionService, CommentInteractionService
 from naver.content_extractor import ContentContextExtractor
 from services.draft import DraftService
 from services.contextual_draft import ContextualDraftEngine
+from services.like_eligibility import LikeEligibilityService, LikeEligibility
 from services.ai_prompt import AIPromptBuilder
 from services.clipboard_bridge import ClipboardCommandBridge
 from services.gemini_web import GeminiWebBridge
@@ -38,6 +39,7 @@ class PostProcessor:
         gemini_web_enabled: bool = True,
         gemini_url: str = "https://gemini.google.com/app",
         gemini_page: Optional[Page] = None,
+        stats_page: Optional[Page] = None,
         pacing_service: Optional[PacingService] = None,
         command_bridge: Optional[ClipboardCommandBridge] = None,
         state_manager: Optional[StateManager] = None,
@@ -55,13 +57,14 @@ class PostProcessor:
         self.gemini_web_enabled = gemini_web_enabled
         self.gemini_url = gemini_url
         self.gemini_page = gemini_page
+        self.stats_page = stats_page
         self.pacing = pacing_service
         self.command_bridge = command_bridge
         self.state_mgr = state_manager
         self.stop_event = stop_event
 
     def process(self, detail_page: Page, post: FeedPost) -> PostProcessResult:
-        """단일 FeedPost에 대해 상세 이동 -> (댓글 활성 시) 3단계 초안 생성 -> 공감 -> 초안입력 -> 사용자 승인/등록 수행"""
+        """단일 FeedPost에 대해 상세 이동 -> (댓글 활성 시) 3단계 초안 생성 -> 공감(Popularity Guard 적용) -> 초안입력 -> 사용자 승인/등록 수행"""
         result = PostProcessResult(post=post)
 
         if self.stop_event and self.stop_event.is_set():
@@ -136,17 +139,18 @@ class PostProcessor:
                 except Exception:
                     pass
 
-            # 초안 결정 (Gemini -> Local Contextual Engine -> Spintax)
+            # 초안 결정 (Gemini -> Human-Like ContextualDraftEngine -> Spintax)
             if gemini_answer:
                 draft_text = DraftService.compose_body_and_suffix(gemini_answer, suffix)
                 draft_source_label = "Gemini 생성"
             else:
-                # [Tier 2] 로컬 문맥 분석 엔진 (ContextualDraftEngine)
+                # [Tier 2] 로컬 인간형 문맥 분석 엔진 (Human-Like Composer v2.1)
                 local_res = ContextualDraftEngine.generate(post.title or "", post.excerpt or "")
                 if local_res and local_res.body:
                     draft_text = DraftService.compose_body_and_suffix(local_res.body, suffix)
-                    draft_source_label = f"로컬 분석({local_res.category})"
-                    logger.log(f"💡 [DRAFT] 로컬 문맥 분석 초안 생성 ({local_res.category} / '{local_res.subject}'): \"{local_res.body}\"")
+                    intent_tag = f"/{local_res.intent.value}" if local_res.intent.value != "none" else ""
+                    draft_source_label = f"로컬 분석({local_res.category}{intent_tag})"
+                    logger.log(f"💡 [DRAFT] 로컬 맞춤형 초안 생성 ({local_res.category}{intent_tag} / '{local_res.subject}'): \"{local_res.body}\"")
                 else:
                     # [Tier 3] Spintax Fallback
                     draft_text = DraftService.generate(self.comment_template, suffix)
@@ -161,17 +165,40 @@ class PostProcessor:
             if p_res.interrupted:
                 raise StopRequestedException()
 
-        # 3. 공감(하트) 처리
+        # 3. 공감(하트) 처리 (Popularity Guard: 공감수 999+ 및 일방문자 1만+ 검사)
         if self.like_enabled:
             if self.state_mgr:
-                self.state_mgr.update(new_state=FeedState.CHECKING_LIKE, message="공감 상태 확인 중...")
+                self.state_mgr.update(new_state=FeedState.CHECKING_LIKE, message="공감 조건 및 인기 가드 확인 중...")
 
-            like_res = LikeInteractionService.safe_process_like(detail_page, self.stop_event)
-            result.like_result = like_res
+            # 3-1. 공감 적격성(Eligibility) 검사
+            elig = LikeEligibilityService.evaluate(
+                detail_page=detail_page,
+                stats_page=self.stats_page,
+                post=post,
+                config=self.config,
+                stop_event=self.stop_event
+            )
 
-            if like_res.action_taken and like_res.state_after == LikeState.LIKED:
-                if self.state_mgr:
-                    self.state_mgr.update(inc_like=True)
+            if not elig.eligible:
+                # 가드 조건에 의해 공감 스킵 (오류가 아니며 정상 진행)
+                result.like_result = LikeProcessResult(
+                    state_before=LikeState.UNKNOWN,
+                    action_taken=False,
+                    state_after=LikeState.UNKNOWN,
+                    eligibility_reason=elig.reason,
+                    like_count=elig.like_count,
+                    daily_visitors=elig.daily_visitors
+                )
+            else:
+                # 3-2. 적격 글에 대해 안전한 공감 처리
+                like_res = LikeInteractionService.safe_process_like(detail_page, self.stop_event)
+                like_res.like_count = elig.like_count
+                like_res.daily_visitors = elig.daily_visitors
+                result.like_result = like_res
+
+                if like_res.action_taken and like_res.state_after == LikeState.LIKED:
+                    if self.state_mgr:
+                        self.state_mgr.update(inc_like=True)
 
         if self.stop_event and self.stop_event.is_set():
             raise StopRequestedException()

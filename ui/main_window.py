@@ -72,8 +72,8 @@ class MainWindow(ctk.CTk):
         super().__init__()
 
         self.title("네이버 피드 어시스턴트 (Naver Feed Assistant)")
-        self.geometry("1040x980")
-        self.minsize(920, 840)
+        self.geometry("1060x990")
+        self.minsize(940, 860)
 
         self.config_service = ConfigService()
         self.history_store = HistoryStore()
@@ -107,7 +107,7 @@ class MainWindow(ctk.CTk):
 
         subtitle_lbl = ctk.CTkLabel(
             header,
-            text="Human-in-the-loop 피드 순회 · 안전 공감 · 기존 Chrome Gemini 연동 · Enter 승인",
+            text="Human-in-the-loop 피드 순회 · 인기 가드(공감999+/방문자1만+) · 로컬 맞춤 댓글 · Enter 승인",
             font=ctk.CTkFont(size=12),
             text_color="#81C784"
         )
@@ -115,11 +115,11 @@ class MainWindow(ctk.CTk):
 
         # 2. Main Config Card
         cfg_card = ctk.CTkFrame(self)
-        cfg_card.pack(fill="x", padx=15, pady=4)
+        cfg_card.pack(fill="x", padx=15, pady=3)
 
         # Source Selection
         src_frame = ctk.CTkFrame(cfg_card, fg_color="transparent")
-        src_frame.pack(fill="x", padx=10, pady=(6, 2))
+        src_frame.pack(fill="x", padx=10, pady=(4, 2))
 
         ctk.CTkLabel(src_frame, text="피드 대상:", font=ctk.CTkFont(weight="bold")).grid(row=0, column=0, padx=4, pady=2, sticky="w")
         self.source_var = ctk.StringVar(value=self.config_service.get("feed_source", FeedSourceType.NEIGHBOR.value))
@@ -165,12 +165,51 @@ class MainWindow(ctk.CTk):
         self.max_items_entry.insert(0, str(self.config_service.get("max_feed_items", 20)))
         add_mac_clipboard_support(self.max_items_entry, self)
 
-        # Template & Suffixes
-        tmpl_frame = ctk.CTkFrame(cfg_card)
-        tmpl_frame.pack(fill="x", padx=10, pady=4)
+        # 3. Like Popularity Guard Frame (공감수 999+ 및 일 방문자 1만+ 가드)
+        guard_frame = ctk.CTkFrame(self, border_width=1, border_color="#334155")
+        guard_frame.pack(fill="x", padx=15, pady=3)
+
+        g_head = ctk.CTkFrame(guard_frame, fg_color="transparent")
+        g_head.pack(fill="x", padx=8, pady=(3, 1))
+
+        self.like_guard_chk_var = ctk.BooleanVar(value=self.config_service.get("like_popularity_guard_enabled", True))
+        ctk.CTkCheckBox(
+            g_head, text="🛡️ 공감수 높은 글 제외 (기준: ",
+            variable=self.like_guard_chk_var, font=ctk.CTkFont(weight="bold"), text_color="#F472B6"
+        ).pack(side="left", padx=2)
+
+        self.like_thresh_entry = ctk.CTkEntry(g_head, width=42)
+        self.like_thresh_entry.pack(side="left", padx=1)
+        self.like_thresh_entry.insert(0, str(self.config_service.get("like_count_skip_threshold", 999)))
+        add_mac_clipboard_support(self.like_thresh_entry, self)
+        ctk.CTkLabel(g_head, text="개 이상 시 공감 건너뜀)").pack(side="left", padx=(1, 15))
+
+        self.visitor_guard_chk_var = ctk.BooleanVar(value=self.config_service.get("daily_visitor_guard_enabled", True))
+        ctk.CTkCheckBox(
+            g_head, text="🛡️ 일 방문자 많은 블로그 제외 (기준: ",
+            variable=self.visitor_guard_chk_var, font=ctk.CTkFont(weight="bold"), text_color="#F472B6"
+        ).pack(side="left", padx=2)
+
+        self.visitor_thresh_entry = ctk.CTkEntry(g_head, width=55)
+        self.visitor_thresh_entry.pack(side="left", padx=1)
+        self.visitor_thresh_entry.insert(0, str(self.config_service.get("daily_visitor_skip_threshold", 10000)))
+        add_mac_clipboard_support(self.visitor_thresh_entry, self)
+        ctk.CTkLabel(g_head, text="명 초과 시 공감 건너뜀)").pack(side="left", padx=1)
+
+        # 방문자 확인 불가 시 정책
+        g_sub = ctk.CTkFrame(guard_frame, fg_color="transparent")
+        g_sub.pack(fill="x", padx=8, pady=(0, 3))
+        ctk.CTkLabel(g_sub, text="방문자 수 확인 불가 시:", font=ctk.CTkFont(size=11)).pack(side="left", padx=4)
+        self.unknown_policy_var = ctk.StringVar(value=self.config_service.get("daily_visitor_unknown_policy", "skip_like"))
+        ctk.CTkRadioButton(g_sub, text="공감 안 함 (안전 권장)", variable=self.unknown_policy_var, value="skip_like", font=ctk.CTkFont(size=11)).pack(side="left", padx=4)
+        ctk.CTkRadioButton(g_sub, text="공감 진행", variable=self.unknown_policy_var, value="continue", font=ctk.CTkFont(size=11)).pack(side="left", padx=4)
+
+        # 4. Template & Suffixes Frame
+        tmpl_frame = ctk.CTkFrame(self)
+        tmpl_frame.pack(fill="x", padx=15, pady=3)
 
         ctk.CTkLabel(tmpl_frame, text="댓글 기본 문구 (Spintax {A|B} 지원):", font=ctk.CTkFont(weight="bold")).pack(anchor="w", padx=8, pady=(2, 0))
-        self.tmpl_textbox = ctk.CTkTextbox(tmpl_frame, height=34, font=ctk.CTkFont(size=12))
+        self.tmpl_textbox = ctk.CTkTextbox(tmpl_frame, height=32, font=ctk.CTkFont(size=12))
         self.tmpl_textbox.pack(fill="x", padx=8, pady=2)
         self.tmpl_textbox.insert("1.0", self.config_service.get("comment_template", "{사진 분위기가 너무 좋네요|정말 좋아 보여요|보기만 해도 기분 좋아지는 글이네요} :)"))
         add_mac_clipboard_support(self.tmpl_textbox, self)
@@ -179,14 +218,12 @@ class MainWindow(ctk.CTk):
         suffix_box = ctk.CTkFrame(tmpl_frame, fg_color="transparent")
         suffix_box.pack(fill="x", padx=8, pady=2)
 
-        # 일반 꼬리말
         ctk.CTkLabel(suffix_box, text="일반 꼬리말 (이웃/직접):", font=ctk.CTkFont(size=12, weight="bold")).grid(row=0, column=0, sticky="w", padx=2, pady=2)
         self.general_suffix_entry = ctk.CTkEntry(suffix_box, font=ctk.CTkFont(size=12), width=340)
         self.general_suffix_entry.grid(row=0, column=1, sticky="w", padx=4, pady=2)
         self.general_suffix_entry.insert(0, self.config_service.get("general_suffix", self.config_service.get("fixed_suffix", "오늘도 좋은 하루 보내세요 :)")))
         add_mac_clipboard_support(self.general_suffix_entry, self)
 
-        # 추천 피드 전용 꼬리말
         self.recom_suffix_chk_var = ctk.BooleanVar(value=self.config_service.get("recommendation_suffix_enabled", True))
         ctk.CTkCheckBox(suffix_box, text="추천 피드 전용 꼬리말:", variable=self.recom_suffix_chk_var, font=ctk.CTkFont(size=12, weight="bold")).grid(row=1, column=0, sticky="w", padx=2, pady=2)
         self.recom_suffix_entry = ctk.CTkEntry(suffix_box, font=ctk.CTkFont(size=12), width=340)
@@ -194,12 +231,12 @@ class MainWindow(ctk.CTk):
         self.recom_suffix_entry.insert(0, self.config_service.get("recommendation_suffix", "시간 되실 때 제 블로그에도 편하게 한 번 놀러 와주세요 :)"))
         add_mac_clipboard_support(self.recom_suffix_entry, self)
 
-        # 3. Pacing Settings Frame
+        # 5. Pacing Settings Frame
         pacing_frame = ctk.CTkFrame(self)
-        pacing_frame.pack(fill="x", padx=15, pady=3)
+        pacing_frame.pack(fill="x", padx=15, pady=2)
 
         p_head = ctk.CTkFrame(pacing_frame, fg_color="transparent")
-        p_head.pack(fill="x", padx=8, pady=(3, 1))
+        p_head.pack(fill="x", padx=8, pady=(2, 1))
 
         self.pacing_enabled_var = ctk.BooleanVar(value=self.config_service.get("pacing_enabled", True))
         ctk.CTkCheckBox(p_head, text="⏱️ 작업 간격 조절(Pacing) 사용", variable=self.pacing_enabled_var, font=ctk.CTkFont(weight="bold")).pack(side="left", padx=4)
@@ -208,7 +245,7 @@ class MainWindow(ctk.CTk):
         ctk.CTkCheckBox(p_head, text="☕ 랜덤 휴지(Pause) 활성화", variable=self.random_pause_var, font=ctk.CTkFont(weight="bold")).pack(side="left", padx=15)
 
         p_body = ctk.CTkFrame(pacing_frame, fg_color="transparent")
-        p_body.pack(fill="x", padx=8, pady=(0, 4))
+        p_body.pack(fill="x", padx=8, pady=(0, 2))
 
         ctk.CTkLabel(p_body, text="동작 대기:").pack(side="left", padx=2)
         self.action_min_entry = ctk.CTkEntry(p_body, width=38)
@@ -244,22 +281,21 @@ class MainWindow(ctk.CTk):
         self.pause_max_entry.insert(0, str(self.config_service.get("random_pause_max", 20.0)))
         ctk.CTkLabel(p_body, text="초)").pack(side="left", padx=1)
 
-        # 4. Gemini Web Bridge & Assistant Card
+        # 6. Gemini Web Bridge & Assistant Card
         ai_card = ctk.CTkFrame(self, border_width=1, border_color="#334155")
-        ai_card.pack(fill="x", padx=15, pady=3)
+        ai_card.pack(fill="x", padx=15, pady=2)
 
         ai_head = ctk.CTkFrame(ai_card, fg_color="transparent")
-        ai_head.pack(fill="x", padx=10, pady=(4, 2))
+        ai_head.pack(fill="x", padx=10, pady=(3, 1))
 
         self.gemini_web_enabled_var = ctk.BooleanVar(value=self.config_service.get("gemini_web_enabled", True))
         ctk.CTkCheckBox(
-            ai_head, text="🤖 Gemini 자동 댓글 생성 연동 (실패 시 로컬 문맥 분석 엔진으로 자동 전환)",
+            ai_head, text="🤖 Gemini 자동 댓글 연동 (실패 시 로컬 Human-Like Composer v2.1로 자동 전환)",
             variable=self.gemini_web_enabled_var, font=ctk.CTkFont(weight="bold"), text_color="#38BDF8"
         ).pack(side="left", padx=2)
 
-        # Gemini 브라우저 모드 선택 (기존 실행 중인 Chrome vs 프로그램 전용)
         ai_mode_frame = ctk.CTkFrame(ai_card, fg_color="transparent")
-        ai_mode_frame.pack(fill="x", padx=10, pady=2)
+        ai_mode_frame.pack(fill="x", padx=10, pady=1)
 
         ctk.CTkLabel(ai_mode_frame, text="Gemini 브라우저:").pack(side="left", padx=4)
         self.gemini_browser_mode_var = ctk.StringVar(value=self.config_service.get("gemini_browser_mode", "existing_chrome_mac"))
@@ -275,54 +311,54 @@ class MainWindow(ctk.CTk):
         ).pack(side="left", padx=6)
 
         ctk.CTkButton(
-            ai_mode_frame, text="🔍 기존 Chrome Gemini 탭 연결 테스트", height=26,
+            ai_mode_frame, text="🔍 기존 Chrome Gemini 탭 연결 테스트", height=24,
             fg_color="#334155", hover_color="#475569", command=self._test_chrome_connection
         ).pack(side="left", padx=8)
 
-        # Live Context & Result Box
+        # Live Context Box
         ai_preview_box = ctk.CTkFrame(ai_card, fg_color="#0F172A")
-        ai_preview_box.pack(fill="x", padx=10, pady=3)
+        ai_preview_box.pack(fill="x", padx=10, pady=2)
 
         self.ai_post_title_lbl = ctk.CTkLabel(
             ai_preview_box, text="현재 글: (작업 시작 시 자동 추출)",
             font=ctk.CTkFont(size=12, weight="bold"), anchor="w", text_color="#E2E8F0"
         )
-        self.ai_post_title_lbl.pack(fill="x", padx=8, pady=(3, 1))
+        self.ai_post_title_lbl.pack(fill="x", padx=8, pady=(2, 1))
 
         self.ai_post_excerpt_lbl = ctk.CTkLabel(
             ai_preview_box, text="본문 요약: (작업 시작 시 자동 추출)",
             font=ctk.CTkFont(size=11), anchor="w", text_color="#94A3B8"
         )
-        self.ai_post_excerpt_lbl.pack(fill="x", padx=8, pady=(1, 3))
+        self.ai_post_excerpt_lbl.pack(fill="x", padx=8, pady=(1, 2))
 
         ai_btn_bar = ctk.CTkFrame(ai_card, fg_color="transparent")
-        ai_btn_bar.pack(fill="x", padx=10, pady=(2, 4))
+        ai_btn_bar.pack(fill="x", padx=10, pady=(1, 3))
 
         self.btn_copy_prompt = ctk.CTkButton(
-            ai_btn_bar, text="📋 AI 프롬프트 복사", height=28, fg_color="#0284C7", hover_color="#0369A1",
+            ai_btn_bar, text="📋 AI 프롬프트 복사", height=26, fg_color="#0284C7", hover_color="#0369A1",
             command=self._copy_ai_prompt
         )
         self.btn_copy_prompt.pack(side="left", padx=3)
 
         ctk.CTkButton(
-            ai_btn_bar, text="🌐 Gemini 열기", height=28, fg_color="#4F46E5", hover_color="#4338CA",
+            ai_btn_bar, text="🌐 Gemini 열기", height=26, fg_color="#4F46E5", hover_color="#4338CA",
             command=lambda: webbrowser.open("https://gemini.google.com/")
         ).pack(side="left", padx=3)
 
         self.btn_apply_clipboard = ctk.CTkButton(
-            ai_btn_bar, text="📥 클립보드 댓글 적용", height=28, fg_color="#0D9488", hover_color="#0F766E",
+            ai_btn_bar, text="📥 클립보드 댓글 적용", height=26, fg_color="#0D9488", hover_color="#0F766E",
             command=self._apply_clipboard_comment
         )
         self.btn_apply_clipboard.pack(side="left", padx=3)
 
-        # 5. UX Shortcut Guide
+        # 7. UX Shortcut Guide
         guide_box = ctk.CTkFrame(self, fg_color="#1E293B", corner_radius=6)
         guide_box.pack(fill="x", padx=15, pady=2)
 
         guide_text = "⌨️ [댓글 승인] Enter = 최종 등록  |  Shift+Enter = 줄바꿈  |  Cmd+V = 클립보드 붙여넣기  |  Esc = 이번 글 건너뛰기"
         ctk.CTkLabel(guide_box, text=guide_text, font=ctk.CTkFont(size=12, weight="bold"), text_color="#FBBF24").pack(pady=3)
 
-        # 6. Status Dashboard Frame
+        # 8. Status Dashboard Frame
         dash_frame = ctk.CTkFrame(self)
         dash_frame.pack(fill="x", padx=15, pady=2)
 
@@ -336,9 +372,9 @@ class MainWindow(ctk.CTk):
         )
         self.badge_lbl.pack(side="right", padx=10, pady=4)
 
-        # 7. Action Buttons
+        # 9. Action Buttons
         btn_frame = ctk.CTkFrame(self, fg_color="transparent")
-        btn_frame.pack(fill="x", padx=15, pady=3)
+        btn_frame.pack(fill="x", padx=15, pady=2)
 
         self.btn_start = ctk.CTkButton(
             btn_frame, text="▶ 피드 작업 시작", fg_color="#16A34A", hover_color="#15803D", height=38,
@@ -363,9 +399,9 @@ class MainWindow(ctk.CTk):
             command=self._reset_lock
         ).pack(side="left", padx=3)
 
-        # 8. Log Console
+        # 10. Log Console
         log_frame = ctk.CTkFrame(self)
-        log_frame.pack(fill="both", expand=True, padx=15, pady=(2, 10))
+        log_frame.pack(fill="both", expand=True, padx=15, pady=(2, 8))
 
         log_head = ctk.CTkFrame(log_frame, fg_color="transparent")
         log_head.pack(fill="x", padx=6, pady=2)
@@ -488,12 +524,17 @@ class MainWindow(ctk.CTk):
             p_min = float(self.pause_min_entry.get().strip())
             p_max = float(self.pause_max_entry.get().strip())
 
+            like_thresh = int(self.like_thresh_entry.get().strip())
+            visitor_thresh = int(self.visitor_thresh_entry.get().strip())
+
             if not (1 <= max_items <= 500):
                 raise ValueError("최대 처리 글 수는 1~500 사이여야 합니다.")
             if not (0 <= act_min <= act_max <= 300) or not (0 <= nxt_min <= nxt_max <= 300):
                 raise ValueError("동작 간격 및 다음 글 대기 시간 범위가 올바르지 않습니다.")
             if not (0 <= p_chance <= 1.0) or not (0 <= p_min <= p_max <= 3600):
                 raise ValueError("Pause 확률(0~100%) 및 시간 범위가 올바르지 않습니다.")
+            if like_thresh < 1 or visitor_thresh < 1:
+                raise ValueError("공감수 및 일 방문자 수 기준값은 1 이상이어야 합니다.")
         except ValueError as ve:
             messagebox.showwarning("입력 오류", str(ve) or "숫자 입력값을 확인해 주세요.")
             return
@@ -530,6 +571,12 @@ class MainWindow(ctk.CTk):
             "random_pause_chance": p_chance,
             "random_pause_min": p_min,
             "random_pause_max": p_max,
+
+            "like_popularity_guard_enabled": self.like_guard_chk_var.get(),
+            "like_count_skip_threshold": like_thresh,
+            "daily_visitor_guard_enabled": self.visitor_guard_chk_var.get(),
+            "daily_visitor_skip_threshold": visitor_thresh,
+            "daily_visitor_unknown_policy": self.unknown_policy_var.get(),
 
             "ai_clipboard_enabled": True,
             "ai_context_max_chars": 700,

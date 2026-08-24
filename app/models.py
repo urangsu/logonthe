@@ -37,6 +37,7 @@ class FailureReason(str, Enum):
     POST_UNAVAILABLE = "post_unavailable"
     LIKE_BUTTON_NOT_FOUND = "like_button_not_found"
     LIKE_STATE_UNKNOWN = "like_state_unknown"
+    LIKE_POPULARITY_SKIP = "like_popularity_skip"
     COMMENT_DISABLED = "comment_disabled"
     COMMENT_BUTTON_NOT_FOUND = "comment_button_not_found"
     COMMENT_EDITOR_NOT_FOUND = "comment_editor_not_found"
@@ -72,6 +73,9 @@ class LikeProcessResult:
     state_before: LikeState = LikeState.UNKNOWN
     action_taken: bool = False
     state_after: LikeState = LikeState.UNKNOWN
+    eligibility_reason: Optional[str] = None
+    like_count: Optional[int] = None
+    daily_visitors: Optional[int] = None
     error: Optional[str] = None
 
 

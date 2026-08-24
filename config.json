@@ -1,8 +1,8 @@
 {
-  "feed_source": "recommendation",
+  "feed_source": "neighbor",
   "max_feed_items": 20,
   "like_enabled": true,
-  "comment_enabled": true,
+  "comment_enabled": false,
   "comment_template": "{좋은|유익한|멋진} 포스팅 잘 읽었습니다!",
   "general_suffix": "",
   "fixed_suffix": "",
@@ -12,17 +12,16 @@
   "direct_urls": [],
   "pacing_enabled": true,
   "action_delay_min": 2.0,
-  "action_delay_max": 2.5,
+  "action_delay_max": 10.0,
   "next_post_delay_min": 6.0,
   "next_post_delay_max": 10.0,
   "random_pause_enabled": true,
-  "random_pause_chance": 0.1,
+  "random_pause_chance": 0.2,
   "random_pause_min": 8.0,
   "random_pause_max": 20.0,
   "ai_clipboard_enabled": true,
   "ai_context_max_chars": 700,
   "ai_prompt_style": "warm_short",
   "gemini_browser_mode": "existing_chrome_mac",
-  "gemini_web_enabled": true,
-  "auto_apply_ai_comment": false
+  "gemini_web_enabled": true
 }

@@ -1,6 +1,8 @@
 from services.config import ConfigService, DEFAULT_CONFIG_V2
 from services.draft import DraftService
-from services.contextual_draft import ContextualDraftEngine, ContextualDraftResult
+from services.contextual_draft import ContextualDraftEngine, ContextualDraftResult, FirstPersonIntent
+from services.blog_popularity import BlogPopularityService, DailyVisitorResult
+from services.like_eligibility import LikeEligibilityService, LikeEligibility, LikeEligibilityResult
 from services.history import HistoryStore
 from services.pacing import PacingService, PacingKind, PacingResult
 from services.ai_prompt import AIPromptBuilder
