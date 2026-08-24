@@ -12,6 +12,8 @@ from app.state import StateManager, BotRuntimeState, FeedState
 from app.controller import FeedController
 from services.config import ConfigService
 from services.history import HistoryStore
+from services.draft import DraftService
+from services.contextual_draft import ContextualDraftEngine
 from services.clipboard_bridge import ClipboardCommandBridge
 from services.gemini_existing_chrome import ExistingChromeGeminiBridge
 from browser.session import ProfileLockManager, BrowserSession, USER_DATA_DIR
@@ -107,7 +109,7 @@ class MainWindow(ctk.CTk):
 
         subtitle_lbl = ctk.CTkLabel(
             header,
-            text="Human-in-the-loop 피드 순회 · 인기 가드(공감999+/방문자1만+) · 로컬 맞춤 댓글 · Enter 승인",
+            text="Human-in-the-loop 피드 순회 · 인기 가드(공감999+/방문자1만+) · Human-Like v3.1 긍정 칭찬 댓글 · Enter 승인",
             font=ctk.CTkFont(size=12),
             text_color="#81C784"
         )
@@ -281,7 +283,7 @@ class MainWindow(ctk.CTk):
         self.pause_max_entry.insert(0, str(self.config_service.get("random_pause_max", 20.0)))
         ctk.CTkLabel(p_body, text="초)").pack(side="left", padx=1)
 
-        # 6. Gemini Web Bridge & Assistant Card
+        # 6. Gemini & Human-Like Composer Assistant Card
         ai_card = ctk.CTkFrame(self, border_width=1, border_color="#334155")
         ai_card.pack(fill="x", padx=15, pady=2)
 
@@ -290,7 +292,7 @@ class MainWindow(ctk.CTk):
 
         self.gemini_web_enabled_var = ctk.BooleanVar(value=self.config_service.get("gemini_web_enabled", True))
         ctk.CTkCheckBox(
-            ai_head, text="🤖 Gemini 자동 댓글 연동 (실패 시 로컬 Human-Like Composer v2.1로 자동 전환)",
+            ai_head, text="🤖 Gemini 연동 (미연동 시 Human-Like v3.1 긍정 칭찬 엔진 자동 동작)",
             variable=self.gemini_web_enabled_var, font=ctk.CTkFont(weight="bold"), text_color="#38BDF8"
         ).pack(side="left", padx=2)
 
@@ -331,6 +333,7 @@ class MainWindow(ctk.CTk):
         )
         self.ai_post_excerpt_lbl.pack(fill="x", padx=8, pady=(1, 2))
 
+        # Action Buttons (복사, 열기, 적용, 실시간 댓글 변형)
         ai_btn_bar = ctk.CTkFrame(ai_card, fg_color="transparent")
         ai_btn_bar.pack(fill="x", padx=10, pady=(1, 3))
 
@@ -338,18 +341,34 @@ class MainWindow(ctk.CTk):
             ai_btn_bar, text="📋 AI 프롬프트 복사", height=26, fg_color="#0284C7", hover_color="#0369A1",
             command=self._copy_ai_prompt
         )
-        self.btn_copy_prompt.pack(side="left", padx=3)
+        self.btn_copy_prompt.pack(side="left", padx=2)
 
         ctk.CTkButton(
             ai_btn_bar, text="🌐 Gemini 열기", height=26, fg_color="#4F46E5", hover_color="#4338CA",
             command=lambda: webbrowser.open("https://gemini.google.com/")
-        ).pack(side="left", padx=3)
+        ).pack(side="left", padx=2)
 
         self.btn_apply_clipboard = ctk.CTkButton(
             ai_btn_bar, text="📥 클립보드 댓글 적용", height=26, fg_color="#0D9488", hover_color="#0F766E",
             command=self._apply_clipboard_comment
         )
-        self.btn_apply_clipboard.pack(side="left", padx=3)
+        self.btn_apply_clipboard.pack(side="left", padx=2)
+
+        # 실시간 댓글 리팩토링 버튼
+        ctk.CTkButton(
+            ai_btn_bar, text="🎲 다른 댓글", height=26, width=75, fg_color="#475569", hover_color="#334155",
+            command=lambda: self._refine_current_comment(mode="alternate")
+        ).pack(side="left", padx=2)
+
+        ctk.CTkButton(
+            ai_btn_bar, text="🌟 칭찬 더하기", height=26, width=85, fg_color="#D97706", hover_color="#B45309",
+            command=lambda: self._refine_current_comment(mode="praise")
+        ).pack(side="left", padx=2)
+
+        ctk.CTkButton(
+            ai_btn_bar, text="✂️ 더 짧게", height=26, width=65, fg_color="#64748B", hover_color="#475569",
+            command=lambda: self._refine_current_comment(mode="short")
+        ).pack(side="left", padx=2)
 
         # 7. UX Shortcut Guide
         guide_box = ctk.CTkFrame(self, fg_color="#1E293B", corner_radius=6)
@@ -411,6 +430,30 @@ class MainWindow(ctk.CTk):
         self.log_textbox = ctk.CTkTextbox(log_frame, font=ctk.CTkFont(family="Courier", size=12))
         self.log_textbox.pack(fill="both", expand=True, padx=6, pady=2)
         add_mac_clipboard_support(self.log_textbox, self)
+
+    def _refine_current_comment(self, mode: str = "alternate"):
+        """현재 글의 맥락을 기반으로 다른 스타일/길이의 댓글을 즉시 생성하여 에디터에 적용"""
+        title = self.state_mgr.state.current_post_title
+        excerpt = self.state_mgr.state.current_post_excerpt
+
+        if not title:
+            messagebox.showinfo("알림", "현재 처리 중인 게시글이 없습니다. 피드 작업 시작 후 글에 진입했을 때 클릭해 주세요.")
+            return
+
+        praise_b = (mode == "praise")
+        short_b = (mode == "short")
+
+        res = ContextualDraftEngine.generate(title, excerpt, praise_boost=praise_b, short_boost=short_b)
+        source_type = FeedSourceType(self.source_var.get())
+        suffix = DraftService.resolve_suffix(source_type, self.config_service)
+        final_comment = DraftService.compose_body_and_suffix(res.body, suffix)
+
+        self.clipboard_clear()
+        self.clipboard_append(final_comment)
+        self.update()
+
+        self.command_bridge.send_apply_clipboard_comment(final_comment)
+        logger.log(f"🔄 [REFINE] 댓글 변형 적용 ({mode}): \"{res.body}\"")
 
     def _test_chrome_connection(self):
         diag = ExistingChromeGeminiBridge.test_connection()

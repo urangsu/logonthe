@@ -1,6 +1,10 @@
 from services.config import ConfigService, DEFAULT_CONFIG_V2
 from services.draft import DraftService
-from services.contextual_draft import ContextualDraftEngine, ContextualDraftResult, FirstPersonIntent
+from services.contextual_draft import ContextualDraftEngine, ContextualDraftResult
+from services.comments.intents import ReactionIntent, FirstPersonIntent, CommentCandidate
+from services.comments.composer import HumanLikeComposerV31
+from services.comments.validators import PositiveSafetyValidator
+from services.comments.categories import CATEGORY_POLICIES, CategoryPolicy
 from services.blog_popularity import BlogPopularityService, DailyVisitorResult
 from services.like_eligibility import LikeEligibilityService, LikeEligibility, LikeEligibilityResult
 from services.history import HistoryStore
