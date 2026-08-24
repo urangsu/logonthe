@@ -1,12 +1,10 @@
 {
-  "schema_version": 2,
-  "feed_source": "neighbor",
+  "feed_source": "recommendation",
   "max_feed_items": 20,
-  "like_enabled": true,
+  "like_enabled": false,
   "comment_enabled": true,
   "comment_template": "{좋은|유익한|멋진} 포스팅 잘 읽었습니다!",
   "fixed_suffix": "오늘도 좋은 하루 보내세요 :)",
   "secret_comment": false,
-  "browser_mode": "persistent",
   "direct_urls": []
 }
