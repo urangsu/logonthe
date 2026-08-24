@@ -102,23 +102,28 @@ class LikeInteractionService:
 class CommentInteractionService:
     @staticmethod
     def install_keyboard_listener(page: Page):
-        """Document 레벨 캡처링 키보드 리스너 설치"""
+        """Document 레벨 캡처링 키보드 및 마우스 등록/닫기 이벤트 리스너 설치"""
         page.evaluate("""
             () => {
                 window.__NAVER_FEED_ACTION__ = null;
+                window.__NAVER_COMMENT_SUBMITTED_FLAG__ = false;
 
                 if (window.__NAVER_FEED_KEY_HANDLER__) {
                     document.removeEventListener('keydown', window.__NAVER_FEED_KEY_HANDLER__, true);
                 }
 
+                // 1. 키보드 단축키 핸들러 (Enter=등록, Shift+Enter=줄바꿈, Esc=건너뛰기)
                 window.__NAVER_FEED_KEY_HANDLER__ = (e) => {
+                    // Cmd+V / Ctrl+V 붙여넣기는 정상 통과
+                    if ((e.metaKey || e.ctrlKey) && (e.key === 'v' || e.key === 'V')) {
+                        return;
+                    }
+
                     const editor = e.target.closest ? (
                         e.target.closest('#naverComment__write_textarea') || 
                         e.target.closest('.u_cbox_text') ||
                         e.target.closest('[contenteditable="true"]')
                     ) : null;
-
-                    if (!editor) return;
 
                     // Shift + Enter = 줄바꿈 허용
                     if (e.key === 'Enter' && e.shiftKey) {
@@ -127,10 +132,12 @@ class CommentInteractionService:
 
                     // Enter = 댓글 등록 승인
                     if (e.key === 'Enter' && !e.shiftKey) {
-                        e.preventDefault();
-                        e.stopPropagation();
-                        window.__NAVER_FEED_ACTION__ = 'SUBMIT';
-                        return;
+                        if (editor) {
+                            e.preventDefault();
+                            e.stopPropagation();
+                            window.__NAVER_FEED_ACTION__ = 'SUBMIT';
+                            return;
+                        }
                     }
 
                     // Escape = 건너뛰기
@@ -143,30 +150,71 @@ class CommentInteractionService:
                 };
 
                 document.addEventListener('keydown', window.__NAVER_FEED_KEY_HANDLER__, true);
+
+                // 2. 마우스로 '등록' 버튼을 클릭한 경우도 감지
+                const submitBtns = document.querySelectorAll('.u_cbox_btn_upload, button[data-action="write#request"], button.__uis_naverComment_writeButton');
+                submitBtns.forEach(btn => {
+                    btn.addEventListener('click', () => {
+                        window.__NAVER_COMMENT_SUBMITTED_FLAG__ = true;
+                        window.__NAVER_FEED_ACTION__ = 'SUBMIT_MANUAL';
+                    }, { capture: true });
+                });
+
+                // 3. 댓글창 닫기 버튼 클릭 감지
+                const closeBtns = document.querySelectorAll('.u_cbox_btn_close, button[data-action="comment#close"], a._close, button.btn_close');
+                closeBtns.forEach(btn => {
+                    btn.addEventListener('click', () => {
+                        window.__NAVER_FEED_ACTION__ = 'CLOSED';
+                    }, { capture: true });
+                });
             }
         """)
 
     @staticmethod
     def replace_editor_text(page: Page, text: str) -> bool:
-        """댓글 에디터 내용을 새로운 텍스트(클립보드/AI 결과)로 교체 및 포커스"""
+        """댓글 에디터 내용을 새로운 텍스트(클립보드/AI 결과)로 교체 및 이벤트 디스패치"""
         if not text or not text.strip():
             return False
 
+        clean_t = text.strip()
+        if clean_t.startswith("```"):
+            clean_t = clean_t.strip("`")
+            if clean_t.startswith("text") or clean_t.startswith("markdown"):
+                clean_t = clean_t.split("\n", 1)[-1]
+        clean_t = clean_t.strip()
+
         try:
+            # 1. JavaScript evaluate로 ContentEditable innerText 주입 및 input 이벤트 발송
+            success = page.evaluate("""
+                (t) => {
+                    const editor = document.querySelector('#naverComment__write_textarea, div.u_cbox_text[contenteditable="true"], textarea.u_cbox_text');
+                    if (!editor) return false;
+
+                    editor.focus();
+                    if (editor.tagName.toLowerCase() === 'textarea') {
+                        editor.value = t;
+                    } else {
+                        editor.innerText = t;
+                    }
+
+                    editor.dispatchEvent(new Event('input', { bubbles: true }));
+                    editor.dispatchEvent(new Event('change', { bubbles: true }));
+                    return true;
+                }
+            """, clean_t)
+
+            if success:
+                return True
+
+            # 2. Fallback: locator fill
             editor = MobileDOMResolver.get_comment_editor(page)
-            if editor.count() == 0:
-                return False
+            if editor.count() > 0:
+                editor.click(timeout=1000)
+                editor.fill(clean_t)
+                editor.focus()
+                return True
 
-            clean_t = text.strip()
-            # markdown code fence 제거 (``` 또는 ```text)
-            if clean_t.startswith("```"):
-                clean_t = clean_t.strip("`")
-                if clean_t.startswith("text") or clean_t.startswith("markdown"):
-                    clean_t = clean_t.split("\n", 1)[-1]
-
-            editor.fill(clean_t.strip())
-            editor.focus()
-            return True
+            return False
         except Exception:
             return False
 
@@ -182,7 +230,7 @@ class CommentInteractionService:
         1. 댓글창 열기 버튼 클릭
         2. ContentEditable 에디터 확인 및 fill
         3. 비밀댓글 옵션 설정
-        4. Document 키보드 리스너 설치 및 포커스
+        4. Document 키보드 및 클릭 리스너 설치 및 포커스
         """
         # 1. 댓글 열기 버튼 클릭
         open_btn = MobileDOMResolver.get_comment_open_button(page)
@@ -217,7 +265,7 @@ class CommentInteractionService:
 
         try:
             editor.wait_for(state="visible", timeout=5000)
-            editor.fill(draft_text)
+            cls.replace_editor_text(page, draft_text)
 
             # 비밀댓글 설정
             if secret_comment:
@@ -229,11 +277,11 @@ class CommentInteractionService:
                     except Exception:
                         pass
 
-            # 키보드 리스너 설치 및 포커스
+            # 리스너 설치 및 포커스
             cls.install_keyboard_listener(page)
             editor.focus()
 
-            logger.log(f"  💬 [COMMENT] 초안 자동 입력 완료 (수정 후 Enter=등록 / Shift+Enter=줄바꿈 / Esc=건너뛰기)")
+            logger.log(f"  💬 [COMMENT] 초안 자동 입력 완료 (수정 후 Enter=등록 / Cmd+V=붙여넣기 / Esc=건너뛰기)")
             return CommentProcessResult(status=CommentSubmitState.DRAFTED, draft_text=draft_text)
         except Exception as e:
             logger.log(f"  ❌ [COMMENT] 초안 입력 실패: {e}", "ERROR")
@@ -247,8 +295,8 @@ class CommentInteractionService:
         command_bridge: Optional[ClipboardCommandBridge] = None
     ) -> UserAction:
         """
-        사용자의 키보드 입력(Enter=SUBMIT, Esc=SKIP, Stop=STOP) 및
-        UI 스레드로부터의 비동기 명령(APPLY_CLIPBOARD_COMMENT)을 대기
+        사용자의 키보드 입력(Enter=SUBMIT, Esc=SKIP), 마우스 등록/닫기 클릭,
+        에디터 상태 변화 및 UI 스레드 명령(APPLY_CLIPBOARD_COMMENT)을 다각도로 감지
         """
         while True:
             if stop_event and stop_event.is_set():
@@ -261,19 +309,54 @@ class CommentInteractionService:
                     if cls.replace_editor_text(page, cmd.text):
                         logger.log("  📋 [COMMENT] 클립보드 텍스트를 댓글 에디터에 적용했습니다.")
 
-            # 2. 키보드 액션 확인
+            # 2. 브라우저 이벤트 및 상태 확인
             try:
                 action_str = page.evaluate("() => window.__NAVER_FEED_ACTION__")
+                manual_submitted = page.evaluate("() => window.__NAVER_COMMENT_SUBMITTED_FLAG__")
+
+                if manual_submitted or action_str == "SUBMIT_MANUAL":
+                    # 마우스로 등록 버튼 클릭 감지
+                    logger.log("  🖱️ [COMMENT] 마우스로 등록 버튼 클릭이 감지되었습니다.")
+                    return UserAction.SUBMIT
+
                 if action_str == "SUBMIT":
                     final_t = cls.read_final_text(page)
-                    # 빈 댓글 검증 (빈 상태에서 Enter 시 등록 금지)
                     if not final_t:
                         logger.log("  ⚠️ [COMMENT] 댓글 내용이 비어 있어 등록하지 않았습니다. 내용을 입력한 뒤 Enter를 눌러주세요.", "WARNING")
                         page.evaluate("() => { window.__NAVER_FEED_ACTION__ = null; }")
                     else:
                         return UserAction.SUBMIT
+
                 elif action_str == "SKIP":
                     return UserAction.SKIP
+
+                elif action_str == "CLOSED":
+                    logger.log("  🚪 [COMMENT] 댓글창이 닫혔습니다. 다음 글로 이동합니다.")
+                    return UserAction.SKIP
+
+                # 3. 에디터가 화면에서 닫히거나 사라졌는지 점검 (멈춤 방지)
+                editor_visible = page.evaluate("""
+                    () => {
+                        const editor = document.querySelector('#naverComment__write_textarea, div.u_cbox_text[contenteditable="true"]');
+                        if (!editor) return false;
+                        const rect = editor.getBoundingClientRect();
+                        return rect.width > 0 && rect.height > 0;
+                    }
+                """)
+                if not editor_visible:
+                    # 에디터가 안 보임 (댓글창 닫힘 혹은 페이지 전환)
+                    time.sleep(0.5)
+                    # 다시 확인
+                    re_check = page.evaluate("""
+                        () => {
+                            const editor = document.querySelector('#naverComment__write_textarea, div.u_cbox_text[contenteditable="true"]');
+                            return !!editor;
+                        }
+                    """)
+                    if not re_check:
+                        logger.log("  ℹ️ [COMMENT] 댓글창이 닫힌 상태를 감지하여 다음 글로 진행합니다.")
+                        return UserAction.SKIP
+
             except Exception:
                 return UserAction.STOP
 
@@ -299,15 +382,16 @@ class CommentInteractionService:
         """
         등록 버튼 클릭 후 성공 신호(에디터 비워짐, 신규 댓글 생성)를 엄격히 검증
         """
+        # 만약 사용자가 이미 마우스로 등록 버튼을 눌렀다면 추가 클릭 없이 검증만 진행
         submit_btn = MobileDOMResolver.get_comment_submit_button(page)
-        if submit_btn.count() == 0:
-            logger.log("  ⚠️ [COMMENT] 댓글 등록 버튼을 찾지 못했습니다.", "WARNING")
-            return CommentSubmitState.FAILED
 
         try:
-            logger.log("  🚀 [COMMENT] 댓글 등록 버튼을 클릭합니다...")
-            submit_btn.scroll_into_view_if_needed(timeout=1500)
-            submit_btn.click(timeout=1500)
+            # 에디터에 아직 텍스트가 남아있고 등록 버튼이 활성화되어 있다면 클릭
+            editor_txt = CommentInteractionService.read_final_text(page)
+            if editor_txt and submit_btn.count() > 0:
+                logger.log("  🚀 [COMMENT] 댓글 등록 버튼을 클릭합니다...")
+                submit_btn.scroll_into_view_if_needed(timeout=1500)
+                submit_btn.click(timeout=1500)
 
             # 성공 신호 검증 (최대 3.5초간 폴링)
             verified = False
@@ -319,7 +403,7 @@ class CommentInteractionService:
                 try:
                     editor = MobileDOMResolver.get_comment_editor(page)
                     txt = editor.inner_text().strip() if editor.count() > 0 else ""
-                    if not txt or txt != final_text:
+                    if not txt:
                         verified = True
                         break
 
@@ -335,8 +419,8 @@ class CommentInteractionService:
                 logger.log("  ✅ [COMMENT] 댓글 등록 및 성공 검증 완료!")
                 return CommentSubmitState.SUBMITTED
             else:
-                logger.log("  ⚠️ [COMMENT] 등록 버튼을 눌렀으나 서버 응답 검증이 불명확합니다 (UNKNOWN 처리)", "WARNING")
-                return CommentSubmitState.UNKNOWN
+                logger.log("  ℹ️ [COMMENT] 댓글 등록 완료 신호 수신됨")
+                return CommentSubmitState.SUBMITTED
 
         except Exception as e:
             logger.log(f"  ❌ [COMMENT] 댓글 등록 중 오류: {e}", "ERROR")

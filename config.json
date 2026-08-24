@@ -1,13 +1,11 @@
 {
-  "schema_version": 2,
   "feed_source": "recommendation",
   "max_feed_items": 20,
   "like_enabled": true,
-  "comment_enabled": false,
+  "comment_enabled": true,
   "comment_template": "{좋은|유익한|멋진} 포스팅 잘 읽었습니다!",
-  "fixed_suffix": "오늘도 좋은 하루 보내세요 :)",
+  "fixed_suffix": "",
   "secret_comment": false,
-  "browser_mode": "persistent",
   "direct_urls": [],
   "pacing_enabled": true,
   "action_delay_min": 2.0,
@@ -21,9 +19,8 @@
   "ai_clipboard_enabled": true,
   "ai_context_max_chars": 700,
   "ai_prompt_style": "natural",
-  "append_fixed_suffix_to_ai": false,
   "gemini_web_enabled": true,
-  "gemini_mode": "new",
+  "gemini_mode": "custom",
   "gemini_custom_url": "https://gemini.google.com/app/0a1545681329aa0a?hl=ko",
   "auto_apply_ai_comment": false
 }

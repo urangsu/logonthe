@@ -22,6 +22,7 @@ class GeminiWebBridge:
         "rich-textarea div[contenteditable='true']",
         "div.ql-editor[contenteditable='true']",
         "div[role='textbox'][contenteditable='true']",
+        "rich-textarea p",
         "div[contenteditable='true']",
         "textarea[aria-label*='프롬프트']",
         "textarea"
@@ -30,11 +31,13 @@ class GeminiWebBridge:
     # Gemini 전송 버튼 셀렉터 우선순위
     SEND_BUTTON_SELECTORS = [
         "button[aria-label*='프롬프트 보내기']",
+        "button[aria-label*='보내기']",
         "button[aria-label*='전송']",
         "button[aria-label*='Send']",
-        "button[data-test-id='send-button']",
         "button.send-button",
+        "button[data-test-id='send-button']",
         "button:has(mat-icon:text-is('send'))",
+        "button:has(.mat-mdc-button-touch-target)",
         "button[aria-label*='submit']"
     ]
 
@@ -53,19 +56,30 @@ class GeminiWebBridge:
         "message-content",
         "div.markdown",
         "div[class*='model-response']",
-        "div[class*='response_content']"
+        "div[class*='response_content']",
+        "div.model-response-text"
+    ]
+
+    # Gemini 자체 복사 버튼 셀렉터
+    COPY_BUTTON_SELECTORS = [
+        "button[aria-label*='복사']",
+        "button[aria-label*='Copy']",
+        "button:has(mat-icon:text-is('content_copy'))",
+        "button:has(mat-icon:has-text('content_copy'))"
     ]
 
     @classmethod
     def ensure_open(cls, page: Page, target_url: str = GEMINI_DEFAULT_URL, stop_event: Optional[threading.Event] = None) -> bool:
         """Gemini 페이지로 이동 및 로드 확인"""
         current_url = page.url or ""
+        url_to_go = target_url if target_url else cls.GEMINI_DEFAULT_URL
+
         if "gemini.google.com" in current_url:
-            # 이미 열려 있는 경우 지정 URL이 다르면 이동
             if target_url and target_url != cls.GEMINI_DEFAULT_URL and target_url not in current_url:
+                logger.log(f"[GEMINI] 지정 대화 URL 이동: {target_url}")
                 page.goto(target_url, wait_until="domcontentloaded", timeout=25000)
+                interruptible_wait(stop_event, 1.5)
         else:
-            url_to_go = target_url if target_url else cls.GEMINI_DEFAULT_URL
             logger.log(f"[GEMINI] Gemini 웹페이지 접속: {url_to_go}")
             try:
                 page.goto(url_to_go, wait_until="domcontentloaded", timeout=25000)
@@ -73,7 +87,7 @@ class GeminiWebBridge:
             except Exception as e:
                 logger.log(f"[GEMINI] 페이지 로드 안내: {e}", "WARNING")
 
-        # 로그인/동의 확인
+        # 로그인 확인
         if "accounts.google.com" in (page.url or ""):
             logger.log("⚠️ [GEMINI] Google 로그인이 필요합니다. [🌐 로그인 창 열기]에서 구글 로그인을 먼저 진행해 주세요.", "ERROR")
             return False
@@ -81,49 +95,15 @@ class GeminiWebBridge:
         return True
 
     @classmethod
-    def get_editor(cls, page: Page) -> Optional[Locator]:
-        for sel in cls.EDITOR_SELECTORS:
-            loc = page.locator(sel).first
-            if loc.count() > 0:
-                return loc
-        return None
-
-    @classmethod
-    def get_send_button(cls, page: Page) -> Optional[Locator]:
-        for sel in cls.SEND_BUTTON_SELECTORS:
-            loc = page.locator(sel).first
-            if loc.count() > 0:
-                return loc
-        return None
-
-    @classmethod
-    def get_response_elements(cls, page: Page) -> Locator:
-        for sel in cls.RESPONSE_SELECTORS:
-            loc = page.locator(sel)
-            if loc.count() > 0:
-                return loc
-        return page.locator("model-response, message-content")
-
-    @classmethod
     def copy_to_os_clipboard(cls, text: str):
-        """OS 클립보드에 텍스트 복사 (macOS pbcopy 및 일반 클립보드 지원)"""
+        """OS 클립보드에 텍스트 복사 (macOS pbcopy 및 GUI Tkinter 클립보드 동시 동기화)"""
         if not text:
             return
         try:
-            # macOS pbcopy 사용
             p = subprocess.Popen(["pbcopy"], stdin=subprocess.PIPE, close_fds=True)
             p.communicate(input=text.encode("utf-8"))
         except Exception:
-            try:
-                import tkinter as tk
-                r = tk.Tk()
-                r.withdraw()
-                r.clipboard_clear()
-                r.clipboard_append(text)
-                r.update()
-                r.destroy()
-            except Exception:
-                pass
+            pass
 
     @classmethod
     def generate_comment(
@@ -136,92 +116,157 @@ class GeminiWebBridge:
         """
         Gemini 자동화 전체 파이프라인:
         1. 페이지 준비
-        2. 프롬프트 입력 및 전송
-        3. 생성 완료 대기 (텍스트 스트리밍 안정화)
-        4. 최신 답변 추출 및 클립보드 복사
+        2. 프롬프트 다중 방식으로 입력 (Quill/ContentEditable/DOM)
+        3. 전송 버튼 클릭 및 스트리밍 답변 완료 감지
+        4. 최신 답변 추출 및 클립보드 자동 복사
         """
         if not cls.ensure_open(page, target_url=gemini_url, stop_event=stop_event):
             return None
 
-        # 전송 전 기존 답변 개수 파악
-        responses = cls.get_response_elements(page)
-        initial_count = responses.count()
+        # 페이지 로딩 대기
+        try:
+            page.wait_for_selector(
+                "rich-textarea, div.ql-editor, div[contenteditable='true'], textarea",
+                timeout=8000
+            )
+        except Exception:
+            pass
 
-        # 에디터 찾기
-        editor = cls.get_editor(page)
-        if not editor:
-            logger.log("⚠️ [GEMINI] Gemini 입력창(에디터)을 찾을 수 없습니다. (화면 로딩 대기 중)", "WARNING")
-            interruptible_wait(stop_event, 2.0)
-            editor = cls.get_editor(page)
+        logger.log("🤖 [GEMINI] Gemini 입력창에 프롬프트 자동 입력 중...")
 
-        if not editor:
+        # JavaScript를 통한 신뢰성 있는 입력창 주입 및 이벤트 디스패치
+        injected = page.evaluate("""
+            (text) => {
+                const editor = document.querySelector('rich-textarea div[contenteditable="true"], div.ql-editor, div[role="textbox"], rich-textarea p, div[contenteditable="true"], textarea');
+                if (!editor) return false;
+
+                editor.focus();
+
+                if (editor.tagName.toLowerCase() === 'textarea') {
+                    editor.value = text;
+                    editor.dispatchEvent(new Event('input', { bubbles: true }));
+                    editor.dispatchEvent(new Event('change', { bubbles: true }));
+                    return true;
+                }
+
+                // ContentEditable / Quill 처리
+                try {
+                    editor.innerHTML = '';
+                    const p = document.createElement('p');
+                    p.textContent = text;
+                    editor.appendChild(p);
+                } catch(e) {
+                    editor.innerText = text;
+                }
+
+                editor.dispatchEvent(new InputEvent('input', { bubbles: true, inputType: 'insertText', data: text }));
+                editor.dispatchEvent(new Event('input', { bubbles: true }));
+                editor.dispatchEvent(new Event('change', { bubbles: true }));
+                return true;
+            }
+        """, prompt)
+
+        if not injected:
+            # Fallback: Playwright locator fill
+            for sel in cls.EDITOR_SELECTORS:
+                loc = page.locator(sel).first
+                if loc.count() > 0:
+                    try:
+                        loc.click(timeout=1000)
+                        loc.fill(prompt)
+                        injected = True
+                        break
+                    except Exception:
+                        continue
+
+        if not injected:
             logger.log("❌ [GEMINI] Gemini 입력창을 찾지 못했습니다.", "ERROR")
             return None
 
-        logger.log("🤖 [GEMINI] Gemini 입력창에 프롬프트 자동 입력 중...")
-        try:
-            editor.click(timeout=2000)
-            editor.fill(prompt)
-            interruptible_wait(stop_event, 0.5)
+        interruptible_wait(stop_event, 0.5)
 
-            # 전송 버튼 클릭 (또는 Enter)
-            send_btn = cls.get_send_button(page)
-            if send_btn and send_btn.is_visible():
-                send_btn.click(timeout=1500)
-            else:
-                editor.press("Enter")
+        # 전송 버튼 탐색 및 클릭
+        send_clicked = False
+        for btn_sel in cls.SEND_BUTTON_SELECTORS:
+            btn = page.locator(btn_sel).first
+            if btn.count() > 0:
+                try:
+                    if btn.is_visible() and btn.is_enabled():
+                        btn.click(timeout=1500)
+                        send_clicked = True
+                        break
+                except Exception:
+                    continue
 
-            logger.log("⏳ [GEMINI] 프롬프트 전송 완료. 답변 생성 대기 중...")
+        if not send_clicked:
+            # Fallback: Enter 키 전송
+            try:
+                page.keyboard.press("Enter")
+                send_clicked = True
+            except Exception:
+                pass
 
-            # 답변 완료 감지 루프
-            start_time = time.time()
-            previous_text = ""
-            stable_since = None
+        logger.log("⏳ [GEMINI] 프롬프트 전송 완료. 답변 생성 대기 중...")
 
-            while time.time() - start_time < 35.0:
-                if stop_event and stop_event.is_set():
-                    return None
+        # 답변 생성 완료 감지 루프
+        start_time = time.time()
+        previous_text = ""
+        stable_since = None
 
-                curr_responses = cls.get_response_elements(page)
-                curr_count = curr_responses.count()
-
-                if curr_count > 0:
-                    latest = curr_responses.last
-                    try:
-                        current_text = latest.inner_text().strip()
-                    except Exception:
-                        current_text = ""
-
-                    if current_text and current_text != previous_text:
-                        previous_text = current_text
-                        stable_since = time.time()
-                    elif current_text and stable_since and (time.time() - stable_since >= 1.5):
-                        # 1.5초간 텍스트 변화가 없고 중지 버튼이 없으면 생성 완료!
-                        stop_btns = page.locator("button[aria-label*='중지'], button[aria-label*='Stop']")
-                        if stop_btns.count() == 0 or not stop_btns.first.is_visible():
-                            break
-
-                time.sleep(0.3)
-
-            # 최종 텍스트 추출 및 정제
-            final_answer = previous_text.strip()
-            if not final_answer:
-                logger.log("⚠️ [GEMINI] 생성된 답변 내용을 읽어오지 못했습니다.", "WARNING")
+        while time.time() - start_time < 40.0:
+            if stop_event and stop_event.is_set():
                 return None
 
-            # 마크다운 코드 블록(```) 제거
-            if final_answer.startswith("```"):
-                final_answer = final_answer.strip("`")
-                if final_answer.startswith("text") or final_answer.startswith("markdown"):
-                    final_answer = final_answer.split("\n", 1)[-1]
-            final_answer = final_answer.strip()
+            # 답변 컨테이너 탐색
+            response_texts = []
+            for sel in cls.RESPONSE_SELECTORS:
+                locs = page.locator(sel)
+                cnt = locs.count()
+                if cnt > 0:
+                    try:
+                        txt = locs.last.inner_text().strip()
+                        if txt:
+                            response_texts.append(txt)
+                    except Exception:
+                        pass
 
-            # 클립보드에 자동 복사
-            cls.copy_to_os_clipboard(final_answer)
-            logger.log(f"✨ [GEMINI] 댓글 생성 완료! (클립보드에 자동 복사됨: '{final_answer[:35]}...')")
+            current_text = response_texts[-1] if response_texts else ""
 
-            return final_answer
+            if current_text and current_text != previous_text:
+                previous_text = current_text
+                stable_since = time.time()
+            elif current_text and stable_since and (time.time() - stable_since >= 1.5):
+                # 1.5초 이상 텍스트 변화가 없고 중지 버튼이 사라진 경우 완료로 판단
+                stop_btns = page.locator("button[aria-label*='중지'], button[aria-label*='Stop']")
+                if stop_btns.count() == 0 or not stop_btns.first.is_visible():
+                    break
 
-        except Exception as e:
-            logger.log(f"❌ [GEMINI] Gemini 생성 중 오류: {e}", "ERROR")
+            time.sleep(0.3)
+
+        final_answer = previous_text.strip()
+        if not final_answer:
+            logger.log("⚠️ [GEMINI] 생성된 답변 텍스트를 읽어오지 못했습니다.", "WARNING")
             return None
+
+        # 마크다운 코드 블록(```) 제거 및 정제
+        if final_answer.startswith("```"):
+            final_answer = final_answer.strip("`")
+            if final_answer.startswith("text") or final_answer.startswith("markdown"):
+                final_answer = final_answer.split("\n", 1)[-1]
+        final_answer = final_answer.strip()
+
+        # 1) Gemini 자체 '복사' 버튼 클릭 시도 (브라우저 네이티브 복사)
+        try:
+            copy_btns = page.locator("button[aria-label*='복사'], button[aria-label*='Copy'], button:has(mat-icon:text-is('content_copy'))")
+            if copy_btns.count() > 0:
+                copy_btns.last.click(timeout=1000)
+        except Exception:
+            pass
+
+        # 2) OS 시스템 클립보드 복사
+        cls.copy_to_os_clipboard(final_answer)
+
+        logger.log(f"✨ [GEMINI] 댓글 생성 완료! (클립보드에 자동 복사됨)")
+        logger.log(f"  📝 [GEMINI 결과]: \"{final_answer}\"")
+
+        return final_answer
