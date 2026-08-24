@@ -11,7 +11,7 @@ class MobileDOMResolver:
 
     # --- 피드 목록 (FeedList / Recommendation) ---
     @staticmethod
-    def get_feed_cards(page: Page) -> Locator:
+    def get_feed_cards(page: Page) -> Optional[Locator]:
         """피드 목록 내 게시글 카드 Locator 반환"""
         if not page:
             return None
@@ -19,7 +19,7 @@ class MobileDOMResolver:
         return cards
 
     @staticmethod
-    def get_card_post_link(card: Locator) -> Locator:
+    def get_card_post_link(card: Locator) -> Optional[Locator]:
         """피드 카드 내부의 게시글 상세 링크 Locator 반환"""
         if not card:
             return None
@@ -76,7 +76,7 @@ class MobileDOMResolver:
         return None
 
     @staticmethod
-    def get_post_content_locator(page: Page) -> Locator:
+    def get_post_content_locator(page: Page) -> Optional[Locator]:
         """게시글 본문 컨테이너 Locator 반환"""
         if not page:
             return None
@@ -193,11 +193,30 @@ class MobileDOMResolver:
         return page.locator("a.u_cbox_btn_reply, button[data-click-area='pst.reply']").first
 
     @staticmethod
+    def get_comment_write_box(page: Page) -> Optional[Locator]:
+        """댓글 작성 영역(write_box 컨테이너) Locator 반환"""
+        if not page:
+            return None
+        selectors = [
+            ".u_cbox_write_box",
+            ".u_cbox_inbox",
+            "#naverComment__write_textarea",
+            "div.u_cbox_text[contenteditable='true']",
+            "textarea.u_cbox_text"
+        ]
+        for sel in selectors:
+            loc = page.locator(sel).first
+            if loc.count() > 0:
+                return loc
+        return page.locator(".u_cbox_write_box, .u_cbox_inbox").first
+
+    @staticmethod
     def get_comment_editor(page: Page) -> Optional[Locator]:
         """댓글 입력 에디터 Locator 반환"""
         if not page:
             return None
         selectors = [
+            "#naverComment__write_textarea",
             "div.u_cbox_text[contenteditable='true']",
             "div.u_cbox_write_box div[contenteditable='true']",
             "div.u_cbox_inbox textarea.u_cbox_text",
@@ -241,3 +260,8 @@ class MobileDOMResolver:
             if loc.count() > 0:
                 return loc
         return page.locator("button.u_cbox_btn_upload").first
+
+
+# 하위 호환성 별칭 (Compatibility Aliases)
+MobileDOMResolver.get_comment_open_button = MobileDOMResolver.get_comment_button
+MobileDOMResolver.get_secret_checkbox = MobileDOMResolver.get_secret_comment_checkbox

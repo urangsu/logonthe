@@ -7,19 +7,41 @@ from services.comments.intents import ReactionIntent
 class CategoryPolicy:
     name: str
     keywords: List[str]
-    actions: List[str]                  # 예: "먹어보다", "가보다", "마셔보다", "따라 해보다"
+    actions: List[str]                  # 예: "먹어보다", "가보다", "마셔보다", "뽑아보다"
     reaction_weights: Dict[ReactionIntent, float]
     subject_suffixes: List[str]
 
 
 CATEGORY_POLICIES: Dict[str, CategoryPolicy] = {
+    # 1. 취미/캐릭터/굿즈 (키링, 가챠, 피규어 등 - FOOD보다 높은 식별 우선순위)
+    "HOBBY_GOODS": CategoryPolicy(
+        name="HOBBY_GOODS",
+        keywords=[
+            "키링", "랜덤키링", "스폰지밥", "굿즈", "캐릭터", "피규어", "인형", "아크릴", "포토카드",
+            "랜덤박스", "가챠", "스티커", "콜라보", "한정판", "팝업", "문구", "다꾸", "키덜트", "뱃지", "마그넷"
+        ],
+        actions=["뽑아보다", "모아보다", "구경해보다"],
+        reaction_weights={
+            ReactionIntent.PRAISE: 1.5,
+            ReactionIntent.DETAIL_PRAISE: 1.4,
+            ReactionIntent.TRY_INTENT: 1.3,
+            ReactionIntent.PREFERENCE: 1.2,
+            ReactionIntent.PLAN_INTENT: 0.8,
+            ReactionIntent.EMPATHY: 0.8,
+            ReactionIntent.INFO_REACTION: 0.5,
+            ReactionIntent.QUESTION: 0.05
+        },
+        subject_suffixes=["디자인", "캐릭터", "굿즈"]
+    ),
+
+    # 2. 맛집/식당
     "FOOD": CategoryPolicy(
         name="FOOD",
         keywords=[
             "맛집", "메뉴", "고기", "삼겹살", "장어", "돈까스", "돈카츠", "파스타", "리조또",
-            "쭈꾸미", "비빔밥", "수제비", "빵", "국수", "라면", "치킨", "회", "초밥", "덮밥",
+            "쭈꾸미", "비빔밥", "수제비", "국수", "라면", "치킨", "초밥", "덮밥",
             "디저트", "히츠마부시", "순두부", "찌개", "구이", "식당", "음식점", "점심", "저녁", "오차즈케",
-            "우동", "스테이크", "피자", "카레", "버거", "샐러드", "전골", "떡볶이"
+            "우동", "스테이크", "피자", "카레", "버거", "샐러드", "전골", "떡볶이", "베이커리", "빵집"
         ],
         actions=["먹어보다", "주문해보다", "맛보고 싶다"],
         reaction_weights={
@@ -35,6 +57,7 @@ CATEGORY_POLICIES: Dict[str, CategoryPolicy] = {
         subject_suffixes=["메뉴", "음식"]
     ),
 
+    # 3. 카페/음료
     "CAFE": CategoryPolicy(
         name="CAFE",
         keywords=[
@@ -55,6 +78,7 @@ CATEGORY_POLICIES: Dict[str, CategoryPolicy] = {
         subject_suffixes=["음료", "디저트"]
     ),
 
+    # 4. 여행/나들이
     "TRAVEL": CategoryPolicy(
         name="TRAVEL",
         keywords=[
@@ -76,6 +100,7 @@ CATEGORY_POLICIES: Dict[str, CategoryPolicy] = {
         subject_suffixes=["명소", "코스"]
     ),
 
+    # 5. 뷰티/헤어
     "BEAUTY": CategoryPolicy(
         name="BEAUTY",
         keywords=[
@@ -95,6 +120,7 @@ CATEGORY_POLICIES: Dict[str, CategoryPolicy] = {
         subject_suffixes=["스타일"]
     ),
 
+    # 6. 패션/코디
     "FASHION": CategoryPolicy(
         name="FASHION",
         keywords=[
@@ -114,6 +140,7 @@ CATEGORY_POLICIES: Dict[str, CategoryPolicy] = {
         subject_suffixes=["조합", "스타일"]
     ),
 
+    # 7. 일상/살림
     "LIFESTYLE": CategoryPolicy(
         name="LIFESTYLE",
         keywords=[
@@ -133,6 +160,7 @@ CATEGORY_POLICIES: Dict[str, CategoryPolicy] = {
         subject_suffixes=["방식", "루틴"]
     ),
 
+    # 8. 육아
     "PARENTING": CategoryPolicy(
         name="PARENTING",
         keywords=[
@@ -152,6 +180,7 @@ CATEGORY_POLICIES: Dict[str, CategoryPolicy] = {
         subject_suffixes=["놀이", "활동"]
     ),
 
+    # 9. 반려동물
     "PET": CategoryPolicy(
         name="PET",
         keywords=[
@@ -171,6 +200,7 @@ CATEGORY_POLICIES: Dict[str, CategoryPolicy] = {
         subject_suffixes=["모습"]
     ),
 
+    # 10. 도서/영화
     "BOOK_MOVIE": CategoryPolicy(
         name="BOOK_MOVIE",
         keywords=[
@@ -190,6 +220,7 @@ CATEGORY_POLICIES: Dict[str, CategoryPolicy] = {
         subject_suffixes=["작품"]
     ),
 
+    # 11. IT/전자기기
     "IT_GADGET": CategoryPolicy(
         name="IT_GADGET",
         keywords=[
@@ -209,6 +240,7 @@ CATEGORY_POLICIES: Dict[str, CategoryPolicy] = {
         subject_suffixes=["기능", "기기"]
     ),
 
+    # 12. 운동/피트니스
     "FITNESS": CategoryPolicy(
         name="FITNESS",
         keywords=[
@@ -228,6 +260,7 @@ CATEGORY_POLICIES: Dict[str, CategoryPolicy] = {
         subject_suffixes=["루틴", "동작"]
     ),
 
+    # 13. 인테리어
     "INTERIOR_HOME": CategoryPolicy(
         name="INTERIOR_HOME",
         keywords=[
@@ -247,6 +280,7 @@ CATEGORY_POLICIES: Dict[str, CategoryPolicy] = {
         subject_suffixes=["공간", "조합"]
     ),
 
+    # 14. 일반 제품/생활용품
     "PRODUCT": CategoryPolicy(
         name="PRODUCT",
         keywords=[
@@ -266,6 +300,7 @@ CATEGORY_POLICIES: Dict[str, CategoryPolicy] = {
         subject_suffixes=["구성", "특징"]
     ),
 
+    # 15. 경제/금융
     "FINANCE": CategoryPolicy(
         name="FINANCE",
         keywords=[
@@ -285,6 +320,7 @@ CATEGORY_POLICIES: Dict[str, CategoryPolicy] = {
         subject_suffixes=["내용", "흐름"]
     ),
 
+    # 16. 직장/업무
     "WORK": CategoryPolicy(
         name="WORK",
         keywords=[
@@ -304,6 +340,7 @@ CATEGORY_POLICIES: Dict[str, CategoryPolicy] = {
         subject_suffixes=["방식", "노하우"]
     ),
 
+    # 17. 미분류 (단순 일반 글)
     "UNKNOWN_TOPIC": CategoryPolicy(
         name="UNKNOWN_TOPIC",
         keywords=[],

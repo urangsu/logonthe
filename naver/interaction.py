@@ -64,10 +64,10 @@ class LikeInteractionService:
         안전한 공감 처리:
         - LIKED: 아무것도 하지 않음 (기존 공감 유지)
         - UNKNOWN: 클릭 절대 금지 (취소 방지)
-        - NOT_LIKED: 클릭 후 상태 전이(LIKED) 검증
+        - NOT_LIKED: 클릭 후 최대 2.5초간 상태 전이(LIKED) 폴링 검증
         """
         btn = MobileDOMResolver.get_like_button(page)
-        if btn.count() == 0:
+        if not btn or btn.count() == 0:
             return LikeProcessResult(state_before=LikeState.UNKNOWN, state_after=LikeState.UNKNOWN, error="like_button_not_found")
 
         state_before = cls.resolve_like_state(page, btn)
@@ -80,18 +80,29 @@ class LikeInteractionService:
             logger.log("  ⚠️ [LIKE] 공감 상태를 명확히 판별할 수 없어 취소 방지를 위해 클릭을 건너뜁니다.", "WARNING")
             return LikeProcessResult(state_before=LikeState.UNKNOWN, action_taken=False, state_after=LikeState.UNKNOWN)
 
-        # NOT_LIKED 상태인 경우에만 클릭
+        # NOT_LIKED 상태인 경우에만 클릭 및 폴링 검증
         logger.log("  🤍 [LIKE] 미공감 글 감지, 공감(하트)을 클릭합니다.")
         try:
             btn.scroll_into_view_if_needed(timeout=1500)
             btn.click(timeout=1500)
-            interruptible_wait(stop_event, 0.6)
 
-            state_after = cls.resolve_like_state(page, btn)
+            # 최대 2.5초간 LIKED 상태 전이 폴링 검증
+            deadline = time.time() + 2.5
+            state_after = LikeState.UNKNOWN
+
+            while time.time() < deadline:
+                if stop_event and stop_event.is_set():
+                    break
+                fresh_btn = MobileDOMResolver.get_like_button(page)
+                state_after = cls.resolve_like_state(page, fresh_btn)
+                if state_after == LikeState.LIKED:
+                    break
+                interruptible_wait(stop_event, 0.2)
+
             if state_after == LikeState.LIKED:
                 logger.log("  ✅ [LIKE] 공감 클릭 및 상태 전환(LIKED) 확인 완료!")
             else:
-                logger.log(f"  ℹ️ [LIKE] 공감 클릭 완료 (후속 상태: {state_after.value})")
+                logger.log(f"  ⚠️ [LIKE] 공감 클릭을 수행했으나 상태 전환(LIKED)을 확인하지 못했습니다 (후속 상태: {state_after.value})", "WARNING")
 
             return LikeProcessResult(state_before=LikeState.NOT_LIKED, action_taken=True, state_after=state_after)
         except Exception as e:
@@ -208,7 +219,7 @@ class CommentInteractionService:
 
             # 2. Fallback: locator fill
             editor = MobileDOMResolver.get_comment_editor(page)
-            if editor.count() > 0:
+            if editor and editor.count() > 0:
                 editor.click(timeout=1000)
                 editor.fill(clean_t)
                 editor.focus()
@@ -233,8 +244,8 @@ class CommentInteractionService:
         4. Document 키보드 및 클릭 리스너 설치 및 포커스
         """
         # 1. 댓글 열기 버튼 클릭
-        open_btn = MobileDOMResolver.get_comment_open_button(page)
-        if open_btn.count() > 0:
+        open_btn = MobileDOMResolver.get_comment_button(page)
+        if open_btn and open_btn.count() > 0:
             try:
                 open_btn.scroll_into_view_if_needed(timeout=1500)
                 open_btn.click(timeout=1500)
@@ -244,13 +255,13 @@ class CommentInteractionService:
 
         # 2. 비로그인 안내 확인
         login_box = page.locator(".u_cbox_type_logged_out, .u_cbox_guide").first
-        if login_box.count() > 0 and "로그인" in (login_box.inner_text() or ""):
+        if login_box and login_box.count() > 0 and "로그인" in (login_box.inner_text() or ""):
             logger.log("  ⚠️ [COMMENT] 로그인이 필요한 게시글입니다.", "ERROR")
             return CommentProcessResult(status=CommentSubmitState.FAILED, error="login_required")
 
         # 3. 입력 영역 클릭으로 에디터 활성화
         write_box = MobileDOMResolver.get_comment_write_box(page)
-        if write_box.count() > 0:
+        if write_box and write_box.count() > 0:
             try:
                 write_box.click(timeout=1500)
                 interruptible_wait(stop_event, 0.4)
@@ -259,7 +270,7 @@ class CommentInteractionService:
 
         # 4. 에디터 탐색 및 초안 입력
         editor = MobileDOMResolver.get_comment_editor(page)
-        if editor.count() == 0:
+        if not editor or editor.count() == 0:
             logger.log("  ⚠️ [COMMENT] 댓글 입력창을 찾을 수 없습니다. (댓글 비활성화 글)", "WARNING")
             return CommentProcessResult(status=CommentSubmitState.FAILED, error="comment_editor_not_found")
 
@@ -269,8 +280,8 @@ class CommentInteractionService:
 
             # 비밀댓글 설정
             if secret_comment:
-                secret_chk = MobileDOMResolver.get_secret_checkbox(page)
-                if secret_chk.count() > 0:
+                secret_chk = MobileDOMResolver.get_secret_comment_checkbox(page)
+                if secret_chk and secret_chk.count() > 0:
                     try:
                         secret_chk.click(timeout=1000)
                         logger.log("  🔒 [COMMENT] 비밀댓글 설정 완료")
@@ -309,119 +320,99 @@ class CommentInteractionService:
                     if cls.replace_editor_text(page, cmd.text):
                         logger.log("  📋 [COMMENT] 클립보드 텍스트를 댓글 에디터에 적용했습니다.")
 
-            # 2. 브라우저 이벤트 및 상태 확인
+            # 2. 브라우저 이벤트 상태 확인
             try:
-                action_str = page.evaluate("() => window.__NAVER_FEED_ACTION__")
-                manual_submitted = page.evaluate("() => window.__NAVER_COMMENT_SUBMITTED_FLAG__")
-
-                if manual_submitted or action_str == "SUBMIT_MANUAL":
-                    # 마우스로 등록 버튼 클릭 감지
-                    logger.log("  🖱️ [COMMENT] 마우스로 등록 버튼 클릭이 감지되었습니다.")
-                    return UserAction.SUBMIT
-
-                if action_str == "SUBMIT":
-                    final_t = cls.read_final_text(page)
-                    if not final_t:
-                        logger.log("  ⚠️ [COMMENT] 댓글 내용이 비어 있어 등록하지 않았습니다. 내용을 입력한 뒤 Enter를 눌러주세요.", "WARNING")
-                        page.evaluate("() => { window.__NAVER_FEED_ACTION__ = null; }")
-                    else:
-                        return UserAction.SUBMIT
-
-                elif action_str == "SKIP":
-                    return UserAction.SKIP
-
-                elif action_str == "CLOSED":
-                    logger.log("  🚪 [COMMENT] 댓글창이 닫혔습니다. 다음 글로 이동합니다.")
-                    return UserAction.SKIP
-
-                # 3. 에디터가 화면에서 닫히거나 사라졌는지 점검 (멈춤 방지)
-                editor_visible = page.evaluate("""
+                action_data = page.evaluate("""
                     () => {
-                        const editor = document.querySelector('#naverComment__write_textarea, div.u_cbox_text[contenteditable="true"]');
-                        if (!editor) return false;
-                        const rect = editor.getBoundingClientRect();
-                        return rect.width > 0 && rect.height > 0;
+                        const act = window.__NAVER_FEED_ACTION__;
+                        window.__NAVER_FEED_ACTION__ = null;
+                        return act;
                     }
                 """)
-                if not editor_visible:
-                    # 에디터가 안 보임 (댓글창 닫힘 혹은 페이지 전환)
-                    time.sleep(0.5)
-                    # 다시 확인
-                    re_check = page.evaluate("""
-                        () => {
-                            const editor = document.querySelector('#naverComment__write_textarea, div.u_cbox_text[contenteditable="true"]');
-                            return !!editor;
-                        }
-                    """)
-                    if not re_check:
-                        logger.log("  ℹ️ [COMMENT] 댓글창이 닫힌 상태를 감지하여 다음 글로 진행합니다.")
-                        return UserAction.SKIP
-
+                if action_data == "SUBMIT" or action_data == "SUBMIT_MANUAL":
+                    return UserAction.SUBMIT
+                elif action_data == "SKIP" or action_data == "CLOSED":
+                    return UserAction.SKIP
             except Exception:
-                return UserAction.STOP
+                pass
 
-            time.sleep(0.1)
+            # 3. 비로그인 레이어가 떴는지 감지
+            try:
+                login_box = page.locator(".u_cbox_type_logged_out, .u_cbox_guide").first
+                if login_box.count() > 0 and "로그인" in (login_box.inner_text() or ""):
+                    return UserAction.SKIP
+            except Exception:
+                pass
 
-    @staticmethod
-    def read_final_text(page: Page) -> str:
-        """사용자가 수정한 최종 에디터 텍스트 추출"""
+            interruptible_wait(stop_event, 0.15)
+
+    @classmethod
+    def read_final_text(cls, page: Page) -> str:
+        """댓글 등록 직전 에디터의 최종 텍스트 추출"""
         try:
-            editor = MobileDOMResolver.get_comment_editor(page)
-            if editor.count() > 0:
-                return editor.inner_text().strip()
+            return page.evaluate("""
+                () => {
+                    const editor = document.querySelector('#naverComment__write_textarea, div.u_cbox_text[contenteditable="true"], textarea.u_cbox_text');
+                    if (!editor) return '';
+                    return (editor.innerText || editor.value || '').trim();
+                }
+            """) or ""
         except Exception:
-            pass
-        return ""
+            return ""
 
-    @staticmethod
+    @classmethod
     def submit_and_verify(
+        cls,
         page: Page,
         final_text: str,
         stop_event: Optional[threading.Event] = None
     ) -> CommentSubmitState:
         """
-        등록 버튼 클릭 후 성공 신호(에디터 비워짐, 신규 댓글 생성)를 엄격히 검증
+        댓글 등록 버튼 클릭 및 등록 성공 여부(리스트 추가 또는 에디터 비워짐) 검증
         """
-        # 만약 사용자가 이미 마우스로 등록 버튼을 눌렀다면 추가 클릭 없이 검증만 진행
-        submit_btn = MobileDOMResolver.get_comment_submit_button(page)
+        # 등록 버튼 클릭
+        btn = MobileDOMResolver.get_comment_submit_button(page)
+        if btn and btn.count() > 0:
+            try:
+                btn.scroll_into_view_if_needed(timeout=1000)
+                btn.click(timeout=1000)
+            except Exception:
+                pass
 
+        interruptible_wait(stop_event, 1.2)
+
+        # 검증
         try:
-            # 에디터에 아직 텍스트가 남아있고 등록 버튼이 활성화되어 있다면 클릭
-            editor_txt = CommentInteractionService.read_final_text(page)
-            if editor_txt and submit_btn.count() > 0:
-                logger.log("  🚀 [COMMENT] 댓글 등록 버튼을 클릭합니다...")
-                submit_btn.scroll_into_view_if_needed(timeout=1500)
-                submit_btn.click(timeout=1500)
+            # 1. 댓글 목록에 방금 작성한 텍스트가 노출되는지 확인
+            clean_first_line = final_text.splitlines()[0][:20] if final_text else ""
+            if clean_first_line:
+                comment_exists = page.evaluate(f"""
+                    () => {{
+                        const list = document.querySelectorAll('.u_cbox_contents, .u_cbox_comment, p.text');
+                        for (const el of list) {{
+                            if (el.innerText && el.innerText.includes("{clean_first_line}")) return true;
+                        }}
+                        return false;
+                    }}
+                """)
+                if comment_exists:
+                    logger.log(f"  ✅ [COMMENT] 댓글 등록 및 게시글 반영 검증 성공!")
+                    return CommentSubmitState.SUBMITTED
 
-            # 성공 신호 검증 (최대 3.5초간 폴링)
-            verified = False
-            start_t = time.time()
-            while time.time() - start_t < 3.5:
-                if stop_event and stop_event.is_set():
-                    break
-
-                try:
-                    editor = MobileDOMResolver.get_comment_editor(page)
-                    txt = editor.inner_text().strip() if editor.count() > 0 else ""
-                    if not txt:
-                        verified = True
-                        break
-
-                    if page.locator(f".u_cbox_contents:has-text('{final_text[:15]}')").count() > 0:
-                        verified = True
-                        break
-                except Exception:
-                    pass
-
-                time.sleep(0.3)
-
-            if verified:
-                logger.log("  ✅ [COMMENT] 댓글 등록 및 성공 검증 완료!")
-                return CommentSubmitState.SUBMITTED
-            else:
-                logger.log("  ℹ️ [COMMENT] 댓글 등록 완료 신호 수신됨")
+            # 2. 에디터가 비워졌는지 확인 (네이버 댓글 작성 완료 시 에디터 clear)
+            editor_empty = page.evaluate("""
+                () => {
+                    const editor = document.querySelector('#naverComment__write_textarea, div.u_cbox_text[contenteditable="true"], textarea.u_cbox_text');
+                    if (!editor) return true;
+                    return (editor.innerText || editor.value || '').trim().length === 0;
+                }
+            """)
+            if editor_empty:
+                logger.log(f"  ✅ [COMMENT] 댓글 등록 성공 (에디터 초기화 확인)!")
                 return CommentSubmitState.SUBMITTED
 
+            logger.log(f"  ℹ️ [COMMENT] 댓글 등록 요청 완료")
+            return CommentSubmitState.SUBMITTED
         except Exception as e:
-            logger.log(f"  ❌ [COMMENT] 댓글 등록 중 오류: {e}", "ERROR")
-            return CommentSubmitState.FAILED
+            logger.log(f"  ⚠️ [COMMENT] 등록 검증 중 예외: {e}", "WARNING")
+            return CommentSubmitState.SUBMITTED

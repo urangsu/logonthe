@@ -1,0 +1,10 @@
+2026/08/25-07:24:12.162 8cf84 Creating DB /Volumes/무제/jusik/naver-blog-bot/data/browser_profile/Default/Session Storage since it was missing.
+2026/08/25-07:24:12.172 8cf84 Reusing MANIFEST /Volumes/무제/jusik/naver-blog-bot/data/browser_profile/Default/Session Storage/MANIFEST-000001
+2026/08/25-07:24:25.370 8cf87 Level-0 table #5: started
+2026/08/25-07:24:25.379 8cf87 Level-0 table #5: 98213 bytes OK
+2026/08/25-07:24:25.387 8cf87 Delete type=0 #3
+2026/08/25-07:24:35.908 8cf87 Level-0 table #7: started
+2026/08/25-07:24:35.915 8cf87 Level-0 table #7: 103891 bytes OK
+2026/08/25-07:24:35.920 8cf87 Delete type=0 #4
+2026/08/25-07:24:35.974 8cf84 Level-0 table #9: started
+2026/08/25-07:24:35.980 8cf84 Level-0 table #9: 51989 bytes OK
