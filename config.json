@@ -1,0 +1,9 @@
+{
+  "min_delay": 0.0,
+  "max_delay": 8.0,
+  "max_pages": 5,
+  "browser_mode": "new",
+  "default_keywords": ["재테크", "주식", "맛집", "일상"],
+  "comment_template": "{좋은|유익한|멋진} 포스팅 잘 읽고 갑니다! {오늘도 행복한 하루 보내세요|응원합니다|감사합니다}!",
+  "secret_comment": false
+}

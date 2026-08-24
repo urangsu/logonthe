@@ -1,0 +1,28 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+env/
+venv/
+ENV/
+
+# Chrome / User Profile (Sensitive Login Sessions & Cookies)
+data/user_profile/
+data/cdp_profile/
+data/history.json
+
+# OS specific
+.DS_Store
+.DS_Store?
+._*
+.Spotlight-V100
+.Trashes
+ehthumbs.db
+Thumbs.db
+
+# Logs & Temporary
+*.log
+scratch/
+test_*.py
