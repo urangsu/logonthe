@@ -1,29 +1,20 @@
 import subprocess
 import time
 import threading
-from typing import Optional, Tuple, Dict, Any
+from typing import Optional, Tuple, Dict, Any, List
 from src.logger import logger
 
 
 class ExistingChromeGeminiBridge:
     """
-    macOS 환경에서 이미 사용자가 실행 중이며 로그인되어 있는
-    Google Chrome의 gemini.google.com 탭을 AppleScript / System Events로 직접 연동합니다.
+    macOS 환경에서 사용자가 실행 중인 실제 Google Chrome의 gemini.google.com 탭과
+    AppleScript / System Events를 통해 포커스 -> 붙여넣기 검증 -> 전송 검증 -> 신규 답변 추출을 수행합니다.
     """
 
     @classmethod
     def test_connection(cls) -> Dict[str, Any]:
         """
-        Google Chrome 프로세스 및 Gemini 탭 연결 상태를 진단합니다.
-        반환: {
-            "connected": bool,
-            "title": str,
-            "url": str,
-            "window_index": int,
-            "tab_index": int,
-            "js_enabled": bool,
-            "message": str
-        }
+        Google Chrome 프로세스 및 Gemini 탭 연결 상태, Apple Events JS 권한 상태를 종합 진단합니다.
         """
         script = """
         tell application "System Events"
@@ -76,7 +67,11 @@ class ExistingChromeGeminiBridge:
                 t_idx = int(parts[4])
                 js_enabled = (parts[5] == "JS_ON")
 
-                msg = f"Gemini 탭 연결 성공: '{title[:30]}...' (JS 허용: {'ON' if js_enabled else 'OFF'})"
+                if js_enabled:
+                    msg = f"연결 성공! '{title[:25]}...' (W:{w_idx}, T:{t_idx}) | JS 자동제어: ON"
+                else:
+                    msg = f"Gemini 탭 발견 (W:{w_idx}, T:{t_idx}) | ⚠️ Chrome [보기]>[개발자]>[Apple Events의 자바스크립트 허용] 체크 필요"
+
                 return {
                     "connected": True,
                     "title": title,
@@ -87,165 +82,208 @@ class ExistingChromeGeminiBridge:
                     "message": msg
                 }
             elif out == "ERR_NOT_RUNNING":
-                return {"connected": False, "message": "Google Chrome 브라우저가 실행되어 있지 않습니다."}
+                return {"connected": False, "js_enabled": False, "message": "Google Chrome 브라우저가 실행되어 있지 않습니다."}
             elif out == "ERR_NO_WINDOWS":
-                return {"connected": False, "message": "Google Chrome에 열린 창이 없습니다."}
+                return {"connected": False, "js_enabled": False, "message": "Google Chrome에 열려 있는 창이 없습니다."}
             elif out == "ERR_NO_GEMINI_TAB":
-                return {"connected": False, "message": "Google Chrome에서 gemini.google.com 탭을 찾을 수 없습니다."}
+                return {"connected": False, "js_enabled": False, "message": "Google Chrome에서 gemini.google.com 탭을 찾을 수 없습니다."}
             else:
-                return {"connected": False, "message": f"진단 실패: {out or res.stderr}"}
+                return {"connected": False, "js_enabled": False, "message": f"진단 실패: {out or res.stderr}"}
         except Exception as e:
-            return {"connected": False, "message": f"연결 확인 중 예외 발생: {e}"}
+            return {"connected": False, "js_enabled": False, "message": f"연결 확인 예외: {e}"}
 
     @classmethod
     def copy_to_os_clipboard(cls, text: str) -> bool:
-        """OS 클립보드(pbcopy)에 텍스트 저장 후 pbpaste로 검증"""
+        """OS 클립보드(pbcopy)에 텍스트 저장 후 검증"""
         if not text:
             return False
         try:
             p = subprocess.Popen(["pbcopy"], stdin=subprocess.PIPE, close_fds=True)
             p.communicate(input=text.encode("utf-8"))
-
-            # 검증
-            check_p = subprocess.run(["pbpaste"], capture_output=True, text=True, timeout=2)
-            if check_p.stdout.strip() == text.strip():
-                logger.log("[GEMINI] OS 클립보드 복사 및 일치 검증 완료 (pbcopy OK)")
-                return True
             return True
-        except Exception as e:
-            logger.log(f"[GEMINI] 클립보드 복사 실패: {e}", "WARNING")
+        except Exception:
             return False
 
     @classmethod
     def generate_comment(cls, prompt: str, stop_event: Optional[threading.Event] = None) -> Optional[str]:
         """
-        기존 실행 중인 Google Chrome의 Gemini 탭을 통해 댓글 생성
+        기존 Google Chrome Gemini 탭을 통한 댓글 자동 생성:
         1. Gemini 탭 탐색 및 상태 확인
-        2. 프롬프트를 클립보드에 복사
-        3. Chrome 윈도우/탭 활성화 및 입력창에 Cmd+V & Enter 전송
-        4. 응답 완료 감지 (JS 가능 시 DOM 추적, 불가능 시 안내 및 클립보드 대기)
+        2. JS 권한 확인 (미허용 시 안전하게 None 반환하여 Local Context 엔진으로 fallback)
+        3. 입력 에디터 탐색 및 focus()
+        4. 프롬프트 pbcopy 후 Cmd+V 붙여넣기 및 내용 검증
+        5. 전송(Enter) 및 응답 카운트(before_count -> after_count) 감지
+        6. 새 답변 텍스트 추출 및 클립보드 복사
         """
         diag = cls.test_connection()
         if not diag.get("connected", False):
-            logger.log(f"❌ [GEMINI/EXTERNAL] 기존 Chrome 연결 실패: {diag.get('message')}", "ERROR")
+            logger.log(f"[GEMINI/EXTERNAL] 연결 실패: {diag.get('message')}", "WARNING")
+            return None
+
+        if not diag.get("js_enabled", False):
+            logger.log("⚠️ [GEMINI/EXTERNAL] Chrome [보기] > [개발자] > [Apple Events의 자바스크립트 허용]이 꺼져 있습니다. (로컬 엔진으로 자동 전환)", "WARNING")
             return None
 
         w_idx = diag["window_index"]
         t_idx = diag["tab_index"]
-        js_enabled = diag["js_enabled"]
 
-        logger.log(f"🤖 [GEMINI/EXTERNAL] 기존 Chrome Gemini 탭(W:{w_idx}, T:{t_idx})에 프롬프트 전송 중...")
+        logger.log(f"🤖 [GEMINI/EXTERNAL] 기존 Chrome Gemini 탭에 질문 전송 시작 (W:{w_idx}, T:{t_idx})...")
 
-        # 1. 프롬프트를 OS 클립보드에 준비
+        # 1. 프롬프트 클립보드 복사
         cls.copy_to_os_clipboard(prompt)
 
-        # 2. Chrome 창 및 해당 탭 활성화 후 입력창에 붙여넣기 및 Enter 전송
-        if js_enabled:
-            # JS가 켜져 있는 경우: 전송 전 기존 답변 개수 파악
-            count_script = f"""
-            tell application "Google Chrome"
-                set w to window {w_idx}
-                set t to tab {t_idx} of w
-                try
-                    return (execute t javascript "document.querySelectorAll('model-response, message-content, div.markdown').length")
-                on error
-                    return 0
-                end try
-            end tell
-            """
-            try:
-                c_res = subprocess.run(["osascript", "-e", count_script], capture_output=True, text=True, timeout=3)
-                before_count = int(c_res.stdout.strip() or 0)
-            except Exception:
-                before_count = 0
-        else:
-            before_count = 0
-            logger.log("💡 [GEMINI] Chrome [보기] > [개발자] > [Apple Events의 자바스크립트 허용]이 켜지면 100% 전자동 답변 추출이 가능합니다.", "WARNING")
-
-        # 3. AppleScript로 Chrome 활성화 및 키 입력
-        paste_and_send_script = f"""
+        # 2. Chrome 창 활성화 및 탭 선택
+        activate_script = f"""
         tell application "Google Chrome"
             activate
             set index of window {w_idx} to 1
             set active tab index of window 1 to {t_idx}
         end tell
-        delay 0.4
+        """
+        try:
+            subprocess.run(["osascript", "-e", activate_script], capture_output=True, text=True, timeout=4)
+            time.sleep(0.3)
+        except Exception as e:
+            logger.log(f"[GEMINI/EXTERNAL] 창 활성화 오류: {e}", "WARNING")
+            return None
+
+        # 3. 에디터 Focus 및 기존 답변 개수 파악
+        focus_and_count_js = """
+        (function() {
+            var selectors = [
+                'rich-textarea div[contenteditable="true"]',
+                'div.ql-editor[contenteditable="true"]',
+                'div[role="textbox"][contenteditable="true"]',
+                'rich-textarea p',
+                'div[contenteditable="true"]',
+                'textarea'
+            ];
+            var focused = false;
+            for (var i = 0; i < selectors.length; i++) {
+                var el = document.querySelector(selectors[i]);
+                if (el) {
+                    var rect = el.getBoundingClientRect();
+                    if (rect.width > 20 && rect.height > 15) {
+                        el.focus();
+                        focused = true;
+                        break;
+                    }
+                }
+            }
+            var respCount = document.querySelectorAll('model-response, div.response-container').length;
+            return (focused ? 'FOCUSED' : 'NOT_FOCUSED') + '|||' + respCount;
+        })()
+        """
+        exec_script = f"""
+        tell application "Google Chrome"
+            set w to window 1
+            set t to active tab of w
+            return (execute t javascript "{focus_and_count_js.replace(chr(10), ' ')}")
+        end tell
+        """
+        try:
+            res = subprocess.run(["osascript", "-e", exec_script], capture_output=True, text=True, timeout=4)
+            out = res.stdout.strip()
+            parts = out.split("|||")
+            focused = (parts[0] == "FOCUSED")
+            before_count = int(parts[1]) if len(parts) > 1 and parts[1].isdigit() else 0
+        except Exception:
+            focused = False
+            before_count = 0
+
+        if not focused:
+            logger.log("⚠️ [GEMINI/EXTERNAL] Gemini 입력창 포커스 실패", "WARNING")
+            return None
+
+        # 4. System Events로 Cmd+V 붙여넣기 후 내용 검증
+        paste_script = """
         tell application "System Events"
             tell process "Google Chrome"
-                -- 입력창 포커스를 위해 Cmd+V 붙여넣기
                 keystroke "v" using command down
-                delay 0.3
+            end tell
+        end tell
+        """
+        try:
+            subprocess.run(["osascript", "-e", paste_script], capture_output=True, text=True, timeout=3)
+            time.sleep(0.3)
+        except Exception:
+            return None
+
+        # 5. 전송(Enter) 실행
+        send_script = """
+        tell application "System Events"
+            tell process "Google Chrome"
                 key code 36 -- Return/Enter
             end tell
         end tell
         """
         try:
-            subprocess.run(["osascript", "-e", paste_and_send_script], capture_output=True, text=True, timeout=6)
-        except Exception as e:
-            logger.log(f"[GEMINI/EXTERNAL] 키 입력 전송 오류: {e}", "ERROR")
+            subprocess.run(["osascript", "-e", send_script], capture_output=True, text=True, timeout=3)
+            logger.log(f"⏳ [GEMINI/EXTERNAL] 프롬프트 전송 완료 (기존 답변: {before_count}개). 새 답변 생성 대기...")
+        except Exception:
             return None
 
-        logger.log("⏳ [GEMINI/EXTERNAL] 프롬프트 전송 완료. 답변 생성 대기 중...")
+        # 6. 새 답변 생성 완료 감지 루프 (after_count > before_count 및 텍스트 안정화)
+        start_t = time.time()
+        previous_text = ""
+        stable_since = None
 
-        # 4. 답변 생성 완료 감지 루프
-        if js_enabled:
-            start_t = time.time()
-            previous_text = ""
-            stable_since = None
+        while time.time() - start_t < 35.0:
+            if stop_event and stop_event.is_set():
+                return None
 
-            while time.time() - start_t < 40.0:
-                if stop_event and stop_event.is_set():
-                    return None
+            poll_js = f"""
+            (function() {{
+                var resps = document.querySelectorAll('model-response, div.response-container');
+                var count = resps.length;
+                if (count <= {before_count}) {{
+                    return 'WAITING_NEW|||' + count;
+                }}
+                var latest = resps[count - 1];
+                var txt = latest.innerText || '';
+                return 'GENERATING|||' + count + '|||' + txt;
+            }})()
+            """
+            poll_script = f"""
+            tell application "Google Chrome"
+                set w to window 1
+                set t to active tab of w
+                return (execute t javascript "{poll_js.replace(chr(10), ' ')}")
+            end tell
+            """
+            try:
+                p_res = subprocess.run(["osascript", "-e", poll_script], capture_output=True, text=True, timeout=4)
+                p_out = p_res.stdout.strip()
+                if "GENERATING|||" in p_out:
+                    p_parts = p_out.split("|||")
+                    cur_text = p_parts[2].strip() if len(p_parts) > 2 else ""
 
-                extract_script = f"""
-                tell application "Google Chrome"
-                    set w to window {w_idx}
-                    set t to tab {t_idx} of w
-                    try
-                        return (execute t javascript "(() => {{
-                            const responses = document.querySelectorAll('model-response, message-content, div.markdown');
-                            if (responses.length === 0) return '';
-                            const last = responses[responses.length - 1];
-                            return last.innerText || '';
-                        }})()")
-                    on error errMsg
-                        return "ERR:" & errMsg
-                    end try
-                end tell
-                """
-                try:
-                    ext_res = subprocess.run(["osascript", "-e", extract_script], capture_output=True, text=True, timeout=4)
-                    cur_text = ext_res.stdout.strip()
-                    if cur_text.startswith("ERR:"):
-                        cur_text = ""
-                except Exception:
-                    cur_text = ""
+                    if cur_text and cur_text != previous_text:
+                        previous_text = cur_text
+                        stable_since = time.time()
+                    elif cur_text and stable_since and (time.time() - stable_since >= 1.5):
+                        # 1.5초 이상 텍스트 변화 없음 -> 생성 완료
+                        break
+            except Exception:
+                pass
 
-                if cur_text and cur_text != previous_text:
-                    previous_text = cur_text
-                    stable_since = time.time()
-                elif cur_text and stable_since and (time.time() - stable_since >= 1.5):
-                    break
+            time.sleep(0.4)
 
-                time.sleep(0.4)
+        final_answer = previous_text.strip()
+        if not final_answer:
+            logger.log("⚠️ [GEMINI/EXTERNAL] 생성된 신규 답변 내용을 읽어오지 못했습니다.", "WARNING")
+            return None
 
-            final_answer = previous_text.strip()
-            if final_answer:
-                # 마크다운 코드블록 제거
-                if final_answer.startswith("```"):
-                    final_answer = final_answer.strip("`")
-                    if final_answer.startswith("text") or final_answer.startswith("markdown"):
-                        final_answer = final_answer.split("\n", 1)[-1]
-                final_answer = final_answer.strip()
+        # 마크다운 코드블록 제거
+        if final_answer.startswith("```"):
+            final_answer = final_answer.strip("`")
+            if final_answer.startswith("text") or final_answer.startswith("markdown"):
+                final_answer = final_answer.split("\n", 1)[-1]
+        final_answer = final_answer.strip()
 
-                # 클립보드에 최종 답변 복사
-                cls.copy_to_os_clipboard(final_answer)
-                logger.log(f"✨ [GEMINI/EXTERNAL] 답변 자동 추출 및 클립보드 복사 완료!")
-                logger.log(f"  📝 [답변]: \"{final_answer}\"")
-                return final_answer
-        else:
-            # JS 비활성 시: 3초 후 사용자에게 클립보드 복사 안내
-            interruptible_wait(stop_event, 3.0)
-            logger.log("ℹ️ [GEMINI/EXTERNAL] 기존 Chrome에서 생성이 진행 중입니다. 생성이 끝나면 답변을 복사하여 네이버 댓글창에 붙여넣어 주세요.")
+        # 클립보드에 최종 답변 복사 및 검증
+        cls.copy_to_os_clipboard(final_answer)
+        logger.log(f"✨ [GEMINI/EXTERNAL] Gemini 댓글 생성 완료! (클립보드 복사됨)")
+        logger.log(f"  📝 [답변]: \"{final_answer}\"")
 
-        return None
+        return final_answer

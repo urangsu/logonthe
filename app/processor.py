@@ -9,6 +9,7 @@ from app.state import StateManager, FeedState
 from naver.interaction import LikeInteractionService, CommentInteractionService
 from naver.content_extractor import ContentContextExtractor
 from services.draft import DraftService
+from services.contextual_draft import ContextualDraftEngine
 from services.ai_prompt import AIPromptBuilder
 from services.clipboard_bridge import ClipboardCommandBridge
 from services.gemini_web import GeminiWebBridge
@@ -36,7 +37,6 @@ class PostProcessor:
         gemini_browser_mode: str = "existing_chrome_mac",
         gemini_web_enabled: bool = True,
         gemini_url: str = "https://gemini.google.com/app",
-        auto_apply_ai_comment: bool = False,
         gemini_page: Optional[Page] = None,
         pacing_service: Optional[PacingService] = None,
         command_bridge: Optional[ClipboardCommandBridge] = None,
@@ -54,7 +54,6 @@ class PostProcessor:
         self.gemini_browser_mode = gemini_browser_mode
         self.gemini_web_enabled = gemini_web_enabled
         self.gemini_url = gemini_url
-        self.auto_apply_ai_comment = auto_apply_ai_comment
         self.gemini_page = gemini_page
         self.pacing = pacing_service
         self.command_bridge = command_bridge
@@ -62,7 +61,7 @@ class PostProcessor:
         self.stop_event = stop_event
 
     def process(self, detail_page: Page, post: FeedPost) -> PostProcessResult:
-        """단일 FeedPost에 대해 상세 이동 -> (댓글 활성 시에만) Gemini 생성 -> 공감 -> 초안입력 -> 사용자 승인/등록 수행"""
+        """단일 FeedPost에 대해 상세 이동 -> (댓글 활성 시) 3단계 초안 생성 -> 공감 -> 초안입력 -> 사용자 승인/등록 수행"""
         result = PostProcessResult(post=post)
 
         if self.stop_event and self.stop_event.is_set():
@@ -84,8 +83,9 @@ class PostProcessor:
         if self.stop_event and self.stop_event.is_set():
             raise StopRequestedException()
 
-        # 2. 제목/본문 맥락 추출 (댓글 기능이 켜져 있을 때만 Gemini 프롬프트 준비)
-        gemini_answer = None
+        # 2. 제목/본문 맥락 추출 및 3단계 초안 생성 (댓글 기능 활성 시에만)
+        draft_text = ""
+        draft_source_label = ""
         suffix = DraftService.resolve_suffix(post.source, self.config)
 
         if self.comment_enabled:
@@ -105,12 +105,12 @@ class PostProcessor:
                     ai_clipboard_ready=bool(ai_prompt)
                 )
 
-            # 3. Gemini 댓글 자동 생성 (댓글 기능이 켜져 있고 Gemini 연동 활성 시)
+            # [Tier 1] Gemini 자동 댓글 생성 시도
+            gemini_answer = None
             if self.gemini_web_enabled and ai_prompt:
                 if self.state_mgr:
                     self.state_mgr.update(message="Gemini로 자동 댓글 생성 중...")
 
-                # 3-1. 기존 Chrome 브라우저 탭 연동 모드 (기본값)
                 if self.gemini_browser_mode == "existing_chrome_mac":
                     try:
                         gemini_answer = ExistingChromeGeminiBridge.generate_comment(
@@ -118,9 +118,8 @@ class PostProcessor:
                             stop_event=self.stop_event
                         )
                     except Exception as e:
-                        logger.log(f"[GEMINI/EXTERNAL] 기존 Chrome 연동 실패: {e}", "WARNING")
+                        logger.log(f"[GEMINI/EXTERNAL] 연동 실패: {e}", "WARNING")
 
-                # 3-2. 프로그램 전용 Playwright 브라우저 탭 모드
                 elif self.gemini_browser_mode == "managed_playwright" and self.gemini_page:
                     try:
                         gemini_answer = GeminiWebBridge.generate_comment(
@@ -132,11 +131,26 @@ class PostProcessor:
                     except Exception as e:
                         logger.log(f"[GEMINI/MANAGED] 생성 실패: {e}", "WARNING")
 
-                # 네이버 상세 페이지로 포커스 복귀
                 try:
                     detail_page.bring_to_front()
                 except Exception:
                     pass
+
+            # 초안 결정 (Gemini -> Local Contextual Engine -> Spintax)
+            if gemini_answer:
+                draft_text = DraftService.compose_body_and_suffix(gemini_answer, suffix)
+                draft_source_label = "Gemini 생성"
+            else:
+                # [Tier 2] 로컬 문맥 분석 엔진 (ContextualDraftEngine)
+                local_res = ContextualDraftEngine.generate(post.title or "", post.excerpt or "")
+                if local_res and local_res.body:
+                    draft_text = DraftService.compose_body_and_suffix(local_res.body, suffix)
+                    draft_source_label = f"로컬 분석({local_res.category})"
+                    logger.log(f"💡 [DRAFT] 로컬 문맥 분석 초안 생성 ({local_res.category} / '{local_res.subject}'): \"{local_res.body}\"")
+                else:
+                    # [Tier 3] Spintax Fallback
+                    draft_text = DraftService.generate(self.comment_template, suffix)
+                    draft_source_label = "기본 템플릿"
 
         if self.stop_event and self.stop_event.is_set():
             raise StopRequestedException()
@@ -147,7 +161,7 @@ class PostProcessor:
             if p_res.interrupted:
                 raise StopRequestedException()
 
-        # 4. 공감(하트) 처리
+        # 3. 공감(하트) 처리
         if self.like_enabled:
             if self.state_mgr:
                 self.state_mgr.update(new_state=FeedState.CHECKING_LIKE, message="공감 상태 확인 중...")
@@ -168,16 +182,10 @@ class PostProcessor:
             if p_res.interrupted:
                 raise StopRequestedException()
 
-        # 5. 댓글 처리 (Human-in-the-loop)
-        if self.comment_enabled:
-            # 꼬리말 적용 및 초안 결정
-            if self.auto_apply_ai_comment and gemini_answer:
-                draft_text = DraftService.compose_body_and_suffix(gemini_answer, suffix)
-            else:
-                draft_text = DraftService.generate(self.comment_template, suffix)
-
+        # 4. 댓글 처리 (Human-in-the-loop)
+        if self.comment_enabled and draft_text:
             if self.state_mgr:
-                self.state_mgr.update(new_state=FeedState.FILLING_DRAFT, message="댓글 초안 입력 중...")
+                self.state_mgr.update(new_state=FeedState.FILLING_DRAFT, message=f"댓글 초안({draft_source_label}) 입력 중...")
 
             cmt_res = CommentInteractionService.prepare_comment_draft(
                 detail_page, draft_text, secret_comment=self.secret_comment, stop_event=self.stop_event
@@ -185,7 +193,7 @@ class PostProcessor:
 
             if cmt_res.status == CommentSubmitState.DRAFTED:
                 if self.state_mgr:
-                    msg = "댓글 확인 대기 중 (수정 후 Enter=등록 / Cmd+V=Gemini댓글 붙여넣기 / Esc=건너뛰기)"
+                    msg = f"댓글 확인 대기 중 ({draft_source_label} 입력됨 / 수정 후 Enter=등록 / Esc=건너뛰기)"
                     self.state_mgr.update(new_state=FeedState.WAITING_USER, message=msg)
 
                 action = CommentInteractionService.wait_for_user_action(
