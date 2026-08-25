@@ -1,7 +1,7 @@
 {
   "schema_version": 2,
-  "feed_source": "recommendation",
-  "max_feed_items": 40,
+  "feed_source": "neighbor",
+  "max_feed_items": 42,
   "like_enabled": true,
   "comment_enabled": true,
   "comment_template": "{좋은|유익한|멋진} 포스팅 잘 읽었습니다!",

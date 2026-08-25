@@ -88,8 +88,8 @@ class PositiveSafetyValidator:
             if phrase in text:
                 return False, f"banned_private_question: '{phrase}'"
 
-        # 9. 길이 적합성 검사 (15자 이상 90자 이하)
-        if len(text) < 12 or len(text) > 100:
+        # 9. 길이 적합성 검사 (12자 이상 180자 이하)
+        if len(text) < 12 or len(text) > 180:
             return False, f"length_out_of_bounds: {len(text)}자"
 
         return True, None

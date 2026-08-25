@@ -184,6 +184,11 @@ class PostProcessor:
                     logger.log(f"  ⚠️ [COMMENT] 댓글 레이어 준비 타임아웃 ({open_reason}).", "WARNING")
                     result.comment_result = CommentProcessResult(status=CommentSubmitState.FAILED, error=open_reason)
             else:
+                # [코퍼스 자동 수집] 방문한 글의 기존 우수 댓글을 학습 코퍼스에 비식별화하여 자동 누적
+                from services.visited_comment_collector import VisitedCommentCollector
+                from services.user_learning_service import UserLearningService
+                VisitedCommentCollector.collect_from_page(detail_page, post)
+
                 # 3-2. 서버 사이드 중복 댓글 스캔 (Gemini 호출 전 반드시 선행)
                 presence = ServerCommentDuplicateGuard.scan_page_for_my_comment(detail_page, stop_event=self.stop_event)
                 if presence.state == CommentPresenceState.PRESENT:
@@ -216,6 +221,7 @@ class PostProcessor:
 
                     draft_text = ""
                     draft_source_label = ""
+                    detected_category = "UNKNOWN"
 
                     # [Tier 1] Gemini 자동 댓글 생성
                     gemini_answer = None
@@ -256,6 +262,7 @@ class PostProcessor:
                         local_res = ContextualDraftEngine.generate(post.title or "", post.excerpt or "")
                         if local_res and local_res.body:
                             draft_text = DraftService.compose_body_and_suffix(local_res.body, suffix)
+                            detected_category = local_res.category
                             intent_tag = f"/{local_res.intent.value}" if local_res.intent.value != "none" else ""
                             draft_source_label = f"로컬 분석({local_res.category}{intent_tag})"
                             logger.log(f"💡 [DRAFT] 로컬 맞춤형 초안 생성 ({local_res.category}{intent_tag} / '{local_res.subject}'): \"{local_res.body}\"")
@@ -313,6 +320,13 @@ class PostProcessor:
                             cmt_res.status = submit_status
 
                             if submit_status == CommentSubmitState.SUBMITTED:
+                                # [사용자 피드백 기록] 초안 대비 사용자 최종 수정 및 등록 댓글을 학습용 코퍼스에 저장
+                                UserLearningService.record_submission(
+                                    post=post,
+                                    initial_draft=draft_text,
+                                    final_submitted=cmt_res.submitted_text,
+                                    category=detected_category
+                                )
                                 if self.state_mgr:
                                     self.state_mgr.update(inc_comment=True)
 
