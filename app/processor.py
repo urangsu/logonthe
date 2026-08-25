@@ -145,8 +145,8 @@ class PostProcessor:
                         daily_visitors=elig.daily_visitors
                     )
                 else:
-                    # 2-3. 실제 공감 트랜잭션 실행
-                    tx_res = LikeTransactionService.execute_like_transaction(detail_page, self.stop_event)
+                    # 2-3. 실제 공감 트랜잭션 실행 (2-Path 및 UI Settle 적용)
+                    tx_res = LikeTransactionService.execute_like_transaction(detail_page, self.stop_event, post=post)
                     tx_res.like_count = elig.like_count
                     tx_res.daily_visitors = elig.daily_visitors
                     result.like_result = tx_res

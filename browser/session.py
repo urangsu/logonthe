@@ -1,52 +1,165 @@
 import os
 import time
+import subprocess
 import threading
+import unicodedata
+from dataclasses import dataclass
 from typing import Optional, Dict, Any, List
 from playwright.sync_api import sync_playwright, Playwright, BrowserContext, Page
+from app.errors import BrowserDisconnectedError
 from src.logger import logger
 
 USER_DATA_DIR = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "data", "browser_profile"))
 LOCK_FILE = os.path.join(USER_DATA_DIR, ".profile_lock")
 
 
+@dataclass
+class ProfileStatus:
+    is_busy: bool
+    live_app_pid: Optional[int] = None
+    live_chromium_pid: Optional[int] = None
+    stale_app_lock: bool = False
+    stale_singleton_lock: bool = False
+
+
 class ProfileLockManager:
-    @staticmethod
-    def is_locked(profile_dir: str) -> bool:
-        lock_path = os.path.join(profile_dir, ".profile_lock")
-        if not os.path.exists(lock_path):
-            return False
+    """
+    브라우저 프로필 및 Chromium Singleton Lock 관리자
+    - 앱 레벨 .profile_lock 및 Chromium 레벨 SingletonLock/Socket/Cookie 동시 관리
+    - macOS 프로세스 테이블(ps -axo) 검색을 통한 실제 실행 중인 Chromium 탐지 (NFC/NFD 정규화 지원)
+    - Live 프로세스가 없을 때만 Stale 락 안전 정리
+    """
+
+    @classmethod
+    def get_live_chromium_pid(cls, profile_dir: str) -> Optional[int]:
+        """지정된 user-data-dir을 물고 실행 중인 실제 Chromium 프로세스 PID 조회"""
+        norm_target = unicodedata.normalize("NFC", os.path.abspath(profile_dir))
         try:
-            with open(lock_path, "r", encoding="utf-8") as f:
-                content = f.read().strip()
-            pid = int(content)
-            # macOS / Unix 프로세스 생존 확인
-            try:
-                os.kill(pid, 0)
-                return True
-            except OSError:
-                os.remove(lock_path)
-                return False
+            out = subprocess.check_output(["ps", "-axo", "pid=,command="], stderr=subprocess.DEVNULL).decode("utf-8")
+            for line in out.splitlines():
+                line_str = line.strip()
+                if not line_str:
+                    continue
+                parts = line_str.split(None, 1)
+                if len(parts) < 2:
+                    continue
+                pid_str, cmd = parts[0], parts[1]
+                norm_cmd = unicodedata.normalize("NFC", cmd)
+
+                if f"--user-data-dir={norm_target}" in norm_cmd or f"--user-data-dir {norm_target}" in norm_cmd:
+                    try:
+                        return int(pid_str)
+                    except ValueError:
+                        pass
         except Exception:
+            pass
+        return None
+
+    @classmethod
+    def inspect(cls, profile_dir: str) -> ProfileStatus:
+        lock_path = os.path.join(profile_dir, ".profile_lock")
+        live_app_pid = None
+        stale_app_lock = False
+
+        if os.path.exists(lock_path):
+            try:
+                with open(lock_path, "r", encoding="utf-8") as f:
+                    content = f.read().strip()
+                pid = int(content)
+                try:
+                    os.kill(pid, 0)
+                    live_app_pid = pid
+                except OSError:
+                    stale_app_lock = True
+            except Exception:
+                stale_app_lock = True
+
+        live_chromium_pid = cls.get_live_chromium_pid(profile_dir)
+
+        singleton_files = ["SingletonLock", "SingletonCookie", "SingletonSocket"]
+        has_singleton = any(os.path.lexists(os.path.join(profile_dir, f)) for f in singleton_files)
+        stale_singleton = has_singleton and (live_chromium_pid is None)
+
+        is_busy = (live_app_pid is not None) or (live_chromium_pid is not None)
+
+        return ProfileStatus(
+            is_busy=is_busy,
+            live_app_pid=live_app_pid,
+            live_chromium_pid=live_chromium_pid,
+            stale_app_lock=stale_app_lock,
+            stale_singleton_lock=stale_singleton
+        )
+
+    @classmethod
+    def is_locked(cls, profile_dir: str) -> bool:
+        status = cls.inspect(profile_dir)
+        return status.is_busy
+
+    @classmethod
+    def acquire(cls, profile_dir: str) -> bool:
+        status = cls.inspect(profile_dir)
+        if status.is_busy:
             return False
 
-    @staticmethod
-    def acquire(profile_dir: str) -> bool:
-        if ProfileLockManager.is_locked(profile_dir):
-            return False
+        # Stale 락 안전 정리
+        cls.cleanup_stale_locks(profile_dir)
+
         os.makedirs(profile_dir, exist_ok=True)
         lock_path = os.path.join(profile_dir, ".profile_lock")
         with open(lock_path, "w", encoding="utf-8") as f:
             f.write(str(os.getpid()))
         return True
 
-    @staticmethod
-    def release(profile_dir: str):
+    @classmethod
+    def cleanup_stale_locks(cls, profile_dir: str) -> bool:
+        """Live 프로세스가 없는 경우에만 stale 락 파일들 안전 삭제"""
+        status = cls.inspect(profile_dir)
+        if status.is_busy:
+            return False
+
+        # 1. 앱 레벨 락 파일 삭제
         lock_path = os.path.join(profile_dir, ".profile_lock")
         if os.path.exists(lock_path):
             try:
                 os.remove(lock_path)
             except Exception:
                 pass
+
+        # 2. Chromium Singleton 파일 삭제
+        singleton_files = ["SingletonLock", "SingletonCookie", "SingletonSocket"]
+        for sf in singleton_files:
+            p = os.path.join(profile_dir, sf)
+            if os.path.lexists(p):
+                try:
+                    os.remove(p)
+                except Exception:
+                    pass
+        return True
+
+    @classmethod
+    def release(cls, profile_dir: str):
+        """현재 프로세스의 락 해제"""
+        lock_path = os.path.join(profile_dir, ".profile_lock")
+        if os.path.exists(lock_path):
+            try:
+                with open(lock_path, "r", encoding="utf-8") as f:
+                    content = f.read().strip()
+                if int(content) == os.getpid():
+                    os.remove(lock_path)
+            except Exception:
+                pass
+
+
+def ensure_page_alive(page: Optional[Page]):
+    """페이지 생존 여부 검사 (Playwright closed state를 FatalSessionError로 전환)"""
+    if page is None:
+        raise BrowserDisconnectedError("Target page is None")
+    try:
+        if hasattr(page, "is_closed") and page.is_closed() is True:
+            raise BrowserDisconnectedError("Target page, context or browser has been closed")
+    except Exception as e:
+        if isinstance(e, BrowserDisconnectedError):
+            raise
 
 
 def interruptible_wait(stop_event: Optional[threading.Event], seconds: float, step: float = 0.1) -> bool:
@@ -66,10 +179,6 @@ def interruptible_wait(stop_event: Optional[threading.Event], seconds: float, st
 class BrowserSession:
     """
     Playwright 브라우저 세션 생명주기 관리자
-    - feed_page (피드 목록 순회)
-    - detail_page (게시글 상세 및 댓글/공감 상호작용)
-    - gemini_page (Gemini 웹 자동화 탭)
-    - stats_page (블로그 방문자 수 및 통계 확인용 유휴 탭)
     """
     def __init__(
         self,
@@ -108,9 +217,11 @@ class BrowserSession:
                 logger.log(f"[SESSION] CDP 연결 실패, 영구 프로필 모드로 전환합니다: {e}", "WARNING")
 
         if not ProfileLockManager.acquire(self.user_data_dir):
+            status = ProfileLockManager.inspect(self.user_data_dir)
+            holder = f"앱 PID {status.live_app_pid}" if status.live_app_pid else f"Chromium PID {status.live_chromium_pid}"
             raise RuntimeError(
-                f"프로필 디렉토리({self.user_data_dir})가 이미 다른 작업에서 사용 중입니다.\n"
-                f"기존 브라우저 창을 닫아주시거나 락을 초기화해 주세요."
+                f"프로필 디렉토리({self.user_data_dir})가 이미 사용 중입니다 ({holder}).\n"
+                f"실행 중인 브라우저 창을 닫거나 종료 후 다시 시도해 주세요."
             )
 
         os.makedirs(self.user_data_dir, exist_ok=True)
@@ -138,7 +249,6 @@ class BrowserSession:
             raise e
 
     def _init_pages_from_context(self):
-        """컨텍스트 내에 기존 열려 있는 탭들을 지능적으로 분석하여 feed_page, gemini_page 등에 매핑"""
         if not self.context:
             return
 
@@ -206,7 +316,6 @@ class BrowserSession:
         raise RuntimeError("브라우저 세션 컨텍스트가 초기화되지 않았습니다.")
 
     def get_stats_page(self) -> Page:
-        """블로그 방문자 수 및 프로필 통계 조회 전용 탭"""
         if self.stats_page and not self.stats_page.is_closed():
             return self.stats_page
 
@@ -236,6 +345,14 @@ class BrowserSession:
                 self.playwright = None
         except Exception:
             pass
+
+        # Chromium 프로세스 및 Singleton 파일 정리 대기
+        deadline = time.time() + 3.0
+        while time.time() < deadline:
+            live_pid = ProfileLockManager.get_live_chromium_pid(self.user_data_dir)
+            if live_pid is None:
+                break
+            time.sleep(0.2)
 
         ProfileLockManager.release(self.user_data_dir)
         logger.log("[SESSION] 브라우저 세션이 정상 종료되었습니다.")

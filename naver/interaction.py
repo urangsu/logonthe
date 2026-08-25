@@ -2,13 +2,14 @@ import time
 import threading
 from typing import Optional, Tuple
 from playwright.sync_api import Page, Locator
-from app.models import LikeState, LikeProcessResult, CommentSubmitState, CommentProcessResult, UserAction, WorkerCommandType
+from app.models import LikeState, LikeProcessResult, CommentSubmitState, CommentProcessResult, UserAction, WorkerCommandType, FeedPost
+from app.errors import BrowserDisconnectedError
 from naver.resolver import MobileDOMResolver
 from naver.editor_adapter import CommentEditorAdapter
 from naver.comment_guard import ServerCommentDuplicateGuard, CommentPresenceState
 from services.like_transaction import LikeTransactionService
 from services.clipboard_bridge import ClipboardCommandBridge
-from browser.session import interruptible_wait
+from browser.session import interruptible_wait, ensure_page_alive
 from src.logger import logger
 
 
@@ -19,14 +20,24 @@ class LikeInteractionService:
         return res.state
 
     @classmethod
-    def safe_process_like(cls, page: Page, stop_event: Optional[threading.Event] = None) -> LikeProcessResult:
-        return LikeTransactionService.execute_like_transaction(page, stop_event)
+    def safe_process_like(
+        cls,
+        page: Page,
+        stop_event: Optional[threading.Event] = None,
+        post: Optional[FeedPost] = None
+    ) -> LikeProcessResult:
+        return LikeTransactionService.execute_like_transaction(page, stop_event, post=post)
 
 
 class CommentInteractionService:
     @staticmethod
     def install_keyboard_listener(page: Page):
-        """Document 레벨 캡처링 키보드 및 마우스 등록/닫기 이벤트 리스너 설치"""
+        """
+        Document 레벨 캡처링 키보드 및 Delegated 마우스 등록/닫기 이벤트 리스너 설치
+        (표준 CSS 매칭만 사용하여 브라우저 evaluate 내 SyntaxError 완전 방지)
+        """
+        ensure_page_alive(page)
+
         page.evaluate("""
             () => {
                 window.__NAVER_FEED_ACTION__ = null;
@@ -34,6 +45,9 @@ class CommentInteractionService:
 
                 if (window.__NAVER_FEED_KEY_HANDLER__) {
                     document.removeEventListener('keydown', window.__NAVER_FEED_KEY_HANDLER__, true);
+                }
+                if (window.__NAVER_FEED_CLICK_HANDLER__) {
+                    document.removeEventListener('click', window.__NAVER_FEED_CLICK_HANDLER__, true);
                 }
 
                 // 1. 키보드 단축키 핸들러 (Enter=등록, Shift+Enter=줄바꿈, Esc=건너뛰기)
@@ -69,26 +83,35 @@ class CommentInteractionService:
                     }
                 };
 
-                document.addEventListener('keydown', window.__NAVER_FEED_KEY_HANDLER__, true);
+                // 2. Delegated 마우스 클릭 리스너 (동적 DOM 재생성에도 안전하게 등록 버튼 감지)
+                window.__NAVER_FEED_CLICK_HANDLER__ = (e) => {
+                    const rawBtn = e.target.closest ? e.target.closest('button, a, input[type="submit"]') : null;
+                    if (!rawBtn) return;
 
-                // 2. 마우스로 '등록' 버튼을 클릭한 경우도 감지 (클릭 시점 텍스트 보존)
-                const submitBtns = document.querySelectorAll('.u_cbox_btn_upload, button[data-action="comment#upload"], button:has-text("등록")');
-                submitBtns.forEach(btn => {
-                    btn.addEventListener('click', () => {
+                    const isSubmit = rawBtn.matches('.u_cbox_btn_upload') ||
+                                     rawBtn.matches('button[data-action="comment#upload"]') ||
+                                     (rawBtn.tagName === 'BUTTON' && (rawBtn.textContent || '').trim() === '등록');
+
+                    if (isSubmit) {
                         const editor = document.querySelector('#naverComment__write_textarea, div.u_cbox_text[contenteditable="true"], textarea.u_cbox_text');
                         window.__NAVER_COMMENT_FINAL_TEXT__ = editor ? (editor.innerText || editor.value || '').trim() : '';
                         window.__NAVER_COMMENT_SUBMITTED_FLAG__ = true;
                         window.__NAVER_FEED_ACTION__ = 'SUBMIT_MANUAL';
-                    }, { capture: true });
-                });
+                        return;
+                    }
 
-                // 3. 댓글창 닫기 버튼 클릭 감지
-                const closeBtns = document.querySelectorAll('.u_cbox_btn_close, button[data-action="comment#close"], a._close, button.btn_close');
-                closeBtns.forEach(btn => {
-                    btn.addEventListener('click', () => {
+                    const isClose = rawBtn.matches('.u_cbox_btn_close') ||
+                                    rawBtn.matches('button[data-action="comment#close"]') ||
+                                    rawBtn.matches('a._close') ||
+                                    rawBtn.matches('button.btn_close');
+
+                    if (isClose) {
                         window.__NAVER_FEED_ACTION__ = 'CLOSED';
-                    }, { capture: true });
-                });
+                    }
+                };
+
+                document.addEventListener('keydown', window.__NAVER_FEED_KEY_HANDLER__, true);
+                document.addEventListener('click', window.__NAVER_FEED_CLICK_HANDLER__, true);
             }
         """)
 
@@ -102,11 +125,14 @@ class CommentInteractionService:
         """
         댓글 열기 버튼 클릭 후 최대 5초간 Polling하여 에디터/로그인/비활성 상태 판정
         """
+        ensure_page_alive(page)
+
         open_btn = MobileDOMResolver.get_comment_button(page)
         if open_btn and open_btn.count() > 0:
             try:
-                open_btn.scroll_into_view_if_needed(timeout=1500)
-                open_btn.click(timeout=1500)
+                if open_btn.is_visible():
+                    open_btn.scroll_into_view_if_needed(timeout=1500)
+                    open_btn.click(timeout=1500)
             except Exception:
                 pass
 
@@ -115,15 +141,25 @@ class CommentInteractionService:
             if stop_event and stop_event.is_set():
                 return False, "stop_requested"
 
-            # 1. 로그인 요구 감지
-            login_box = page.locator(".u_cbox_type_logged_out, .u_cbox_guide").first
-            if login_box and login_box.count() > 0 and "로그인" in (login_box.inner_text() or ""):
-                return False, "login_required"
+            ensure_page_alive(page)
+
+            # 1. 실제 화면에 보이는 로그인 요구 감지 (hidden template 오탐 방지)
+            login_box = page.locator(".u_cbox_write_box.u_cbox_type_logged_out, .u_cbox_guide").first
+            if login_box and login_box.count() > 0:
+                try:
+                    if login_box.is_visible() and "로그인" in (login_box.inner_text() or ""):
+                        return False, "login_required"
+                except Exception:
+                    pass
 
             # 2. 명시적 비활성화 안내 감지
             disabled_box = page.locator(".u_cbox_none, .u_cbox_notice_disabled, div:text-is('댓글을 작성할 수 없습니다')").first
             if disabled_box and disabled_box.count() > 0:
-                return False, "comment_disabled"
+                try:
+                    if disabled_box.is_visible():
+                        return False, "comment_disabled"
+                except Exception:
+                    pass
 
             # 3. 에디터 준비 완료 확인
             if CommentEditorAdapter.is_visible(page):
@@ -133,7 +169,8 @@ class CommentInteractionService:
             write_box = MobileDOMResolver.get_comment_write_box(page)
             if write_box and write_box.count() > 0:
                 try:
-                    write_box.click(timeout=500)
+                    if write_box.is_visible():
+                        write_box.click(timeout=500)
                 except Exception:
                     pass
 
@@ -155,6 +192,8 @@ class CommentInteractionService:
         3. CommentEditorAdapter를 통한 초안 주입 및 Read-back 검증
         4. 비밀댓글 토글 및 키보드/마우스 리스너 설치
         """
+        ensure_page_alive(page)
+
         # 1. 댓글창 열기 Polling
         success, reason = cls.open_comment_layer(page, stop_event)
         if not success:
@@ -215,6 +254,8 @@ class CommentInteractionService:
             if stop_event and stop_event.is_set():
                 return UserAction.STOP
 
+            ensure_page_alive(page)
+
             # 1. UI 스레드로부터 전달된 클립보드 적용 명령 처리
             if command_bridge:
                 cmd = command_bridge.pop_command()
@@ -259,8 +300,10 @@ class CommentInteractionService:
         stop_event: Optional[threading.Event] = None
     ) -> CommentSubmitState:
         """
-        댓글 등록 버튼 클릭 및 강력한 등록 성공 검증 (에디터 클리어 + 서버 목록 내 댓글 등장)
+        댓글 등록 버튼 클릭 및 Fail-closed 검증 (에디터 클리어 및 서버 목록 내 댓글 등장 확인)
         """
+        ensure_page_alive(page)
+
         btn = MobileDOMResolver.get_comment_submit_button(page)
         if btn and btn.count() > 0:
             try:
@@ -284,8 +327,8 @@ class CommentInteractionService:
                 logger.log("  ✅ [COMMENT] 댓글 등록 성공 (에디터 초기화 확인)!")
                 return CommentSubmitState.SUBMITTED
 
-            logger.log("  ℹ️ [COMMENT] 댓글 등록 요청 완료")
-            return CommentSubmitState.SUBMITTED
+            logger.log("  ⚠️ [COMMENT] 댓글 등록 후 에디터 초기화 또는 서버 목록 반영 미확인", "WARNING")
+            return CommentSubmitState.FAILED
         except Exception as e:
-            logger.log(f"  ⚠️ [COMMENT] 등록 검증 중 예외: {e}", "WARNING")
-            return CommentSubmitState.SUBMITTED
+            logger.log(f"  ❌ [COMMENT] 등록 검증 중 예외: {e}", "ERROR")
+            return CommentSubmitState.FAILED

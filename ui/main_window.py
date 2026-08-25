@@ -511,49 +511,66 @@ class MainWindow(ctk.CTk):
         self.log_textbox.insert("end", msg + "\n")
         self.log_textbox.see("end")
 
-    def _clear_log(self):
-        self.log_textbox.delete("1.0", "end")
-
     def _reset_lock(self):
-        ProfileLockManager.release(USER_DATA_DIR)
-        logger.log("🔓 프로필 락이 초기화되었습니다.")
-        messagebox.showinfo("알림", "프로필 락이 초기화되었습니다.")
+        status = ProfileLockManager.inspect(USER_DATA_DIR)
+        if status.live_app_pid:
+            messagebox.showwarning("초기화 불가", f"현재 앱 작업(PID {status.live_app_pid})이 실행 중입니다.\n작업을 먼저 중지해 주세요.")
+            return
+        if status.live_chromium_pid:
+            messagebox.showwarning("초기화 불가", f"프로필을 사용하는 Chromium 브라우저(PID {status.live_chromium_pid})가 아직 실행 중입니다.\n브라우저 창을 먼저 닫아주세요.")
+            return
+
+        cleaned = ProfileLockManager.cleanup_stale_locks(USER_DATA_DIR)
+        if cleaned:
+            logger.log("🔓 남아있던 잔여 락 파일(SingletonLock 등)이 안전하게 초기화되었습니다.")
+            messagebox.showinfo("초기화 완료", "잔여 락이 안전하게 초기화되었습니다.\n이제 작업을 시작하실 수 있습니다.")
+        else:
+            logger.log("🔓 프로필이 이미 정상 상태입니다.")
+            messagebox.showinfo("알림", "정리할 잔여 락이 없습니다.")
 
     def _open_login_window(self):
         if ProfileLockManager.is_locked(USER_DATA_DIR):
-            messagebox.showwarning("알림", "프로필이 이미 사용 중입니다. 락 초기화 후 다시 시도해 주세요.")
+            messagebox.showwarning("알림", "프로필이 이미 사용 중입니다. 락 상태를 확인하거나 기존 브라우저를 닫아주세요.")
             return
+
+        self.btn_start.configure(state="disabled")
 
         def task():
             logger.log("==================================================")
             logger.log("🌐 [LOGIN] 네이버 로그인용 브라우저를 시작합니다...")
-            logger.log("💡 브라우저 창에서 네이버 로그인을 완료하신 뒤 창을 닫아주시면 세션이 영구 저장됩니다.")
+            logger.log("💡 브라우저 창에서 네이버 로그인을 완료하시면 자동으로 감지하여 저장합니다.")
             session = BrowserSession(headless=False)
             try:
                 ctx = session.start()
                 page = ctx.new_page()
                 page.goto("https://nid.naver.com/nidlogin.login")
 
+                login_detected = False
                 while True:
                     try:
                         if not ctx.pages or all(p.is_closed() for p in ctx.pages):
                             break
                     except Exception:
                         break
+
+                    # 0.5초마다 로그인 쿠키 성공 감지
+                    is_logged_in, _ = NaverAuthGuard.check_login_cookies(ctx)
+                    if is_logged_in:
+                        login_detected = True
+                        logger.log("✅ [LOGIN] 네이버 로그인 성공 감지! 세션이 영구 저장되었습니다.")
+                        self.after(0, lambda: messagebox.showinfo("로그인 완료", "✅ 네이버 로그인이 성공적으로 완료 및 저장되었습니다!\n이제 [피드 작업 시작] 버튼을 눌러 작업을 진행하세요."))
+                        break
+
                     import time
                     time.sleep(0.5)
 
-                # 로그인 완료 여부 확인
-                is_logged_in, _ = NaverAuthGuard.check_login_cookies(ctx)
-                if is_logged_in:
-                    logger.log("✅ [LOGIN] 네이버 로그인 성공! 세션이 영구 저장되었습니다. 이제 [피드 작업 시작]을 누르시면 됩니다.")
-                    self.after(0, lambda: messagebox.showinfo("로그인 완료", "✅ 네이버 로그인이 성공적으로 저장되었습니다!\n이제 [피드 작업 시작] 버튼을 눌러 작업을 진행하세요."))
-                else:
-                    logger.log("ℹ️ [LOGIN] 로그인 브라우저가 닫혔습니다.")
+                if not login_detected:
+                    logger.log("ℹ️ [LOGIN] 로그인 브라우저가 종료되었습니다.")
             except Exception as e:
                 logger.log(f"로그인 브라우저 오류: {e}", "ERROR")
             finally:
                 session.close()
+                self.after(0, lambda: self.btn_start.configure(state="normal"))
 
         threading.Thread(target=task, daemon=True).start()
 
@@ -635,6 +652,7 @@ class MainWindow(ctk.CTk):
             "gemini_web_enabled": self.gemini_web_enabled_var.get()
         }
         self.config_service.update_many(cfg_data)
+        logger.log(f"[CONFIG] 공감수 제외 기준: {like_thresh}개 (source=data/config.json)")
 
         self.btn_start.configure(state="disabled")
         self.btn_stop.configure(state="normal")
