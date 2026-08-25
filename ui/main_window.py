@@ -511,6 +511,9 @@ class MainWindow(ctk.CTk):
         self.log_textbox.insert("end", msg + "\n")
         self.log_textbox.see("end")
 
+    def _clear_log(self):
+        self.log_textbox.delete("1.0", "end")
+
     def _reset_lock(self):
         status = ProfileLockManager.inspect(USER_DATA_DIR)
         if status.live_app_pid:
