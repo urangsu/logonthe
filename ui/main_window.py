@@ -10,6 +10,7 @@ import customtkinter as ctk
 from app.models import FeedSourceType, UserAction
 from app.state import StateManager, BotRuntimeState, FeedState
 from app.controller import FeedController
+from naver.auth_guard import NaverAuthGuard
 from services.config import ConfigService
 from services.history import HistoryStore
 from services.draft import DraftService
@@ -524,13 +525,14 @@ class MainWindow(ctk.CTk):
             return
 
         def task():
-            logger.log("로그인용 브라우저를 시작합니다...")
+            logger.log("==================================================")
+            logger.log("🌐 [LOGIN] 네이버 로그인용 브라우저를 시작합니다...")
+            logger.log("💡 브라우저 창에서 네이버 로그인을 완료하신 뒤 창을 닫아주시면 세션이 영구 저장됩니다.")
             session = BrowserSession(headless=False)
             try:
                 ctx = session.start()
                 page = ctx.new_page()
                 page.goto("https://nid.naver.com/nidlogin.login")
-                logger.log("💡 네이버 로그인을 완료하신 뒤 창을 닫아주시면 세션이 영구 저장됩니다.")
 
                 while True:
                     try:
@@ -541,7 +543,13 @@ class MainWindow(ctk.CTk):
                     import time
                     time.sleep(0.5)
 
-                logger.log("✅ 로그인 브라우저가 닫혔습니다. 세션이 저장되었습니다.")
+                # 로그인 완료 여부 확인
+                is_logged_in, _ = NaverAuthGuard.check_login_cookies(ctx)
+                if is_logged_in:
+                    logger.log("✅ [LOGIN] 네이버 로그인 성공! 세션이 영구 저장되었습니다. 이제 [피드 작업 시작]을 누르시면 됩니다.")
+                    self.after(0, lambda: messagebox.showinfo("로그인 완료", "✅ 네이버 로그인이 성공적으로 저장되었습니다!\n이제 [피드 작업 시작] 버튼을 눌러 작업을 진행하세요."))
+                else:
+                    logger.log("ℹ️ [LOGIN] 로그인 브라우저가 닫혔습니다.")
             except Exception as e:
                 logger.log(f"로그인 브라우저 오류: {e}", "ERROR")
             finally:

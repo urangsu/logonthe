@@ -12,6 +12,7 @@ from app.errors import (
 from app.processor import PostProcessor, StopRequestedException
 from browser.session import BrowserSession, interruptible_wait
 from naver.sources import NeighborFeedSource, RecommendationFeedSource, DirectUrlSource, FeedSource
+from naver.auth_guard import NaverAuthGuard
 from services.config import ConfigService
 from services.history import HistoryStore
 from services.pacing import PacingService
@@ -24,6 +25,7 @@ from src.logger import logger
 class FeedController:
     """
     모바일 피드 어시스턴트 메인 컨트롤러:
+    - Pre-flight Login Guard: 비로그인 상태 작업 방지 (남의 조회수만 올려주는 헛돌기 차단)
     - 브라우저 세션 생명주기 관리
     - FeedSource를 통한 포스트 디스커버리
     - PostProcessor를 통한 개별 포스트 공감/Gemini댓글 생성/승인 처리
@@ -81,6 +83,19 @@ class FeedController:
 
         try:
             self.session.start()
+
+            # Pre-flight Login Guard: 비로그인 상태 검사 (헛돌기 방지)
+            is_logged_in, missing_cookies = NaverAuthGuard.check_login_cookies(self.session.context)
+            if not is_logged_in:
+                err_msg = "네이버 로그인이 필요합니다. [🌐 로그인 창 열기] 버튼을 눌러 로그인해 주세요."
+                self.state_mgr.update(new_state=FeedState.ERROR, message=err_msg)
+                logger.log("==================================================", "ERROR")
+                logger.log("❌ [LOGIN_REQUIRED] 프로그램 브라우저에 네이버 로그인이 되어있지 않습니다!", "ERROR")
+                logger.log("💡 [조치 방법] 메인 화면 우측 하단의 [🌐 로그인 창 열기] 버튼을 클릭하여 네이버에 로그인하신 후 다시 [피드 작업 시작]을 눌러주세요.", "WARNING")
+                logger.log("🚫 비로그인 상태에서 타인의 조회수만 올려주는 헛돌기를 방지하기 위해 작업을 안전하게 중단합니다.", "WARNING")
+                logger.log("==================================================", "ERROR")
+                return
+
             feed_page = self.session.get_feed_page()
             detail_page = self.session.get_detail_page()
 
