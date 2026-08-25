@@ -57,6 +57,15 @@ class WorkerCommand:
 
 
 @dataclass
+class PostActionPlan:
+    """개별 글에 대한 컴포넌트 레벨 멱등성 실행 계획"""
+    process_like: bool = True
+    process_comment: bool = True
+    local_like_recorded: bool = False
+    local_comment_recorded: bool = False
+
+
+@dataclass
 class FeedPost:
     key: str  # Canonical identifier e.g. "blogId:logNo"
     source: FeedSourceType

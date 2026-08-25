@@ -4,27 +4,23 @@ from playwright.sync_api import Page, Locator
 
 class MobileDOMResolver:
     """
-    모바일 네이버 블로그 페이지의 인터랙티브 엘리먼트 Resolver
-    우선순위:
-    1. Accessible Role/Name -> 2. Stable ID -> 3. Data Attribute -> 4. Blind Text -> 5. Class Prefix -> 6. Hashed Class
+    모바일 네이버 블로그 페이지의 인터랙티브 엘리먼트 Resolver (v3.1 Verified DOM)
+    - 다중 리액션(Reaction Module)과 실제 data-type="like" 옵션의 명확한 분리
+    - 안정적인 댓글 버튼(pst.re) 및 에디터 셀렉터 우선순위 적용
     """
 
     # --- 피드 목록 (FeedList / Recommendation) ---
     @staticmethod
     def get_feed_cards(page: Page) -> Optional[Locator]:
-        """피드 목록 내 게시글 카드 Locator 반환"""
         if not page:
             return None
-        cards = page.locator("li[class*='card_wrapper'], li[class*='item__'], div[class*='card_wrapper']")
-        return cards
+        return page.locator("li[class*='card_wrapper'], li[class*='item__'], div[class*='card_wrapper']")
 
     @staticmethod
     def get_card_post_link(card: Locator) -> Optional[Locator]:
-        """피드 카드 내부의 게시글 상세 링크 Locator 반환"""
         if not card:
             return None
-        link = card.locator("a[data-click-area*='card'], a[class*='link__'], a[href*='m.blog.naver.com/']").first
-        return link
+        return card.locator("a[data-click-area*='card'], a[class*='link__'], a[href*='m.blog.naver.com/']").first
 
     @staticmethod
     def get_card_author(card: Locator) -> Optional[str]:
@@ -50,10 +46,9 @@ class MobileDOMResolver:
             pass
         return None
 
-    # --- 포스트 상세 본문 및 제목 추출 (Context Extraction) ---
+    # --- 포스트 상세 본문 및 제목 추출 ---
     @staticmethod
     def get_post_title(page: Page) -> Optional[str]:
-        """게시글 상세 페이지의 제목 추출"""
         if not page:
             return None
         title_selectors = [
@@ -77,7 +72,6 @@ class MobileDOMResolver:
 
     @staticmethod
     def get_post_content_locator(page: Page) -> Optional[Locator]:
-        """게시글 본문 컨테이너 Locator 반환"""
         if not page:
             return None
         content_selectors = [
@@ -95,114 +89,139 @@ class MobileDOMResolver:
                 return loc
         return page.locator(".se-viewer, #postViewArea").first
 
-    # --- 포스트 상세 (Detail Page) 공감(하트) 및 공감수 ---
+    # --- 포스트 상세 리액션 (Reaction Module & Like Options) ---
     @staticmethod
-    def get_like_button(page: Page) -> Optional[Locator]:
-        """게시글 상세 페이지의 공감(하트) 버튼 Locator 반환"""
+    def get_reaction_module(page: Page) -> Optional[Locator]:
+        """다중 리액션 전체 컨테이너 모듈 반환"""
         if not page:
             return None
         selectors = [
-            "button.u_likeit_button",
-            "button[data-click-area='pst.like']",
-            "div[class*='Interact__'] button:has(.blind:text-is('공감'))",
-            "a.u_likeit_button",
-            "a._sympathyButton"
+            ".u_likeit_list_module",
+            ".u_likeit._reactionModule",
+            "div[data-sid='BLOG'][data-cid]",
+            "div[class*='Interact__']"
         ]
         for sel in selectors:
             loc = page.locator(sel).first
             if loc.count() > 0:
                 return loc
-        return page.locator("button.u_likeit_button, a.u_likeit_button").first
+        return page.locator(".u_likeit_list_module, .u_likeit").first
 
     @staticmethod
-    def get_like_count_text(page: Optional[Page], like_btn: Optional[Locator] = None) -> Optional[str]:
-        """공감 버튼 주변 또는 공감수 엘리먼트에서 숫자 텍스트 추출"""
-        if not page and not like_btn:
-            return None
-
-        btn = like_btn or MobileDOMResolver.get_like_button(page)
-        if btn and btn.count() > 0:
-            sub_selectors = [
-                ".u_likeit_text",
-                "._count",
-                "em[class*='count']",
-                "span[class*='count']",
-                "span[class*='num']",
-                "span[class*='text']"
-            ]
-            for sel in sub_selectors:
-                try:
-                    el = btn.locator(sel).first
-                    if el.count() > 0:
-                        txt = el.inner_text().strip()
-                        if txt:
-                            return txt
-                except Exception:
-                    pass
-
-            try:
-                aria = btn.get_attribute("aria-label")
-                if aria and ("공감" in aria or any(c.isdigit() for c in aria)):
-                    return aria
-            except Exception:
-                pass
-
-            try:
-                txt = btn.inner_text().strip()
-                if txt:
-                    return txt
-            except Exception:
-                pass
-
-        if page:
-            fallback_selectors = [
-                ".u_likeit_text",
-                "a.u_likeit_button em",
-                "button.u_likeit_button em",
-                "span[class*='count__']"
-            ]
-            for sel in fallback_selectors:
-                try:
-                    el = page.locator(sel).first
-                    if el.count() > 0:
-                        txt = el.inner_text().strip()
-                        if txt:
-                            return txt
-                except Exception:
-                    pass
-
-        return None
-
-    # --- 포스트 상세 (Detail Page) 댓글창 및 입력 에디터 ---
-    @staticmethod
-    def get_comment_button(page: Page) -> Optional[Locator]:
-        """게시글 하단 댓글 열기 버튼 Locator 반환"""
+    def get_reaction_summary_button(page: Page) -> Optional[Locator]:
+        """공감 요약/오프너 버튼 (총 숫자 표시 버튼, 단독 클릭 대상 아님) 반환"""
         if not page:
             return None
         selectors = [
-            "a.u_cbox_btn_reply",
-            "button[data-click-area='pst.reply']",
-            "a[data-action='comment#open']",
+            ".u_likeit_list_module > a.u_likeit_button",
+            ".u_likeit_list_module > button.u_likeit_button",
+            "a.u_likeit_button[data-like-click-area]",
+            "a.u_likeit_button",
+            "button.u_likeit_button"
+        ]
+        for sel in selectors:
+            loc = page.locator(sel).first
+            if loc.count() > 0:
+                return loc
+        return page.locator("a.u_likeit_button, button.u_likeit_button").first
+
+    @staticmethod
+    def get_reaction_options(page: Page) -> Optional[Locator]:
+        """리액션 레이어 내부의 모든 개별 리액션 버튼(공감, 칭찬, 감사, 웃김, 놀람, 슬픔) Locators 반환"""
+        if not page:
+            return None
+        return page.locator("a.u_likeit_list_button[data-type], button.u_likeit_list_button[data-type], a.u_likeit_list_btn[data-type]")
+
+    @staticmethod
+    def get_reaction_like_option(page: Page) -> Optional[Locator]:
+        """실제 클릭 대상인 좋아요(공감) 옵션 버튼 반환"""
+        if not page:
+            return None
+        selectors = [
+            "a.u_likeit_list_button[data-type='like']",
+            "button.u_likeit_list_button[data-type='like']",
+            "a.u_likeit_list_btn[data-type='like']",
+            "button.u_likeit_list_btn[data-type='like']",
+            "[data-type='like'][role='menuitem']",
+            "[data-type='like'][role='radio']"
+        ]
+        for sel in selectors:
+            loc = page.locator(sel).first
+            if loc.count() > 0:
+                return loc
+        return page.locator("a.u_likeit_list_button[data-type='like'], a.u_likeit_list_btn[data-type='like']").first
+
+    @staticmethod
+    def get_reaction_total_count_text(page: Page) -> Optional[str]:
+        """공감 요약 버튼 또는 카운트 엘리먼트에서 숫자 텍스트 추출"""
+        if not page:
+            return None
+        selectors = [
+            "a.u_likeit_button ._count",
+            "button.u_likeit_button ._count",
+            "a.u_likeit_button .u_likeit_text",
+            "a.u_likeit_list_button[data-type='like'] ._count",
+            ".u_likeit_text._count"
+        ]
+        for sel in selectors:
+            try:
+                el = page.locator(sel).first
+                if el.count() > 0:
+                    txt = el.inner_text().strip()
+                    if txt:
+                        return txt
+            except Exception:
+                pass
+        return None
+
+    # 하위 호환성 메서드 (기존 LikeButton 호출 대체)
+    @staticmethod
+    def get_like_button(page: Page) -> Optional[Locator]:
+        """기존 코드 호환용: like_option이 있으면 like_option을, 없으면 summary_button 반환"""
+        opt = MobileDOMResolver.get_reaction_like_option(page)
+        if opt and opt.count() > 0:
+            return opt
+        return MobileDOMResolver.get_reaction_summary_button(page)
+
+    @staticmethod
+    def get_like_count_text(page: Optional[Page], like_btn: Optional[Locator] = None) -> Optional[str]:
+        if not page:
+            return None
+        return MobileDOMResolver.get_reaction_total_count_text(page)
+
+    # --- 포스트 상세 댓글창 및 에디터 ---
+    @staticmethod
+    def get_comment_button(page: Page) -> Optional[Locator]:
+        """게시글 하단 댓글 열기 버튼 (안정적 selector 우선)"""
+        if not page:
+            return None
+        selectors = [
+            "button[data-click-area='pst.re']",
+            "button[data-click-area*='pst.re']",
+            "button:has(.blind:text-is('댓글'))",
+            "button.Interact__comment_btn--Wbuoq",
+            "button[class^='Interact__comment_btn--']",
+            "button[class*='Interact__comment_btn--']",
             "a.btn_comment",
+            "a.u_cbox_btn_reply",
             "a:has(.blind:text-is('댓글'))"
         ]
         for sel in selectors:
             loc = page.locator(sel).first
             if loc.count() > 0:
                 return loc
-        return page.locator("a.u_cbox_btn_reply, button[data-click-area='pst.reply']").first
+        return page.locator("button[data-click-area*='pst.re'], a.btn_comment").first
 
     @staticmethod
     def get_comment_write_box(page: Page) -> Optional[Locator]:
-        """댓글 작성 영역(write_box 컨테이너) Locator 반환"""
+        """댓글 작성 영역 컨테이너"""
         if not page:
             return None
         selectors = [
             ".u_cbox_write_box",
             ".u_cbox_inbox",
             "#naverComment__write_textarea",
-            "div.u_cbox_text[contenteditable='true']",
-            "textarea.u_cbox_text"
+            "div.u_cbox_text[contenteditable='true']"
         ]
         for sel in selectors:
             loc = page.locator(sel).first
@@ -212,7 +231,7 @@ class MobileDOMResolver:
 
     @staticmethod
     def get_comment_editor(page: Page) -> Optional[Locator]:
-        """댓글 입력 에디터 Locator 반환"""
+        """실제 댓글 입력 에디터"""
         if not page:
             return None
         selectors = [
@@ -226,11 +245,10 @@ class MobileDOMResolver:
             loc = page.locator(sel).first
             if loc.count() > 0:
                 return loc
-        return page.locator("div.u_cbox_text[contenteditable='true'], textarea.u_cbox_text").first
+        return page.locator("#naverComment__write_textarea, div.u_cbox_text[contenteditable='true']").first
 
     @staticmethod
     def get_secret_comment_checkbox(page: Page) -> Optional[Locator]:
-        """비밀댓글 토글 체크박스 Locator 반환"""
         if not page:
             return None
         selectors = [
@@ -246,12 +264,11 @@ class MobileDOMResolver:
 
     @staticmethod
     def get_comment_submit_button(page: Page) -> Optional[Locator]:
-        """댓글 등록 버튼 Locator 반환"""
         if not page:
             return None
         selectors = [
-            "button.u_cbox_btn_upload",
             "button[data-action='comment#upload']",
+            "button.u_cbox_btn_upload",
             "button:has-text('등록')",
             "input[type='submit'].u_cbox_btn_upload"
         ]
@@ -262,6 +279,6 @@ class MobileDOMResolver:
         return page.locator("button.u_cbox_btn_upload").first
 
 
-# 하위 호환성 별칭 (Compatibility Aliases)
+# 하위 호환성 별칭 (Aliases)
 MobileDOMResolver.get_comment_open_button = MobileDOMResolver.get_comment_button
 MobileDOMResolver.get_secret_checkbox = MobileDOMResolver.get_secret_comment_checkbox

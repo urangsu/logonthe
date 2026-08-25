@@ -3,7 +3,7 @@ from typing import Optional
 from playwright.sync_api import Page
 from app.models import (
     FeedPost, PostProcessResult, LikeProcessResult, CommentProcessResult,
-    UserAction, CommentSubmitState, LikeState, FailureReason, FeedSourceType
+    UserAction, CommentSubmitState, LikeState, FailureReason, FeedSourceType, PostActionPlan
 )
 from app.state import StateManager, FeedState
 from app.errors import (
@@ -13,6 +13,7 @@ from app.errors import (
 from naver.target_guard import TargetPostGuard
 from naver.interaction import LikeInteractionService, CommentInteractionService
 from naver.editor_adapter import CommentEditorAdapter
+from naver.comment_guard import ServerCommentDuplicateGuard, CommentPresenceState
 from naver.content_extractor import ContentContextExtractor
 from services.draft import DraftService
 from services.contextual_draft import ContextualDraftEngine
@@ -70,14 +71,25 @@ class PostProcessor:
         self.state_mgr = state_manager
         self.stop_event = stop_event
 
-    def process(self, detail_page: Page, post: FeedPost) -> PostProcessResult:
+    def process(
+        self,
+        detail_page: Page,
+        post: FeedPost,
+        action_plan: Optional[PostActionPlan] = None
+    ) -> PostProcessResult:
         """
-        단일 FeedPost에 대해 상세 이동 -> TargetPostGuard 검증 -> 3단계 초안 생성 -> 공감 트랜잭션 -> 초안입력 -> 사용자 승인/등록 수행
+        단일 FeedPost에 대해:
+        1. 상세 이동 -> TargetPostGuard 검증
+        2. Like 처리 (action_plan.process_like가 True일 때)
+        3. 댓글 처리: 댓글창 오픈 -> ServerCommentDuplicateGuard 확인 -> (부재 시에만) Gemini/로컬 초안 생성 -> 검토 및 등록
         """
         result = PostProcessResult(post=post)
 
         if self.stop_event and self.stop_event.is_set():
             raise StopRequestedException("작업 중지 요청됨")
+
+        effective_like = self.like_enabled and (action_plan.process_like if action_plan else True)
+        effective_comment = self.comment_enabled and (action_plan.process_comment if action_plan else True)
 
         # 1. 상세 페이지 이동 및 TargetPostGuard 엄격 검증
         if self.state_mgr:
@@ -99,101 +111,22 @@ class PostProcessor:
         # TargetPostGuard: 대상 글 일치 여부 확인 (Fail-Open 원천 차단)
         TargetPostGuard.verify(detail_page, post)
 
-        # 2. 제목/본문 맥락 추출 및 3단계 초안 생성 (댓글 기능 활성 시에만)
-        draft_text = ""
-        draft_source_label = ""
-        suffix = DraftService.resolve_suffix(post.source, self.config)
-
-        if self.comment_enabled:
-            context = ContentContextExtractor.extract(detail_page, post, max_chars=self.ai_context_max_chars)
-            post.title = context.title or post.title
-            post.excerpt = context.excerpt
-
-            ai_prompt = ""
-            if self.ai_clipboard_enabled or self.gemini_web_enabled:
-                ai_prompt = AIPromptBuilder.build(post.title, post.excerpt, style=self.ai_prompt_style)
-
-            if self.state_mgr:
-                self.state_mgr.update(
-                    current_post_title=post.title or "",
-                    current_post_excerpt=post.excerpt or "",
-                    current_ai_prompt=ai_prompt,
-                    ai_clipboard_ready=bool(ai_prompt)
-                )
-
-            # [Tier 1] Gemini 자동 댓글 생성 시도
-            gemini_answer = None
-            if self.gemini_web_enabled and ai_prompt:
-                if self.state_mgr:
-                    self.state_mgr.update(message="Gemini로 자동 댓글 생성 중...")
-
-                if self.gemini_browser_mode == "existing_chrome_mac":
-                    try:
-                        gemini_answer = ExistingChromeGeminiBridge.generate_comment(
-                            prompt=ai_prompt,
-                            stop_event=self.stop_event
-                        )
-                    except Exception as e:
-                        logger.log(f"[GEMINI/EXTERNAL] 연동 실패: {e}", "WARNING")
-
-                elif self.gemini_browser_mode == "managed_playwright" and self.gemini_page:
-                    try:
-                        gemini_answer = GeminiWebBridge.generate_comment(
-                            page=self.gemini_page,
-                            prompt=ai_prompt,
-                            gemini_url=self.gemini_url,
-                            stop_event=self.stop_event
-                        )
-                    except Exception as e:
-                        logger.log(f"[GEMINI/MANAGED] 생성 실패: {e}", "WARNING")
-
-                try:
-                    detail_page.bring_to_front()
-                except Exception:
-                    pass
-
-            # 초안 결정 (Gemini -> Human-Like ContextualDraftEngine -> Spintax)
-            if gemini_answer:
-                draft_text = DraftService.compose_body_and_suffix(gemini_answer, suffix)
-                draft_source_label = "Gemini 생성"
-            else:
-                # [Tier 2] 로컬 인간형 문맥 분석 엔진 (Human-Like Composer v3.1)
-                local_res = ContextualDraftEngine.generate(post.title or "", post.excerpt or "")
-                if local_res and local_res.body:
-                    draft_text = DraftService.compose_body_and_suffix(local_res.body, suffix)
-                    intent_tag = f"/{local_res.intent.value}" if local_res.intent.value != "none" else ""
-                    draft_source_label = f"로컬 분석({local_res.category}{intent_tag})"
-                    logger.log(f"💡 [DRAFT] 로컬 맞춤형 초안 생성 ({local_res.category}{intent_tag} / '{local_res.subject}'): \"{local_res.body}\"")
-                else:
-                    # [Tier 3] Spintax Fallback
-                    draft_text = DraftService.generate(self.comment_template, suffix)
-                    draft_source_label = "기본 템플릿"
-
-        if self.stop_event and self.stop_event.is_set():
-            raise StopRequestedException("작업 중지 요청됨")
-
-        # 액션 사이 Pacing 대기
-        if self.pacing:
-            p_res = self.pacing.wait_action()
-            if p_res.interrupted:
-                raise StopRequestedException("작업 중지 요청됨")
-
-        # 3. 공감(하트) 처리 (Re-ordered Like Pipeline: State -> Popularity Guard -> Transaction)
-        if self.like_enabled:
+        # 2. 공감(하트) 처리 (Re-ordered Like Pipeline: State -> Popularity Guard -> Transaction)
+        if effective_like:
             if self.state_mgr:
                 self.state_mgr.update(new_state=FeedState.CHECKING_LIKE, message="공감 상태 및 조건 확인 중...")
 
-            # 3-1. 공감 상태 및 신뢰도 우선 판별
+            # 2-1. 공감 상태 및 신뢰도 우선 판별
             like_state_res = LikeTransactionService.resolve_like_state(detail_page)
 
             if like_state_res.state == LikeState.LIKED:
-                logger.log("  ❤️ [LIKE] 이미 공감 완료된 글입니다. (트랜잭션 생략)")
+                logger.log("  ❤️ [LIKE] 이미 공감(리액션) 완료된 글입니다. (트랜잭션 생략)")
                 result.like_result = LikeProcessResult(state_before=LikeState.LIKED, action_taken=False, state_after=LikeState.LIKED)
             elif like_state_res.state != LikeState.NOT_LIKED or like_state_res.confidence != LikeConfidence.HIGH:
-                logger.log(f"  ⚠️ [LIKE] 공감 상태 확신도 부족(state={like_state_res.state.value}, conf={like_state_res.confidence.value})으로 취소 방지 위해 스킵", "WARNING")
+                logger.log(f"  ⚠️ [LIKE] 리액션 상태 확신도 부족(state={like_state_res.state.value}, conf={like_state_res.confidence.value})으로 취소 방지 위해 스킵", "WARNING")
                 result.like_result = LikeProcessResult(state_before=like_state_res.state, action_taken=False, state_after=like_state_res.state, error="low_confidence_skip")
             else:
-                # 3-2. NOT_LIKED + HIGH인 경우에만 Popularity Guard 평가
+                # 2-2. NOT_LIKED + HIGH인 경우에만 Popularity Guard 평가
                 elig = LikeEligibilityService.evaluate(
                     detail_page=detail_page,
                     stats_page=self.stats_page,
@@ -212,7 +145,7 @@ class PostProcessor:
                         daily_visitors=elig.daily_visitors
                     )
                 else:
-                    # 3-3. 공감 트랜잭션 실행
+                    # 2-3. 실제 공감 트랜잭션 실행
                     tx_res = LikeTransactionService.execute_like_transaction(detail_page, self.stop_event)
                     tx_res.like_count = elig.like_count
                     tx_res.daily_visitors = elig.daily_visitors
@@ -231,51 +164,159 @@ class PostProcessor:
             if p_res.interrupted:
                 raise StopRequestedException("작업 중지 요청됨")
 
-        # 4. 댓글 처리 (Human-in-the-loop with CommentEditorAdapter)
-        if self.comment_enabled and draft_text:
-            # TargetPostGuard 재검증 (공감 처리 중 다른 글 이동 방지)
+        # 3. 댓글 처리 (댓글창 오픈 -> 서버 중복 확인 -> 초안 생성 -> 입력 -> 승인)
+        if effective_comment:
             TargetPostGuard.verify(detail_page, post)
 
             if self.state_mgr:
-                self.state_mgr.update(new_state=FeedState.FILLING_DRAFT, message=f"댓글 초안({draft_source_label}) 입력 중...")
+                self.state_mgr.update(new_state=FeedState.OPENING_COMMENT, message="댓글 레이어 열기 및 서버 중복 확인 중...")
 
-            cmt_res = CommentInteractionService.prepare_comment_draft(
-                detail_page, draft_text, secret_comment=self.secret_comment, stop_event=self.stop_event
-            )
-
-            if cmt_res.status == CommentSubmitState.DRAFTED:
-                if self.state_mgr:
-                    msg = f"댓글 확인 대기 중 ({draft_source_label} 입력됨 / 수정 후 Enter=등록 / Esc=건너뛰기)"
-                    self.state_mgr.update(new_state=FeedState.WAITING_USER, message=msg)
-
-                action = CommentInteractionService.wait_for_user_action(
-                    detail_page, self.stop_event, command_bridge=self.command_bridge
-                )
-
-                if action == UserAction.STOP:
-                    raise StopRequestedException("사용자 작업 중지")
-                elif action == UserAction.SKIP:
-                    logger.log(f"  ⏭️ [COMMENT] 사용자가 해당 글을 건너뛰었습니다.")
-                    cmt_res.status = CommentSubmitState.SKIPPED
-                    if self.state_mgr:
-                        self.state_mgr.update(new_state=FeedState.SKIPPING, inc_skip=True)
-                elif action == UserAction.SUBMIT:
-                    final_text = CommentInteractionService.read_final_text(detail_page)
-                    cmt_res.submitted_text = final_text or draft_text
-
-                    if self.state_mgr:
-                        self.state_mgr.update(new_state=FeedState.SUBMITTING, message="댓글 등록 및 검증 중...")
-
-                    submit_status = CommentInteractionService.submit_and_verify(
-                        detail_page, cmt_res.submitted_text, self.stop_event
+            # 3-1. 댓글 레이어 오픈 Polling
+            open_ok, open_reason = CommentInteractionService.open_comment_layer(detail_page, self.stop_event)
+            if not open_ok:
+                if open_reason == "login_required":
+                    logger.log("  ⚠️ [COMMENT] 로그인이 필요한 게시글입니다.", "ERROR")
+                    result.comment_result = CommentProcessResult(status=CommentSubmitState.FAILED, error="login_required")
+                elif open_reason == "comment_disabled":
+                    logger.log("  ⚠️ [COMMENT] 작성자가 댓글을 닫아둔 게시글입니다 (비활성화).", "WARNING")
+                    result.comment_result = CommentProcessResult(status=CommentSubmitState.FAILED, error="comment_disabled")
+                else:
+                    logger.log(f"  ⚠️ [COMMENT] 댓글 레이어 준비 타임아웃 ({open_reason}).", "WARNING")
+                    result.comment_result = CommentProcessResult(status=CommentSubmitState.FAILED, error=open_reason)
+            else:
+                # 3-2. 서버 사이드 중복 댓글 스캔 (Gemini 호출 전 반드시 선행)
+                presence = ServerCommentDuplicateGuard.scan_page_for_my_comment(detail_page, stop_event=self.stop_event)
+                if presence.state == CommentPresenceState.PRESENT:
+                    logger.log("  🛑 [COMMENT] 서버 댓글 목록에 이미 내 댓글이 존재합니다! (AI 호출/입력 0, 동기화 완료)")
+                    result.comment_result = CommentProcessResult(
+                        status=CommentSubmitState.SUBMITTED,
+                        submitted_text=presence.comment_text or "서버 감지 기존 등록 댓글"
                     )
-                    cmt_res.status = submit_status
+                elif presence.state == CommentPresenceState.UNKNOWN:
+                    logger.log("  ⚠️ [COMMENT] 댓글 목록이 불완전하여 중복 방지를 위해 안전하게 작성을 스킵합니다.", "WARNING")
+                    result.comment_result = CommentProcessResult(status=CommentSubmitState.SKIPPED, error="server_duplicate_check_unknown")
+                else:
+                    # 3-3. 내 댓글이 없는 것이 확실한 경우(ABSENT HIGH)에만 초안 생성 및 주입
+                    context = ContentContextExtractor.extract(detail_page, post, max_chars=self.ai_context_max_chars)
+                    post.title = context.title or post.title
+                    post.excerpt = context.excerpt
+                    suffix = DraftService.resolve_suffix(post.source, self.config)
 
-                    if submit_status == CommentSubmitState.SUBMITTED:
+                    ai_prompt = ""
+                    if self.ai_clipboard_enabled or self.gemini_web_enabled:
+                        ai_prompt = AIPromptBuilder.build(post.title, post.excerpt, style=self.ai_prompt_style)
+
+                    if self.state_mgr:
+                        self.state_mgr.update(
+                            current_post_title=post.title or "",
+                            current_post_excerpt=post.excerpt or "",
+                            current_ai_prompt=ai_prompt,
+                            ai_clipboard_ready=bool(ai_prompt)
+                        )
+
+                    draft_text = ""
+                    draft_source_label = ""
+
+                    # [Tier 1] Gemini 자동 댓글 생성
+                    gemini_answer = None
+                    if self.gemini_web_enabled and ai_prompt:
                         if self.state_mgr:
-                            self.state_mgr.update(inc_comment=True)
+                            self.state_mgr.update(message="Gemini로 자동 댓글 생성 중...")
 
-            result.comment_result = cmt_res
+                        if self.gemini_browser_mode == "existing_chrome_mac":
+                            try:
+                                gemini_answer = ExistingChromeGeminiBridge.generate_comment(
+                                    prompt=ai_prompt,
+                                    stop_event=self.stop_event
+                                )
+                            except Exception as e:
+                                logger.log(f"[GEMINI/EXTERNAL] 연동 실패: {e}", "WARNING")
+
+                        elif self.gemini_browser_mode == "managed_playwright" and self.gemini_page:
+                            try:
+                                gemini_answer = GeminiWebBridge.generate_comment(
+                                    page=self.gemini_page,
+                                    prompt=ai_prompt,
+                                    gemini_url=self.gemini_url,
+                                    stop_event=self.stop_event
+                                )
+                            except Exception as e:
+                                logger.log(f"[GEMINI/MANAGED] 생성 실패: {e}", "WARNING")
+
+                        try:
+                            detail_page.bring_to_front()
+                        except Exception:
+                            pass
+
+                    if gemini_answer:
+                        draft_text = DraftService.compose_body_and_suffix(gemini_answer, suffix)
+                        draft_source_label = "Gemini 생성"
+                    else:
+                        # [Tier 2] 로컬 인간형 엔진
+                        local_res = ContextualDraftEngine.generate(post.title or "", post.excerpt or "")
+                        if local_res and local_res.body:
+                            draft_text = DraftService.compose_body_and_suffix(local_res.body, suffix)
+                            intent_tag = f"/{local_res.intent.value}" if local_res.intent.value != "none" else ""
+                            draft_source_label = f"로컬 분석({local_res.category}{intent_tag})"
+                            logger.log(f"💡 [DRAFT] 로컬 맞춤형 초안 생성 ({local_res.category}{intent_tag} / '{local_res.subject}'): \"{local_res.body}\"")
+                        else:
+                            # [Tier 3] Spintax Fallback
+                            draft_text = DraftService.generate(self.comment_template, suffix)
+                            draft_source_label = "기본 템플릿"
+
+                    # 에디터에 주입 및 Read-back 검증
+                    set_ok = CommentEditorAdapter.set_text(detail_page, draft_text)
+                    if not set_ok:
+                        logger.log("  ❌ [COMMENT] 에디터 초안 주입 및 Read-back 검증 실패", "ERROR")
+                        result.comment_result = CommentProcessResult(status=CommentSubmitState.FAILED, error="editor_set_text_failed")
+                    else:
+                        # 비밀댓글 설정
+                        if self.secret_comment:
+                            secret_chk = MobileDOMResolver.get_secret_comment_checkbox(detail_page)
+                            if secret_chk and secret_chk.count() > 0:
+                                try:
+                                    secret_chk.click(timeout=1000)
+                                    logger.log("  🔒 [COMMENT] 비밀댓글 설정 완료")
+                                except Exception:
+                                    pass
+
+                        CommentInteractionService.install_keyboard_listener(detail_page)
+                        CommentEditorAdapter.focus(detail_page)
+
+                        cmt_res = CommentProcessResult(status=CommentSubmitState.DRAFTED, draft_text=draft_text)
+
+                        if self.state_mgr:
+                            msg = f"댓글 확인 대기 중 ({draft_source_label} 입력됨 / 수정 후 Enter=등록 / Esc=건너뛰기)"
+                            self.state_mgr.update(new_state=FeedState.WAITING_USER, message=msg)
+
+                        action = CommentInteractionService.wait_for_user_action(
+                            detail_page, self.stop_event, command_bridge=self.command_bridge
+                        )
+
+                        if action == UserAction.STOP:
+                            raise StopRequestedException("사용자 작업 중지")
+                        elif action == UserAction.SKIP:
+                            logger.log(f"  ⏭️ [COMMENT] 사용자가 해당 글을 건너뛰었습니다.")
+                            cmt_res.status = CommentSubmitState.SKIPPED
+                            if self.state_mgr:
+                                self.state_mgr.update(new_state=FeedState.SKIPPING, inc_skip=True)
+                        elif action == UserAction.SUBMIT:
+                            final_text = CommentInteractionService.read_final_text(detail_page)
+                            cmt_res.submitted_text = final_text or draft_text
+
+                            if self.state_mgr:
+                                self.state_mgr.update(new_state=FeedState.SUBMITTING, message="댓글 등록 및 검증 중...")
+
+                            submit_status = CommentInteractionService.submit_and_verify(
+                                detail_page, cmt_res.submitted_text, self.stop_event
+                            )
+                            cmt_res.status = submit_status
+
+                            if submit_status == CommentSubmitState.SUBMITTED:
+                                if self.state_mgr:
+                                    self.state_mgr.update(inc_comment=True)
+
+                        result.comment_result = cmt_res
 
         if self.state_mgr:
             self.state_mgr.update(inc_processed=True)

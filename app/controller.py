@@ -2,7 +2,7 @@ import threading
 from typing import Optional, List
 from app.models import (
     FeedSourceType, FeedPost, PostProcessResult, LikeProcessResult, CommentProcessResult,
-    CommentSubmitState, LikeState
+    CommentSubmitState, LikeState, PostActionPlan
 )
 from app.state import StateManager, FeedState
 from app.errors import (
@@ -28,7 +28,7 @@ class FeedController:
     - FeedSource를 통한 포스트 디스커버리
     - PostProcessor를 통한 개별 포스트 공감/Gemini댓글 생성/승인 처리
     - Per-Post Error Boundary: 개별 글 오류(RecoverablePostError) 격리 및 세션 보호
-    - 컴포넌트 레벨 멱등성(Like, Comment 독립 검사)
+    - 컴포넌트 레벨 멱등성(PostActionPlan을 통해 Like, Comment 독립 전달)
     - PacingService를 통한 안전한 작업 간격 및 휴지 제어
     - History 저장 및 UI State 업데이트
     """
@@ -160,16 +160,26 @@ class FeedController:
                     processed_keys.add(post.key)
 
                     # 컴포넌트 레벨 멱등성 검사 (Like와 Comment 독립 판단)
-                    should_like = like_enabled and not self.history.is_liked(post.key)
-                    should_comment = comment_enabled and not self.history.is_comment_submitted(post.key)
+                    is_local_liked = self.history.is_liked(post.key)
+                    is_local_commented = self.history.is_comment_submitted(post.key)
+
+                    should_like = like_enabled and not is_local_liked
+                    should_comment = comment_enabled and not is_local_commented
 
                     if not should_like and not should_comment:
-                        logger.log(f"  ⏭️ [IDEMPOTENT] 이미 공감 및 댓글이 완료된 글입니다: {post.key}")
+                        logger.log(f"  ⏭️ [IDEMPOTENT] 로컬 기록 상 이미 공감 및 댓글 완료된 글입니다: {post.key}")
                         continue
+
+                    action_plan = PostActionPlan(
+                        process_like=should_like,
+                        process_comment=should_comment,
+                        local_like_recorded=is_local_liked,
+                        local_comment_recorded=is_local_commented
+                    )
 
                     # 개별 포스트 오류 격리 (Per-Post Error Boundary)
                     try:
-                        result = processor.process(detail_page, post)
+                        result = processor.process(detail_page, post, action_plan=action_plan)
                         self.history.record_result(result)
                     except StopRequestedException:
                         raise

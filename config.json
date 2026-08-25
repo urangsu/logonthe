@@ -1,5 +1,6 @@
 {
-  "feed_source": "recommendation",
+  "schema_version": 2,
+  "feed_source": "neighbor",
   "max_feed_items": 20,
   "like_enabled": true,
   "comment_enabled": true,
@@ -9,6 +10,7 @@
   "recommendation_suffix_enabled": true,
   "recommendation_suffix": "",
   "secret_comment": false,
+  "browser_mode": "persistent",
   "direct_urls": [],
   "pacing_enabled": true,
   "action_delay_min": 2.0,
@@ -27,6 +29,9 @@
   "ai_clipboard_enabled": true,
   "ai_context_max_chars": 700,
   "ai_prompt_style": "warm_short",
+  "append_fixed_suffix_to_ai": false,
   "gemini_browser_mode": "existing_chrome_mac",
-  "gemini_web_enabled": true
+  "gemini_web_enabled": true,
+  "gemini_mode": "new",
+  "gemini_custom_url": "https://gemini.google.com/app/0a1545681329aa0a?hl=ko"
 }
