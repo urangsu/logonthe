@@ -1,7 +1,14 @@
 import threading
 from typing import Optional, List
-from app.models import FeedSourceType, FeedPost, PostProcessResult
+from app.models import (
+    FeedSourceType, FeedPost, PostProcessResult, LikeProcessResult, CommentProcessResult,
+    CommentSubmitState, LikeState
+)
 from app.state import StateManager, FeedState
+from app.errors import (
+    UserStopRequestedError, FatalSessionError, RecoverablePostError,
+    PostNavigationMismatchError, PostDOMContractError
+)
 from app.processor import PostProcessor, StopRequestedException
 from browser.session import BrowserSession, interruptible_wait
 from naver.sources import NeighborFeedSource, RecommendationFeedSource, DirectUrlSource, FeedSource
@@ -10,6 +17,7 @@ from services.history import HistoryStore
 from services.pacing import PacingService
 from services.clipboard_bridge import ClipboardCommandBridge
 from services.blog_popularity import BlogPopularityService
+from services.like_transaction import LikeCircuitBreaker
 from src.logger import logger
 
 
@@ -19,6 +27,8 @@ class FeedController:
     - 브라우저 세션 생명주기 관리
     - FeedSource를 통한 포스트 디스커버리
     - PostProcessor를 통한 개별 포스트 공감/Gemini댓글 생성/승인 처리
+    - Per-Post Error Boundary: 개별 글 오류(RecoverablePostError) 격리 및 세션 보호
+    - 컴포넌트 레벨 멱등성(Like, Comment 독립 검사)
     - PacingService를 통한 안전한 작업 간격 및 휴지 제어
     - History 저장 및 UI State 업데이트
     """
@@ -56,12 +66,13 @@ class FeedController:
         gemini_browser_mode = str(self.config.get("gemini_browser_mode", "existing_chrome_mac"))
         gemini_web_enabled = bool(self.config.get("gemini_web_enabled", True))
         gemini_mode = str(self.config.get("gemini_mode", "new"))
-        gemini_custom_url = str(self.config.get("gemini_custom_url", "https://gemini.google.com/app/0a1545681329aa0a?hl=ko"))
+        gemini_custom_url = str(self.config.get("gemini_custom_url", "https://gemini.google.com/app"))
 
         gemini_url = gemini_custom_url if (gemini_mode == "custom" and gemini_custom_url) else "https://gemini.google.com/app"
 
-        # 세션 캐시 초기화
+        # 세션 초기화 (캐시 및 서킷 브레이커 리셋)
         BlogPopularityService.clear_cache()
+        LikeCircuitBreaker.reset()
 
         self.state_mgr.reset(total_targets=max_items)
         self.state_mgr.update(new_state=FeedState.STARTING_BROWSER, message="브라우저 세션 시작 중...")
@@ -148,14 +159,31 @@ class FeedController:
 
                     processed_keys.add(post.key)
 
-                    # 이미 댓글 작성 완료된 글인지 확인
-                    if comment_enabled and self.history.is_comment_submitted(post.key):
-                        logger.log(f"  ⏭️ [HISTORY] 이미 댓글 작성 완료된 글입니다 (건너뜀): {post.key}")
+                    # 컴포넌트 레벨 멱등성 검사 (Like와 Comment 독립 판단)
+                    should_like = like_enabled and not self.history.is_liked(post.key)
+                    should_comment = comment_enabled and not self.history.is_comment_submitted(post.key)
+
+                    if not should_like and not should_comment:
+                        logger.log(f"  ⏭️ [IDEMPOTENT] 이미 공감 및 댓글이 완료된 글입니다: {post.key}")
                         continue
 
-                    # 개별 포스트 처리
-                    result = processor.process(detail_page, post)
-                    self.history.record_result(result)
+                    # 개별 포스트 오류 격리 (Per-Post Error Boundary)
+                    try:
+                        result = processor.process(detail_page, post)
+                        self.history.record_result(result)
+                    except StopRequestedException:
+                        raise
+                    except FatalSessionError:
+                        raise
+                    except RecoverablePostError as rpe:
+                        logger.log(f"  ⚠️ [POST_RECOVERABLE] 글 처리 오류 격리 ({post.key}): {rpe}", "WARNING")
+                        failed_res = PostProcessResult(
+                            post=post,
+                            like_result=LikeProcessResult(state_before=LikeState.UNKNOWN, action_taken=False, state_after=LikeState.UNKNOWN, error=str(rpe)),
+                            comment_result=CommentProcessResult(status=CommentSubmitState.FAILED, error=str(rpe))
+                        )
+                        self.history.record_result(failed_res)
+                        continue
 
                     if self.stop_event.is_set():
                         break

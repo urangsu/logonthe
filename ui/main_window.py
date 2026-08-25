@@ -84,9 +84,6 @@ class MainWindow(ctk.CTk):
         self.stop_event = threading.Event()
         self.worker_thread: Optional[threading.Thread] = None
 
-        # 시작 시 혹시 남아있는 락 초기화
-        ProfileLockManager.release(USER_DATA_DIR)
-
         self._build_ui()
 
         # State 및 Logger 리스너 등록
@@ -433,8 +430,9 @@ class MainWindow(ctk.CTk):
 
     def _refine_current_comment(self, mode: str = "alternate"):
         """현재 글의 맥락을 기반으로 다른 스타일/길이의 댓글을 즉시 생성하여 에디터에 적용"""
-        title = self.state_mgr.state.current_post_title
-        excerpt = self.state_mgr.state.current_post_excerpt
+        snapshot = self.state_mgr.get_snapshot()
+        title = snapshot.current_post_title
+        excerpt = snapshot.current_post_excerpt
 
         if not title:
             messagebox.showinfo("알림", "현재 처리 중인 게시글이 없습니다. 피드 작업 시작 후 글에 진입했을 때 클릭해 주세요.")
@@ -484,7 +482,7 @@ class MainWindow(ctk.CTk):
             self.ai_post_excerpt_lbl.configure(text=f"본문 요약: {state.current_post_excerpt[:70]}...")
 
     def _copy_ai_prompt(self):
-        prompt = self.state_mgr.state.current_ai_prompt
+        prompt = self.state_mgr.get_snapshot().current_ai_prompt
         if not prompt:
             messagebox.showinfo("알림", "현재 준비된 AI 프롬프트가 없습니다. 피드 작업 시작 후 글에 진입하면 자동으로 생성됩니다.")
             return
@@ -591,7 +589,7 @@ class MainWindow(ctk.CTk):
                 messagebox.showwarning("입력 오류", "URL 직접 입력 목록을 1개 이상 입력해 주세요.")
                 return
 
-        # Config 저장
+        # Config 단조 업데이트 및 원자적 저장 (update_many 사용)
         cfg_data = {
             "feed_source": source_val,
             "max_feed_items": max_items,
@@ -628,7 +626,7 @@ class MainWindow(ctk.CTk):
             "gemini_browser_mode": self.gemini_browser_mode_var.get(),
             "gemini_web_enabled": self.gemini_web_enabled_var.get()
         }
-        self.config_service.save(cfg_data)
+        self.config_service.update_many(cfg_data)
 
         self.btn_start.configure(state="disabled")
         self.btn_stop.configure(state="normal")

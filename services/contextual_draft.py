@@ -12,14 +12,14 @@ class ContextualDraftResult:
     template_id: str
     intent: FirstPersonIntent
     reaction_intent: ReactionIntent
-    confidence: float  # 0.0 ~ 1.0
+    confidence: float  # 실제 분류 모델 신뢰도
 
 
 class ContextualDraftEngine:
     """
-    Human-Like Comment Composer v3.1 Wrapper
+    Human-Like Comment Composer v3.1 Engine Wrapper
     - 16대 주제별 카테고리 x 8대 반응유형(ReactionIntent) 결합
-    - 칭찬/긍정 리액션 기본축 강화
+    - ActionForms 기반 자연스러운 한국어 구문 및 META Subject 필터링
     - '나'의 취향/미래 의향이 가미된 자연스러운 1~2문장의 한국어 댓글 생성
     - 과거 경험 위조 / 부정적 평가 / 상투적 매크로 전면 배제
     """
@@ -33,7 +33,7 @@ class ContextualDraftEngine:
         short_boost: bool = False
     ) -> ContextualDraftResult:
         """제목과 본문을 기반으로 고품질 긍정 인간형 댓글 초안 생성"""
-        candidate: CommentCandidate = HumanLikeComposerV31.compose(
+        candidate, confidence = HumanLikeComposerV31.compose(
             title=title,
             excerpt=excerpt,
             praise_boost=praise_boost,
@@ -47,5 +47,5 @@ class ContextualDraftEngine:
             template_id=candidate.template_id,
             intent=candidate.first_person_intent,
             reaction_intent=candidate.reaction_intent,
-            confidence=0.85
+            confidence=confidence
         )

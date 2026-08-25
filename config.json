@@ -1,5 +1,5 @@
 {
-  "feed_source": "neighbor",
+  "feed_source": "recommendation",
   "max_feed_items": 20,
   "like_enabled": true,
   "comment_enabled": true,

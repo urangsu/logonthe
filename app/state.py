@@ -1,3 +1,5 @@
+import copy
+import threading
 from enum import Enum, auto
 from typing import Optional, Callable, List
 from dataclasses import dataclass
@@ -47,12 +49,20 @@ class BotRuntimeState:
 
 
 class StateManager:
+    """스레드 안전한 런타임 상태 관리자"""
+
     def __init__(self):
         self.state = BotRuntimeState()
+        self._lock = threading.RLock()
         self._listeners: List[Callable[[BotRuntimeState], None]] = []
 
     def register_listener(self, listener: Callable[[BotRuntimeState], None]):
-        self._listeners.append(listener)
+        with self._lock:
+            self._listeners.append(listener)
+
+    def get_snapshot(self) -> BotRuntimeState:
+        with self._lock:
+            return copy.deepcopy(self.state)
 
     def update(
         self,
@@ -69,45 +79,53 @@ class StateManager:
         current_ai_prompt: Optional[str] = None,
         ai_clipboard_ready: Optional[bool] = None
     ):
-        if new_state is not None:
-            self.state.current_state = new_state
-        if message is not None:
-            self.state.message = message
-        if post is not None:
-            self.state.current_post = post
-        if inc_like:
-            self.state.likes_count += 1
-        if inc_comment:
-            self.state.comments_count += 1
-        if inc_skip:
-            self.state.skipped_count += 1
-        if inc_processed:
-            self.state.processed_count += 1
-        if total_targets is not None:
-            self.state.total_target_count = total_targets
-        if current_post_title is not None:
-            self.state.current_post_title = current_post_title
-        if current_post_excerpt is not None:
-            self.state.current_post_excerpt = current_post_excerpt
-        if current_ai_prompt is not None:
-            self.state.current_ai_prompt = current_ai_prompt
-        if ai_clipboard_ready is not None:
-            self.state.ai_clipboard_ready = ai_clipboard_ready
+        with self._lock:
+            if new_state is not None:
+                self.state.current_state = new_state
+            if message is not None:
+                self.state.message = message
+            if post is not None:
+                self.state.current_post = post
+            if inc_like:
+                self.state.likes_count += 1
+            if inc_comment:
+                self.state.comments_count += 1
+            if inc_skip:
+                self.state.skipped_count += 1
+            if inc_processed:
+                self.state.processed_count += 1
+            if total_targets is not None:
+                self.state.total_target_count = total_targets
+            if current_post_title is not None:
+                self.state.current_post_title = current_post_title
+            if current_post_excerpt is not None:
+                self.state.current_post_excerpt = current_post_excerpt
+            if current_ai_prompt is not None:
+                self.state.current_ai_prompt = current_ai_prompt
+            if ai_clipboard_ready is not None:
+                self.state.ai_clipboard_ready = ai_clipboard_ready
 
-        for cb in self._listeners:
+            snapshot = copy.deepcopy(self.state)
+            listeners_copy = list(self._listeners)
+
+        for cb in listeners_copy:
             try:
-                cb(self.state)
+                cb(snapshot)
             except Exception:
                 pass
 
     def reset(self, total_targets: int = 0):
-        self.state = BotRuntimeState(
-            current_state=FeedState.IDLE,
-            total_target_count=total_targets,
-            message="작업 대기"
-        )
-        for cb in self._listeners:
+        with self._lock:
+            self.state = BotRuntimeState(
+                current_state=FeedState.IDLE,
+                total_target_count=total_targets,
+                message="작업 대기"
+            )
+            snapshot = copy.deepcopy(self.state)
+            listeners_copy = list(self._listeners)
+
+        for cb in listeners_copy:
             try:
-                cb(self.state)
+                cb(snapshot)
             except Exception:
                 pass
