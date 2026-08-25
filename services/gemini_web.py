@@ -1,9 +1,13 @@
 import time
+import uuid
 import subprocess
 import threading
 from typing import Optional, List
 from playwright.sync_api import Page, Locator
-from browser.session import interruptible_wait
+from browser.session import interruptible_wait, ensure_page_alive
+from services.draft import DraftService
+from services.comments.validators import PositiveSafetyValidator
+from services.comments.intents import CommentCandidate, ReactionIntent, FirstPersonIntent
 from src.logger import logger
 
 
@@ -11,9 +15,10 @@ class GeminiWebBridge:
     """
     Google Gemini 웹페이지(gemini.google.com)와 Playwright로 상호작용하여
     1) 프롬프트 자동 입력 및 전송
-    2) 스트리밍 응답 완료 감지
-    3) 최종 답변 추출 및 OS 클립보드 복사
-    를 수행하는 브릿지 서비스
+    2) ResponseSnapshot 및 스트리밍 응답 완료 감지
+    3) Request ID 마커 파싱 및 PositiveSafetyValidator 검증
+    4) 최종 답변 추출 및 OS 클립보드 복사
+    를 수행하는 브릿지 서비스 (v5.0)
     """
     GEMINI_DEFAULT_URL = "https://gemini.google.com/app"
 
@@ -37,40 +42,19 @@ class GeminiWebBridge:
         "button.send-button",
         "button[data-test-id='send-button']",
         "button:has(mat-icon:text-is('send'))",
-        "button:has(.mat-mdc-button-touch-target)",
         "button[aria-label*='submit']"
     ]
 
-    # Gemini 생성 중 / 중지 버튼 셀렉터
-    STOP_BUTTON_SELECTORS = [
-        "button[aria-label*='응답 생성 중지']",
-        "button[aria-label*='중지']",
-        "button[aria-label*='Stop']",
-        "mat-icon:text-is('stop')"
-    ]
-
-    # 답변 컨테이너 셀렉터
-    RESPONSE_SELECTORS = [
+    # 탑레벨 답변 컨테이너 셀렉터
+    TOP_LEVEL_RESPONSE_SELECTORS = [
         "model-response",
-        "div.response-container",
-        "message-content",
-        "div.markdown",
-        "div[class*='model-response']",
-        "div[class*='response_content']",
-        "div.model-response-text"
-    ]
-
-    # Gemini 자체 복사 버튼 셀렉터
-    COPY_BUTTON_SELECTORS = [
-        "button[aria-label*='복사']",
-        "button[aria-label*='Copy']",
-        "button:has(mat-icon:text-is('content_copy'))",
-        "button:has(mat-icon:has-text('content_copy'))"
+        "div.response-container"
     ]
 
     @classmethod
     def ensure_open(cls, page: Page, target_url: str = GEMINI_DEFAULT_URL, stop_event: Optional[threading.Event] = None) -> bool:
         """Gemini 페이지로 이동 및 로드 확인"""
+        ensure_page_alive(page)
         current_url = page.url or ""
         url_to_go = target_url if target_url else cls.GEMINI_DEFAULT_URL
 
@@ -96,7 +80,7 @@ class GeminiWebBridge:
 
     @classmethod
     def copy_to_os_clipboard(cls, text: str):
-        """OS 클립보드에 텍스트 복사 (macOS pbcopy 및 GUI Tkinter 클립보드 동시 동기화)"""
+        """OS 클립보드에 텍스트 복사"""
         if not text:
             return
         try:
@@ -111,73 +95,41 @@ class GeminiWebBridge:
         page: Page,
         prompt: str,
         gemini_url: str = GEMINI_DEFAULT_URL,
-        stop_event: Optional[threading.Event] = None
+        stop_event: Optional[threading.Event] = None,
+        request_id: Optional[str] = None
     ) -> Optional[str]:
         """
-        Gemini 자동화 전체 파이프라인:
-        1. 페이지 준비
-        2. 프롬프트 다중 방식으로 입력 (Quill/ContentEditable/DOM)
-        3. 전송 버튼 클릭 및 스트리밍 답변 완료 감지
-        4. 최신 답변 추출 및 클립보드 자동 복사
+        Managed Playwright Gemini 탭을 통한 댓글 자동 생성 (v5.0):
+        1) Request ID 마커 및 ResponseSnapshot(전송 전 응답 개수) 확보
+        2) 에디터 텍스트 주입 및 Read-back 검증
+        3) 전송 후 신규 응답 안정화 감지
+        4) Request ID 마커 파싱 및 clean_ai_response
+        5) PositiveSafetyValidator 검증
         """
+        req_id = request_id or uuid.uuid4().hex[:8]
         if not cls.ensure_open(page, target_url=gemini_url, stop_event=stop_event):
             return None
 
-        # 페이지 로딩 대기
-        try:
-            page.wait_for_selector(
-                "rich-textarea, div.ql-editor, div[contenteditable='true'], textarea",
-                timeout=8000
-            )
-        except Exception:
-            pass
+        # 1. 전송 전 탑레벨 응답 개수 스냅샷
+        before_count = 0
+        for sel in cls.TOP_LEVEL_RESPONSE_SELECTORS:
+            cnt = page.locator(sel).count()
+            if cnt > before_count:
+                before_count = cnt
 
-        logger.log("🤖 [GEMINI] Gemini 입력창에 프롬프트 자동 입력 중...")
-
-        # JavaScript를 통한 신뢰성 있는 입력창 주입 및 이벤트 디스패치
-        injected = page.evaluate("""
-            (text) => {
-                const editor = document.querySelector('rich-textarea div[contenteditable="true"], div.ql-editor, div[role="textbox"], rich-textarea p, div[contenteditable="true"], textarea');
-                if (!editor) return false;
-
-                editor.focus();
-
-                if (editor.tagName.toLowerCase() === 'textarea') {
-                    editor.value = text;
-                    editor.dispatchEvent(new Event('input', { bubbles: true }));
-                    editor.dispatchEvent(new Event('change', { bubbles: true }));
-                    return true;
-                }
-
-                // ContentEditable / Quill 처리
-                try {
-                    editor.innerHTML = '';
-                    const p = document.createElement('p');
-                    p.textContent = text;
-                    editor.appendChild(p);
-                } catch(e) {
-                    editor.innerText = text;
-                }
-
-                editor.dispatchEvent(new InputEvent('input', { bubbles: true, inputType: 'insertText', data: text }));
-                editor.dispatchEvent(new Event('input', { bubbles: true }));
-                editor.dispatchEvent(new Event('change', { bubbles: true }));
-                return true;
-            }
-        """, prompt)
-
-        if not injected:
-            # Fallback: Playwright locator fill
-            for sel in cls.EDITOR_SELECTORS:
-                loc = page.locator(sel).first
-                if loc.count() > 0:
-                    try:
-                        loc.click(timeout=1000)
-                        loc.fill(prompt)
+        # 2. 에디터 탐색 및 입력
+        injected = False
+        for sel in cls.EDITOR_SELECTORS:
+            editor = page.locator(sel).first
+            if editor.count() > 0:
+                try:
+                    if editor.is_visible():
+                        editor.click(timeout=1500)
+                        editor.fill(prompt, timeout=2000)
                         injected = True
                         break
-                    except Exception:
-                        continue
+                except Exception:
+                    continue
 
         if not injected:
             logger.log("❌ [GEMINI] Gemini 입력창을 찾지 못했습니다.", "ERROR")
@@ -185,7 +137,7 @@ class GeminiWebBridge:
 
         interruptible_wait(stop_event, 0.5)
 
-        # 전송 버튼 탐색 및 클릭
+        # 3. 전송 버튼 클릭
         send_clicked = False
         for btn_sel in cls.SEND_BUTTON_SELECTORS:
             btn = page.locator(btn_sel).first
@@ -199,16 +151,15 @@ class GeminiWebBridge:
                     continue
 
         if not send_clicked:
-            # Fallback: Enter 키 전송
             try:
                 page.keyboard.press("Enter")
                 send_clicked = True
             except Exception:
                 pass
 
-        logger.log("⏳ [GEMINI] 프롬프트 전송 완료. 답변 생성 대기 중...")
+        logger.log("⏳ [GEMINI] 프롬프트 전송 완료. 신규 답변 생성 대기 중...")
 
-        # 답변 생성 완료 감지 루프
+        # 4. 답변 생성 완료 감지 루프
         start_time = time.time()
         previous_text = ""
         stable_since = None
@@ -217,47 +168,59 @@ class GeminiWebBridge:
             if stop_event and stop_event.is_set():
                 return None
 
-            # 답변 컨테이너 탐색
-            response_texts = []
-            for sel in cls.RESPONSE_SELECTORS:
-                locs = page.locator(sel)
-                cnt = locs.count()
-                if cnt > 0:
+            ensure_page_alive(page)
+
+            # 새 탑레벨 응답 컨테이너 확인
+            top_responses = page.locator("model-response, div.response-container")
+            current_count = top_responses.count()
+
+            if current_count > before_count:
+                latest_node = top_responses.last
+                # 내부 실제 콘텐츠 요소 우선 탐색
+                content_loc = latest_node.locator("message-content, div.markdown, div.model-response-text, .response-body-inner").first
+                if content_loc.count() > 0:
                     try:
-                        txt = locs.last.inner_text().strip()
-                        if txt:
-                            response_texts.append(txt)
+                        cur_txt = content_loc.inner_text().strip()
                     except Exception:
-                        pass
+                        cur_txt = ""
+                else:
+                    try:
+                        cur_txt = latest_node.inner_text().strip()
+                    except Exception:
+                        cur_txt = ""
 
-            current_text = response_texts[-1] if response_texts else ""
-
-            if current_text and current_text != previous_text:
-                previous_text = current_text
-                stable_since = time.time()
-            elif current_text and stable_since and (time.time() - stable_since >= 1.5):
-                # 1.5초 이상 텍스트 변화가 없고 중지 버튼이 사라진 경우 완료로 판단
-                stop_btns = page.locator("button[aria-label*='중지'], button[aria-label*='Stop']")
-                if stop_btns.count() == 0 or not stop_btns.first.is_visible():
-                    break
+                if cur_txt and cur_txt != previous_text:
+                    previous_text = cur_txt
+                    stable_since = time.time()
+                elif cur_txt and stable_since and (time.time() - stable_since >= 1.5):
+                    # 중지 버튼 소멸 확인
+                    stop_btns = page.locator("button[aria-label*='중지'], button[aria-label*='Stop']")
+                    if stop_btns.count() == 0 or not stop_btns.first.is_visible():
+                        break
 
             time.sleep(0.3)
 
-        from services.draft import DraftService
-        final_answer = DraftService.clean_ai_response(previous_text)
+        # 5. Request ID 마커 파싱 및 정제
+        final_answer = DraftService.clean_ai_response(previous_text, expected_request_id=req_id)
         if not final_answer:
             logger.log("⚠️ [GEMINI] 유효한 답변 텍스트를 읽어오지 못했습니다. (로컬 엔진으로 전환)", "WARNING")
             return None
 
-        # 1) Gemini 자체 '복사' 버튼 클릭 시도 (브라우저 네이티브 복사)
-        try:
-            copy_btns = page.locator("button[aria-label*='복사'], button[aria-label*='Copy'], button:has(mat-icon:text-is('content_copy'))")
-            if copy_btns.count() > 0:
-                copy_btns.last.click(timeout=1000)
-        except Exception:
-            pass
+        # 6. PositiveSafetyValidator 검증
+        cand = CommentCandidate(
+            body=final_answer,
+            category="AI_GENERATED",
+            reaction_intent=ReactionIntent.DETAIL_PRAISE,
+            first_person_intent=FirstPersonIntent.NONE,
+            subject="",
+            template_id="gemini_web_v5"
+        )
+        valid, reason = PositiveSafetyValidator.validate_candidate(cand)
+        if not valid:
+            logger.log(f"⚠️ [GEMINI] AI 생성 댓글이 안전성 검증을 통과하지 못했습니다 ({reason}). 로컬 엔진으로 전환합니다.", "WARNING")
+            return None
 
-        # 2) OS 시스템 클립보드 복사
+        # 7. OS 클립보드 복사
         cls.copy_to_os_clipboard(final_answer)
 
         logger.log(f"✨ [GEMINI] 댓글 생성 완료! (클립보드에 자동 복사됨)")

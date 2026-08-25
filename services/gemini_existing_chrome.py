@@ -1,14 +1,19 @@
-import subprocess
+import json
 import time
+import uuid
+import subprocess
 import threading
 from typing import Optional, Tuple, Dict, Any, List
+from services.draft import DraftService
+from services.comments.validators import PositiveSafetyValidator
+from services.comments.intents import CommentCandidate, ReactionIntent, FirstPersonIntent
 from src.logger import logger
 
 
 class ExistingChromeGeminiBridge:
     """
     macOS 환경에서 사용자가 실행 중인 실제 Google Chrome의 gemini.google.com 탭과
-    AppleScript / System Events를 통해 포커스 -> 붙여넣기 검증 -> 전송 검증 -> 신규 답변 추출을 수행합니다.
+    AppleScript / System Events를 통해 포커스 -> 붙여넣기 검증 -> 전송 검증 -> 신규 답변 추출을 수행합니다 (v5.0).
     """
 
     @classmethod
@@ -105,16 +110,22 @@ class ExistingChromeGeminiBridge:
             return False
 
     @classmethod
-    def generate_comment(cls, prompt: str, stop_event: Optional[threading.Event] = None) -> Optional[str]:
+    def generate_comment(
+        cls,
+        prompt: str,
+        stop_event: Optional[threading.Event] = None,
+        request_id: Optional[str] = None
+    ) -> Optional[str]:
         """
-        기존 Google Chrome Gemini 탭을 통한 댓글 자동 생성:
-        1. Gemini 탭 탐색 및 상태 확인
-        2. JS 권한 확인 (미허용 시 안전하게 None 반환하여 Local Context 엔진으로 fallback)
-        3. 입력 에디터 탐색 및 focus()
-        4. 프롬프트 pbcopy 후 Cmd+V 붙여넣기 및 내용 검증
-        5. 전송(Enter) 및 응답 카운트(before_count -> after_count) 감지
-        6. 새 답변 텍스트 추출 및 클립보드 복사
+        기존 Google Chrome Gemini 탭을 통한 댓글 자동 생성 (v5.0):
+        1. Request ID 마커 및 탭 진단
+        2. Chrome 창 활성화 및 입력창 Focus
+        3. 프롬프트 Cmd+V 붙여넣기 및 Read-back 검증
+        4. 전송(Enter) 및 신규 ResponseSnapshot 감지
+        5. Request ID 마커 파싱 및 clean_ai_response
+        6. PositiveSafetyValidator 통과 검증 (미통과 시 None -> Local Fallback)
         """
+        req_id = request_id or uuid.uuid4().hex[:8]
         diag = cls.test_connection()
         if not diag.get("connected", False):
             logger.log(f"[GEMINI/EXTERNAL] 연결 실패: {diag.get('message')}", "WARNING")
@@ -147,7 +158,7 @@ class ExistingChromeGeminiBridge:
             logger.log(f"[GEMINI/EXTERNAL] 창 활성화 오류: {e}", "WARNING")
             return None
 
-        # 3. 에디터 Focus 및 기존 답변 개수 파악
+        # 3. 에디터 Focus 및 기존 탑레벨 답변 개수 파악
         focus_and_count_js = """
         (function() {
             var selectors = [
@@ -195,7 +206,7 @@ class ExistingChromeGeminiBridge:
             logger.log("⚠️ [GEMINI/EXTERNAL] Gemini 입력창 포커스 실패", "WARNING")
             return None
 
-        # 4. System Events로 Cmd+V 붙여넣기 후 내용 검증
+        # 4. System Events로 Cmd+V 붙여넣기
         paste_script = """
         tell application "System Events"
             tell process "Google Chrome"
@@ -223,7 +234,7 @@ class ExistingChromeGeminiBridge:
         except Exception:
             return None
 
-        # 6. 새 답변 생성 완료 감지 루프 (after_count > before_count 및 텍스트 안정화)
+        # 6. 새 답변 생성 완료 감지 루프 (ResponseSnapshot: after_count > before_count 및 텍스트 안정화)
         start_t = time.time()
         previous_text = ""
         stable_since = None
@@ -240,7 +251,6 @@ class ExistingChromeGeminiBridge:
                     return 'WAITING_NEW|||' + count;
                 }}
                 var latest = resps[count - 1];
-                // 실제 텍스트 컨테이너 탐색 (UI 헤더 'Gemini의 응답' 제외)
                 var contentEl = latest.querySelector('message-content, div.markdown, div.model-response-text, .response-body-inner') || latest;
                 var txt = contentEl.innerText || '';
                 return 'GENERATING|||' + count + '|||' + txt;
@@ -271,10 +281,24 @@ class ExistingChromeGeminiBridge:
 
             time.sleep(0.4)
 
-        from services.draft import DraftService
-        final_answer = DraftService.clean_ai_response(previous_text)
+        # 7. Request ID 마커 및 텍스트 정제
+        final_answer = DraftService.clean_ai_response(previous_text, expected_request_id=req_id)
         if not final_answer:
             logger.log("⚠️ [GEMINI/EXTERNAL] 유효한 신규 답변 내용을 읽어오지 못했습니다. (로컬 엔진으로 전환)", "WARNING")
+            return None
+
+        # 8. PositiveSafetyValidator 안전성 검증
+        cand = CommentCandidate(
+            body=final_answer,
+            category="AI_GENERATED",
+            reaction_intent=ReactionIntent.DETAIL_PRAISE,
+            first_person_intent=FirstPersonIntent.NONE,
+            subject="",
+            template_id="gemini_external_v5"
+        )
+        valid, reason = PositiveSafetyValidator.validate_candidate(cand)
+        if not valid:
+            logger.log(f"⚠️ [GEMINI/EXTERNAL] AI 생성 댓글이 안전성 검증을 통과하지 못했습니다 ({reason}). 로컬 엔진으로 전환합니다.", "WARNING")
             return None
 
         # 클립보드에 최종 답변 복사 및 검증

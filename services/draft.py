@@ -19,26 +19,42 @@ class DraftService:
         return text
 
     @staticmethod
-    def clean_ai_response(raw_text: str) -> Optional[str]:
+    def clean_ai_response(raw_text: str, expected_request_id: Optional[str] = None) -> Optional[str]:
         """
-        Gemini 등 AI 웹 UI에서 추출된 응답 텍스트를 강력하게 정제 및 검증:
-        1) 'Gemini의 응답', 'Gemini's Response' 등 UI 헤더 텍스트 제거
-        2) 마크다운 코드블록(```) 및 따옴표 제거
-        3) 헤더만 복사되었거나 내용이 빈 경우 None 반환하여 Local Engine으로 안전 fallback
+        Gemini 등 AI 웹 UI에서 추출된 응답 텍스트를 강력하게 정제 및 검증 (v5.0):
+        1) Request ID 마커([[CMT:{id}]]...[[/CMT]]) 우선 추출 및 일치 여부 확인
+        2) 'Gemini의 응답', 'Gemini\'s Response' 등 UI 툴바 헤더 텍스트 제거
+        3) 마크다운 코드블록(```) 및 따옴표 제거
+        4) 헤더만 복사되었거나 내용이 빈 경우 None 반환
         """
         if not raw_text or not raw_text.strip():
             return None
 
         text = raw_text.strip()
 
-        # 1. 마크다운 코드블록 제거
+        # 1. Request ID 마커 우선 추출
+        if expected_request_id:
+            marker_pattern = rf"\[\[CMT:{re.escape(expected_request_id)}\]\](.*?)\[\[/CMT\]\]"
+            match = re.search(marker_pattern, text, re.DOTALL | re.IGNORECASE)
+            if match:
+                text = match.group(1).strip()
+            else:
+                # 범용 마커 추출 폴백
+                general_match = re.search(r"\[\[CMT:[a-zA-Z0-9_-]+\]\](.*?)\[\[/CMT\]\]", text, re.DOTALL | re.IGNORECASE)
+                if general_match:
+                    text = general_match.group(1).strip()
+
+        # 남아있는 마커 태그 청소
+        text = re.sub(r"\[\[/?CMT(?::[a-zA-Z0-9_-]+)?\]\]", "", text).strip()
+
+        # 2. 마크다운 코드블록 제거
         if text.startswith("```"):
             text = text.strip("`")
             if text.startswith("text") or text.startswith("markdown"):
                 parts = text.split("\n", 1)
                 text = parts[1] if len(parts) > 1 else ""
 
-        # 2. Gemini UI 헤더/프리픽스 정규식 제거
+        # 3. Gemini UI 헤더/프리픽스 정규식 제거
         prefix_patterns = [
             r'^(?:Gemini의\s*응답|Gemini\'s\s*Response|Gemini\s*Response|Gemini|모델의\s*답변|답변\s*:|댓글\s*:|초안\s*:)\s*[\n:]*\s*',
             r'^(?:Here\s*is\s*the\s*comment|댓글\s*내용)\s*[\n:]*\s*'
@@ -46,11 +62,16 @@ class DraftService:
         for pat in prefix_patterns:
             text = re.sub(pat, '', text, flags=re.IGNORECASE).strip()
 
-        # 3. 양쪽 감싼 따옴표 제거
+        # 4. 독립 라인으로 들어간 UI 단어들 제거 (복사, 공유 등)
+        ui_lines = {"복사", "copy", "공유", "share", "좋아요", "싫어요", "다시 시도", "regenerate"}
+        lines = [line.strip() for line in text.splitlines() if line.strip() and line.strip().lower() not in ui_lines]
+        text = "\n".join(lines).strip()
+
+        # 5. 양쪽 감싼 따옴표 제거
         if (text.startswith('"') and text.endswith('"')) or (text.startswith("'") and text.endswith("'")):
             text = text[1:-1].strip()
 
-        # 4. 검증 게이트: UI 헤더 단독이거나 너무 짧은 경우 무효화
+        # 6. 검증 게이트: UI 헤더 단독이거나 너무 짧은 경우 무효화
         invalid_literals = {
             "gemini의 응답", "gemini's response", "gemini", "응답", "답변",
             "model-response", "response"
