@@ -240,7 +240,9 @@ class ExistingChromeGeminiBridge:
                     return 'WAITING_NEW|||' + count;
                 }}
                 var latest = resps[count - 1];
-                var txt = latest.innerText || '';
+                // 실제 텍스트 컨테이너 탐색 (UI 헤더 'Gemini의 응답' 제외)
+                var contentEl = latest.querySelector('message-content, div.markdown, div.model-response-text, .response-body-inner') || latest;
+                var txt = contentEl.innerText || '';
                 return 'GENERATING|||' + count + '|||' + txt;
             }})()
             """
@@ -269,17 +271,11 @@ class ExistingChromeGeminiBridge:
 
             time.sleep(0.4)
 
-        final_answer = previous_text.strip()
+        from services.draft import DraftService
+        final_answer = DraftService.clean_ai_response(previous_text)
         if not final_answer:
-            logger.log("⚠️ [GEMINI/EXTERNAL] 생성된 신규 답변 내용을 읽어오지 못했습니다.", "WARNING")
+            logger.log("⚠️ [GEMINI/EXTERNAL] 유효한 신규 답변 내용을 읽어오지 못했습니다. (로컬 엔진으로 전환)", "WARNING")
             return None
-
-        # 마크다운 코드블록 제거
-        if final_answer.startswith("```"):
-            final_answer = final_answer.strip("`")
-            if final_answer.startswith("text") or final_answer.startswith("markdown"):
-                final_answer = final_answer.split("\n", 1)[-1]
-        final_answer = final_answer.strip()
 
         # 클립보드에 최종 답변 복사 및 검증
         cls.copy_to_os_clipboard(final_answer)

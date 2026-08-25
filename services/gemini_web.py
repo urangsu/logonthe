@@ -243,17 +243,11 @@ class GeminiWebBridge:
 
             time.sleep(0.3)
 
-        final_answer = previous_text.strip()
+        from services.draft import DraftService
+        final_answer = DraftService.clean_ai_response(previous_text)
         if not final_answer:
-            logger.log("⚠️ [GEMINI] 생성된 답변 텍스트를 읽어오지 못했습니다.", "WARNING")
+            logger.log("⚠️ [GEMINI] 유효한 답변 텍스트를 읽어오지 못했습니다. (로컬 엔진으로 전환)", "WARNING")
             return None
-
-        # 마크다운 코드 블록(```) 제거 및 정제
-        if final_answer.startswith("```"):
-            final_answer = final_answer.strip("`")
-            if final_answer.startswith("text") or final_answer.startswith("markdown"):
-                final_answer = final_answer.split("\n", 1)[-1]
-        final_answer = final_answer.strip()
 
         # 1) Gemini 자체 '복사' 버튼 클릭 시도 (브라우저 네이티브 복사)
         try:
