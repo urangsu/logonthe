@@ -7,7 +7,9 @@ from src.logger import logger
 
 class MyBlogRecentPostService:
     """
-    내 네이버 블로그의 최근 공개 포스트 목록(최대 N개)을 수집하는 서비스
+    내 네이버 블로그의 최근 공개 포스트 목록(최대 N개)을 수집하는 서비스 (v8.0)
+    - 공지/고정글 제외 필터링
+    - 실제 일반 공개글 상위 N개 추출
     """
 
     @classmethod
@@ -24,13 +26,12 @@ class MyBlogRecentPostService:
 
         b_id = blog_id.strip()
         url = f"https://m.blog.naver.com/PostList.naver?blogId={b_id}"
-        logger.log(f"🔎 [AUDIT] 내 블로그 최근 글 목록 조회 중: {url} (최대 {max_count}개)")
+        logger.log(f"🔎 [AUDIT] 내 블로그 최근 공개 글 목록 조회 중: {url} (최대 {max_count}개)")
 
         try:
             page.goto(url, wait_until="domcontentloaded", timeout=25000)
             interruptible_wait(stop_event, 1.5)
 
-            # 모바일 PostList 페이지에서 글 링크 및 제목 추출
             posts = page.evaluate(r"""
                 (arg) => {
                     const blogId = arg.blogId;
@@ -49,16 +50,23 @@ class MyBlogRecentPostService:
                         }
 
                         if (logNo && !seenLogNo.has(logNo) && /^\d+$/.test(logNo)) {
-                            seenLogNo.add(logNo);
-                            const titleEl = a.querySelector(".title, strong, .tit, h3, .post_title") || a;
-                            const tText = (titleEl ? titleEl.innerText : '').trim().replace(/\n/g, ' ');
-                            items.push({
-                                log_no: logNo,
-                                url: "https://m.blog.naver.com/" + blogId + "/" + logNo,
-                                title: tText || ("포스트 " + logNo)
-                            });
-                            if (items.length >= maxCnt) {
-                                break;
+                            // 공지/고정글 여부 확인
+                            const parentCard = a.closest("li, div[class*='item'], div[class*='post']") || a;
+                            const cardText = parentCard.innerText || '';
+                            const isNotice = cardText.includes("공지") || cardText.includes("고정") || a.className.includes("notice") || a.className.includes("pin");
+
+                            if (!isNotice) {
+                                seenLogNo.add(logNo);
+                                const titleEl = a.querySelector(".title, strong, .tit, h3, .post_title") || a;
+                                const tText = (titleEl ? titleEl.innerText : '').trim().replace(/\n/g, ' ');
+                                items.push({
+                                    log_no: logNo,
+                                    url: "https://m.blog.naver.com/" + blogId + "/" + logNo,
+                                    title: tText || ("포스트 " + logNo)
+                                });
+                                if (items.length >= maxCnt) {
+                                    break;
+                                }
                             }
                         }
                     }
@@ -66,7 +74,7 @@ class MyBlogRecentPostService:
                 }
             """, {"blogId": b_id, "maxCount": max_count})
 
-            logger.log(f"✅ [AUDIT] 최근 글 {len(posts)}개 확보 완료")
+            logger.log(f"✅ [AUDIT] 최근 일반 공개 글 {len(posts)}개 확보 완료")
             for p in posts:
                 logger.log(f"   📄 [{p['log_no']}] {p['title'][:35]}...")
             return posts

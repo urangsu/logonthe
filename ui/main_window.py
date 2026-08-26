@@ -629,17 +629,20 @@ class MainWindow(ctk.CTk):
 
                 if res.get("success"):
                     rep = res["report"]
-                    csv_path = res["csv_path"]
+                    master_csv = res.get("master_csv_path", "")
                     unresp_csv = res.get("unresponsive_csv_path", "")
+                    non_buddy_csv = res.get("non_buddy_csv_path", "")
+                    audit_st = rep.get("audit_state", "complete").upper()
+
                     msg = (
-                        f"🎉 [내 블로그 이웃 전수 및 무반응 감사 완료]\n\n"
+                        f"🎉 [내 블로그 이웃 전수 및 무반응 감사 완료 (상태: {audit_st})]\n\n"
                         f"• 분석 대상 최근 글: {rep['recent_post_count']}개\n"
-                        f"• 👥 전체 등록 이웃: {rep.get('total_buddies_count', 0)}명\n"
+                        f"• 👥 전체 등록 이웃 (Master): {rep.get('total_buddies_count', 0)}명\n"
                         f"• ❤️ 최근 글 반응 이웃: {rep.get('reacted_buddies_count', 0)}명\n"
-                        f"• 🚫 무반응 이웃: {rep.get('unresponsive_buddies_count', 0)}명\n"
-                        f"  (48시간 신규 유예: {rep.get('grace_period_buddies_count', 0)}명 / 실질 무반응: {rep.get('real_unresponsive_count', 0)}명)\n\n"
-                        f"• 🌟 고유 외부/이웃 반응자: {rep['unique_participant_count']}명\n"
-                        f"  (공감 참여: {rep['liker_count']}명 / 댓글 작성: {rep['commenter_count']}명)\n\n"
+                        f"   (공감+댓글: {rep.get('both_like_and_comment_count', 0)}명, 공감만: {rep.get('liked_only_count', 0)}명, 댓글만: {rep.get('commented_only_count', 0)}명)\n"
+                        f"• 🚫 최근 글 무반응 이웃: {rep.get('unresponsive_buddies_count', 0)}명\n"
+                        f"   (48시간 신규 유예: {rep.get('grace_period_buddies_count', 0)}명 / 실질 무반응: {rep.get('real_unresponsive_count', 0)}명)\n"
+                        f"• 🌐 비이웃 참여자: {rep.get('non_buddy_reactors_count', 0)}명\n\n"
                         f"무반응 이웃 CSV:\n{unresp_csv}\n\n"
                         f"무반응 이웃 CSV 파일을 바로 여시겠습니까?"
                     )
@@ -648,14 +651,14 @@ class MainWindow(ctk.CTk):
                         ans = messagebox.askyesno("감사 완료", msg)
                         if ans:
                             try:
-                                subprocess.run(["open", unresp_csv or csv_path])
+                                subprocess.run(["open", unresp_csv or master_csv])
                             except Exception:
                                 pass
 
                     self.after(0, show_dialog)
                 else:
                     err_msg = res.get('error', 'unknown')
-                    self.after(0, lambda: messagebox.showwarning("수집 실패", f"반응자 수집 실패: {err_msg}"))
+                    self.after(0, lambda: messagebox.showwarning("수집 실패", f"감사 실패: {err_msg}"))
             except Exception as e:
                 logger.log(f"❌ [AUDIT] 수집 중 오류: {e}", "ERROR")
                 self.after(0, lambda: messagebox.showerror("오류", f"수집 중 오류 발생: {e}"))

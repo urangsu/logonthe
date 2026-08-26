@@ -5,67 +5,40 @@ import time
 from typing import Dict, Any, List, Tuple
 
 AUDIT_JSON_PATH = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "data", "my_blog_engagement_audit.json"))
-AUDIT_CSV_PATH = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "data", "my_blog_engagement_audit.csv"))
 
 
 class EngagementAuditStore:
     """
-    내 블로그 반응자 및 무반응 이웃 감사 리포트 저장소 (JSON 및 CSV)
+    내 블로그 전체 이웃 기준 감사 및 무반응 이웃 감사 리포트 저장소 (v8.0)
+    - 1. Master 이웃 감사 CSV: data/buddy_engagement_audit_YYYYMMDD.csv
+    - 2. 무반응 이웃 전용 CSV: data/unresponsive_buddies_YYYYMMDD.csv
+    - 3. 비이웃 반응자 CSV: data/non_buddy_reactors_YYYYMMDD.csv
+    - 4. 종합 감사 JSON: data/my_blog_engagement_audit.json
     """
 
     @classmethod
-    def get_unresponsive_csv_path(cls) -> str:
+    def get_file_paths(cls) -> Tuple[str, str, str, str]:
         date_str = time.strftime("%Y%m%d")
-        return os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "data", f"unresponsive_buddies_{date_str}.csv"))
+        data_dir = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "data"))
+        os.makedirs(data_dir, exist_ok=True)
+
+        json_path = os.path.join(data_dir, "my_blog_engagement_audit.json")
+        master_csv = os.path.join(data_dir, f"buddy_engagement_audit_{date_str}.csv")
+        unresp_csv = os.path.join(data_dir, f"unresponsive_buddies_{date_str}.csv")
+        non_buddy_csv = os.path.join(data_dir, f"non_buddy_reactors_{date_str}.csv")
+
+        return json_path, master_csv, unresp_csv, non_buddy_csv
 
     @classmethod
-    def save(cls, report: Dict[str, Any]) -> Tuple[str, str, str]:
-        os.makedirs(os.path.dirname(AUDIT_JSON_PATH), exist_ok=True)
-        unresp_csv_path = cls.get_unresponsive_csv_path()
+    def save_v8(cls, report: Dict[str, Any]) -> Tuple[str, str, str, str]:
+        json_path, master_csv, unresp_csv, non_buddy_csv = cls.get_file_paths()
 
         # 1. 종합 JSON 저장
-        with open(AUDIT_JSON_PATH, "w", encoding="utf-8") as f:
+        with open(json_path, "w", encoding="utf-8") as f:
             json.dump(report, f, ensure_ascii=False, indent=2)
 
-        # 2. 반응 참여자 CSV 저장
-        people = report.get("people", [])
-        fieldnames = [
-            "blog_id",
-            "nickname",
-            "profile_url",
-            "liked_post_count",
-            "commented_post_count",
-            "total_engagement_count",
-            "liked_post_titles",
-            "commented_post_titles",
-            "latest_engagement_at",
-            "comment_samples",
-            "is_liker",
-            "is_commenter"
-        ]
-
-        with open(AUDIT_CSV_PATH, "w", encoding="utf-8-sig", newline="") as f:
-            writer = csv.DictWriter(f, fieldnames=fieldnames)
-            writer.writeheader()
-            for p in people:
-                writer.writerow({
-                    "blog_id": p.get("blog_id", ""),
-                    "nickname": p.get("nickname", ""),
-                    "profile_url": p.get("profile_url", ""),
-                    "liked_post_count": p.get("liked_post_count", 0),
-                    "commented_post_count": p.get("commented_post_count", 0),
-                    "total_engagement_count": p.get("total_engagement_count", 0),
-                    "liked_post_titles": " | ".join(p.get("liked_posts", [])),
-                    "commented_post_titles": " | ".join(p.get("commented_posts", [])),
-                    "latest_engagement_at": report.get("generated_at", ""),
-                    "comment_samples": " || ".join(p.get("comment_samples", [])),
-                    "is_liker": "Y" if p.get("liked_post_count", 0) > 0 else "N",
-                    "is_commenter": "Y" if p.get("commented_post_count", 0) > 0 else "N"
-                })
-
-        # 3. 무반응 이웃 전용 CSV 저장
-        unresponsive = report.get("unresponsive_buddies", [])
-        unresp_fieldnames = [
+        # 공통 Master/Unresponsive 필드
+        buddy_fieldnames = [
             "blog_id",
             "nickname",
             "blog_title",
@@ -73,22 +46,83 @@ class EngagementAuditStore:
             "buddy_type",
             "added_date",
             "last_post_date",
-            "is_grace_period"
+            "like_count",
+            "comment_count",
+            "comment_entry_count",
+            "engaged_post_count",
+            "liked_only",
+            "commented_only",
+            "both_like_and_comment",
+            "no_reaction",
+            "is_recent_buddy",
+            "scan_complete"
         ]
 
-        with open(unresp_csv_path, "w", encoding="utf-8-sig", newline="") as f:
-            writer = csv.DictWriter(f, fieldnames=unresp_fieldnames)
+        def format_buddy_row(row: Dict[str, Any]) -> Dict[str, Any]:
+            return {
+                "blog_id": row.get("blog_id", ""),
+                "nickname": row.get("nickname", ""),
+                "blog_title": row.get("blog_title", ""),
+                "group_name": row.get("group_name", ""),
+                "buddy_type": row.get("buddy_type", "이웃"),
+                "added_date": row.get("added_date", ""),
+                "last_post_date": row.get("last_post_date", ""),
+                "like_count": row.get("like_count", 0),
+                "comment_count": row.get("comment_count", 0),
+                "comment_entry_count": row.get("comment_entry_count", 0),
+                "engaged_post_count": row.get("engaged_post_count", 0),
+                "liked_only": "Y" if row.get("liked_only") else "N",
+                "commented_only": "Y" if row.get("commented_only") else "N",
+                "both_like_and_comment": "Y" if row.get("both_like_and_comment") else "N",
+                "no_reaction": "Y" if row.get("no_reaction") else "N",
+                "is_recent_buddy": "Y" if row.get("is_recent_buddy") else "N",
+                "scan_complete": "Y" if row.get("scan_complete") else "N"
+            }
+
+        # 2. Master CSV 저장 (전체 이웃)
+        master_list = report.get("master_buddies", [])
+        with open(master_csv, "w", encoding="utf-8-sig", newline="") as f:
+            writer = csv.DictWriter(f, fieldnames=buddy_fieldnames)
             writer.writeheader()
-            for u in unresponsive:
+            for b in master_list:
+                writer.writerow(format_buddy_row(b))
+
+        # 3. 무반응 이웃 전용 CSV 저장
+        unresp_list = report.get("unresponsive_buddies", [])
+        with open(unresp_csv, "w", encoding="utf-8-sig", newline="") as f:
+            writer = csv.DictWriter(f, fieldnames=buddy_fieldnames)
+            writer.writeheader()
+            for u in unresp_list:
+                writer.writerow(format_buddy_row(u))
+
+        # 4. 비이웃 반응자 CSV 저장
+        non_buddies = report.get("non_buddy_reactors", [])
+        non_buddy_fieldnames = [
+            "blog_id",
+            "nickname",
+            "profile_url",
+            "like_count",
+            "comment_count",
+            "comment_entry_count",
+            "engaged_post_count"
+        ]
+        with open(non_buddy_csv, "w", encoding="utf-8-sig", newline="") as f:
+            writer = csv.DictWriter(f, fieldnames=non_buddy_fieldnames)
+            writer.writeheader()
+            for nb in non_buddies:
                 writer.writerow({
-                    "blog_id": u.get("blog_id", ""),
-                    "nickname": u.get("nickname", ""),
-                    "blog_title": u.get("blog_title", ""),
-                    "group_name": u.get("group_name", ""),
-                    "buddy_type": u.get("buddy_type", "이웃"),
-                    "added_date": u.get("added_date", ""),
-                    "last_post_date": u.get("last_post_date", ""),
-                    "is_grace_period": "Y" if u.get("is_grace_period") else "N"
+                    "blog_id": nb.get("blog_id", ""),
+                    "nickname": nb.get("nickname", ""),
+                    "profile_url": nb.get("profile_url", ""),
+                    "like_count": nb.get("like_count", 0),
+                    "comment_count": nb.get("comment_count", 0),
+                    "comment_entry_count": nb.get("comment_entry_count", 0),
+                    "engaged_post_count": nb.get("engaged_post_count", 0)
                 })
 
-        return AUDIT_JSON_PATH, AUDIT_CSV_PATH, unresp_csv_path
+        return json_path, master_csv, unresp_csv, non_buddy_csv
+
+    # 하위 호환 save
+    @classmethod
+    def save(cls, report: Dict[str, Any]):
+        return cls.save_v8(report)

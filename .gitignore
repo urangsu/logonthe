@@ -15,6 +15,17 @@ data/browser_profile/
 data/history.json
 data/*.log
 
+# Generated Audit Outputs & Local Corpus (v8.0)
+data/my_blog_engagement_audit.*
+data/buddy_engagement_audit_*.csv
+data/unresponsive_buddies_*.csv
+data/non_buddy_reactors_*.csv
+data/user_learning_corpus.json
+data/accumulated_visited_comments.json
+data/naver_comment_corpus.json
+data/real_comment_corpus.json
+data/dom_db.json
+
 # OS specific
 .DS_Store
 .DS_Store?
