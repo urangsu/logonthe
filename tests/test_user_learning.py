@@ -19,7 +19,7 @@ class TestUserLearningAndCorpus(unittest.TestCase):
         """댓글 길이 정책(v7): 100자 이하는 통과, 101자 이상은 reject 검증"""
         # 1. 50자 (정상 통과)
         cand_ok = CommentCandidate(
-            body="탐론 렌즈 가성비 구성이 알차네요! 펜탁스 색감도 너무 예뻐요 ㅎㅎ",
+            body="탐론 렌즈 가성비 구성이 알차네요! 펜탁스 색감도 너무 예뻐요.",
             category="IT_GADGET",
             reaction_intent=ReactionIntent.DETAIL_PRAISE,
             first_person_intent=FirstPersonIntent.NONE,
@@ -31,7 +31,7 @@ class TestUserLearningAndCorpus(unittest.TestCase):
 
         # 2. 101자 (거부)
         cand_over = CommentCandidate(
-            body="탐론 70-300mm 망원 렌즈 가성비 구성이 정말 알차 보이네요! 펜탁스 바디에 마운트한 사진 보니까 색감도 너무 예쁘게 잘 나오는 것 같아요 ㅎㅎ 다음에 출사 갈 때 저도 꼭 써보고 싶네요!",
+            body="탐론 70-300mm 망원 렌즈 가성비 구성이 정말 알차 보이네요! 펜탁스 바디에 마운트한 사진 보니까 색감도 너무 예쁘게 잘 나오는 것 같아요. 다음에 출사 갈 때 저도 다뤄보고 싶네요. 사진 결과물이 아주 만족스러워 보입니다.",
             category="IT_GADGET",
             reaction_intent=ReactionIntent.DETAIL_PRAISE,
             first_person_intent=FirstPersonIntent.NONE,

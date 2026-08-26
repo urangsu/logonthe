@@ -43,6 +43,15 @@ class PositiveSafetyValidator:
         "어디 사세요", "몇 살", "직업이", "자녀", "얼마 버", "수익 얼마"
     ]
 
+    BANNED_KKOK_MACRO = [
+        "꼭 가보고", "꼭 가봐야", "꼭 먹어", "꼭 들러", "꼭 써보고", "꼭 방문",
+        "꼭 가볼", "꼭 봐야", "꼭 참고", "꼭 찾아", "꼭 사야", "꼭 뽑아"
+    ]
+
+    BANNED_EMOTICONS = [
+        ":)", ":D", "^^", "ㅎㅎ", "ㅋㅋ", "☺️", "😊", "😄", "😆", "❤️", "💕"
+    ]
+
     @classmethod
     def validate_candidate(cls, candidate: CommentCandidate) -> Tuple[bool, Optional[str]]:
         """후보 텍스트를 검증하여 통과 여부와 거부 사유 반환"""
@@ -88,7 +97,17 @@ class PositiveSafetyValidator:
             if phrase in text:
                 return False, f"banned_private_question: '{phrase}'"
 
-        # 9. 길이 적합성 검사 (12자 이상 100자 이하, 101자 이상 거부)
+        # 9. '꼭' 매크로 어휘 검사
+        for phrase in cls.BANNED_KKOK_MACRO:
+            if phrase in text:
+                return False, f"banned_kkok_phrase: '{phrase}'"
+
+        # 10. 이모티콘 및 웃는 문자 금지 검사
+        for emo in cls.BANNED_EMOTICONS:
+            if emo in text:
+                return False, f"banned_emoticon: '{emo}'"
+
+        # 11. 길이 적합성 검사 (12자 이상 100자 이하, 101자 이상 거부)
         if len(text) < 12 or len(text) > 100:
             return False, f"length_out_of_bounds: {len(text)}자 (허용: 12~100자)"
 

@@ -37,46 +37,46 @@ class EngagementAuditStore:
         with open(json_path, "w", encoding="utf-8") as f:
             json.dump(report, f, ensure_ascii=False, indent=2)
 
-        # 공통 Master/Unresponsive 필드
+        # 공통 Master/Unresponsive 필드 (한글 헤더)
         buddy_fieldnames = [
-            "blog_id",
-            "nickname",
-            "blog_title",
-            "group_name",
-            "buddy_type",
-            "added_date",
-            "last_post_date",
-            "like_count",
-            "comment_count",
-            "comment_entry_count",
-            "engaged_post_count",
-            "liked_only",
-            "commented_only",
-            "both_like_and_comment",
-            "no_reaction",
-            "is_recent_buddy",
-            "scan_complete"
+            "블로그ID",
+            "닉네임",
+            "블로그명",
+            "그룹명",
+            "이웃구분",
+            "이웃추가일",
+            "최근글작성일",
+            "공감한글수",
+            "댓글단글수",
+            "총댓글개수",
+            "반응한글수",
+            "공감만참여",
+            "댓글만참여",
+            "공감댓글모두",
+            "무반응여부",
+            "신규추가유예",
+            "검사완료여부"
         ]
 
         def format_buddy_row(row: Dict[str, Any]) -> Dict[str, Any]:
             return {
-                "blog_id": row.get("blog_id", ""),
-                "nickname": row.get("nickname", ""),
-                "blog_title": row.get("blog_title", ""),
-                "group_name": row.get("group_name", ""),
-                "buddy_type": row.get("buddy_type", "이웃"),
-                "added_date": row.get("added_date", ""),
-                "last_post_date": row.get("last_post_date", ""),
-                "like_count": row.get("like_count", 0),
-                "comment_count": row.get("comment_count", 0),
-                "comment_entry_count": row.get("comment_entry_count", 0),
-                "engaged_post_count": row.get("engaged_post_count", 0),
-                "liked_only": "Y" if row.get("liked_only") else "N",
-                "commented_only": "Y" if row.get("commented_only") else "N",
-                "both_like_and_comment": "Y" if row.get("both_like_and_comment") else "N",
-                "no_reaction": "Y" if row.get("no_reaction") else "N",
-                "is_recent_buddy": "Y" if row.get("is_recent_buddy") else "N",
-                "scan_complete": "Y" if row.get("scan_complete") else "N"
+                "블로그ID": row.get("blog_id", ""),
+                "닉네임": row.get("nickname", ""),
+                "블로그명": row.get("blog_title", ""),
+                "그룹명": row.get("group_name", ""),
+                "이웃구분": row.get("buddy_type", "이웃"),
+                "이웃추가일": row.get("added_date", ""),
+                "최근글작성일": row.get("last_post_date", ""),
+                "공감한글수": row.get("like_count", 0),
+                "댓글단글수": row.get("comment_count", 0),
+                "총댓글개수": row.get("comment_entry_count", 0),
+                "반응한글수": row.get("engaged_post_count", 0),
+                "공감만참여": "Y" if row.get("liked_only") else "N",
+                "댓글만참여": "Y" if row.get("commented_only") else "N",
+                "공감댓글모두": "Y" if row.get("both_like_and_comment") else "N",
+                "무반응여부": "Y" if row.get("no_reaction") else "N",
+                "신규추가유예": "Y" if row.get("is_recent_buddy") else "N",
+                "검사완료여부": "Y" if row.get("scan_complete") else "N"
             }
 
         # 2. Master CSV 저장 (전체 이웃)
@@ -98,26 +98,26 @@ class EngagementAuditStore:
         # 4. 비이웃 반응자 CSV 저장
         non_buddies = report.get("non_buddy_reactors", [])
         non_buddy_fieldnames = [
-            "blog_id",
-            "nickname",
-            "profile_url",
-            "like_count",
-            "comment_count",
-            "comment_entry_count",
-            "engaged_post_count"
+            "블로그ID",
+            "닉네임",
+            "프로필URL",
+            "공감한글수",
+            "댓글단글수",
+            "총댓글개수",
+            "반응한글수"
         ]
         with open(non_buddy_csv, "w", encoding="utf-8-sig", newline="") as f:
             writer = csv.DictWriter(f, fieldnames=non_buddy_fieldnames)
             writer.writeheader()
             for nb in non_buddies:
                 writer.writerow({
-                    "blog_id": nb.get("blog_id", ""),
-                    "nickname": nb.get("nickname", ""),
-                    "profile_url": nb.get("profile_url", ""),
-                    "like_count": nb.get("like_count", 0),
-                    "comment_count": nb.get("comment_count", 0),
-                    "comment_entry_count": nb.get("comment_entry_count", 0),
-                    "engaged_post_count": nb.get("engaged_post_count", 0)
+                    "블로그ID": nb.get("blog_id", ""),
+                    "닉네임": nb.get("nickname", ""),
+                    "프로필URL": nb.get("profile_url", ""),
+                    "공감한글수": nb.get("like_count", 0),
+                    "댓글단글수": nb.get("comment_count", 0),
+                    "총댓글개수": nb.get("comment_entry_count", 0),
+                    "반응한글수": nb.get("engaged_post_count", 0)
                 })
 
         return json_path, master_csv, unresp_csv, non_buddy_csv

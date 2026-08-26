@@ -71,7 +71,28 @@ class DraftService:
         if (text.startswith('"') and text.endswith('"')) or (text.startswith("'") and text.endswith("'")):
             text = text[1:-1].strip()
 
-        # 6. 검증 게이트: UI 헤더 단독이거나 너무 짧은 경우 무효화
+        # 6. '꼭' 단어 및 매크로 어휘 자동 소거 / 정규화
+        text = re.sub(r'\b꼭\s+', '', text)
+        text = re.sub(r'\s+꼭\s+', ' ', text)
+        text = re.sub(r'꼭\s*(가보고|가봐야|먹어|방문|써보고|가야|참고|봐야|사야|뽑아)', r'\1', text)
+
+        # 7. 모든 이모지 및 웃는 텍스트 이모티콘/문자 자동 소거
+        text = re.sub(r'[\U00010000-\U0010ffff]', '', text)  # 4-byte Unicode emojis
+        text = re.sub(r'[\u2600-\u27bf]', '', text)          # Miscellaneous symbols
+        text = re.sub(r'[❤️💖💕✨😊😄😃😆☺️😋👍👏🎉]+', '', text)
+        text = re.sub(r'[ㅎㅋ]{1,}', '', text)               # ㅎㅎ, ㅋㅋ
+        text = re.sub(r'[\^]{2,}', '', text)                 # ^^
+        text = re.sub(r'[:;][\)-DpP]+', '', text)            # :), :D, ;)
+        text = re.sub(r'[ㅠㅜ]{1,}', '', text)               # ㅠㅠ, ㅜㅜ
+
+        # 문장 부호 및 공백 정돈
+        text = re.sub(r'\s+([.!?])', r'\1', text)
+        text = re.sub(r'[!]{2,}', '!', text)
+        text = re.sub(r'[?]{2,}', '?', text)
+        text = re.sub(r'[.]{2,}', '.', text)
+        text = re.sub(r'\s+', ' ', text).strip()
+
+        # 8. 검증 게이트: UI 헤더 단독이거나 너무 짧은 경우 무효화
         invalid_literals = {
             "gemini의 응답", "gemini's response", "gemini", "응답", "답변",
             "model-response", "response"

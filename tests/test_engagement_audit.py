@@ -14,7 +14,7 @@ class TestEngagementAuditRebuildV8(unittest.TestCase):
     def test_comment_length_limit_100_chars(self):
         """댓글 100자 이하 허용, 101자 이상 거부 (v7/v8 정책)"""
         cand_ok = CommentCandidate(
-            body="남해 독일마을 플래터 구성이 너무 알차고 맛있어 보여요 ㅎㅎ 나중에 꼭 가보고 싶네요!",
+            body="남해 독일마을 플래터 구성이 알차고 맛있어 보여요! 나중에 가보고 싶네요.",
             category="FOOD",
             reaction_intent=ReactionIntent.DETAIL_PRAISE,
             first_person_intent=FirstPersonIntent.NONE,
@@ -25,7 +25,7 @@ class TestEngagementAuditRebuildV8(unittest.TestCase):
         self.assertTrue(valid)
 
         cand_over = CommentCandidate(
-            body="탐론 70-300mm 망원 렌즈 가성비 구성이 정말 알차 보이네요! 펜탁스 바디에 마운트한 사진 보니까 색감도 너무 예쁘게 잘 나오는 것 같아요 ㅎㅎ 다음에 출사 갈 때 저도 꼭 써보고 싶네요!",
+            body="탐론 70-300mm 망원 렌즈 가성비 구성이 정말 알차 보이네요! 펜탁스 바디에 마운트한 사진 보니까 색감도 너무 예쁘게 잘 나오는 것 같아요. 다음에 출사 갈 때 저도 다뤄보고 싶네요. 사진 결과물이 아주 만족스러워 보입니다.",
             category="IT_GADGET",
             reaction_intent=ReactionIntent.DETAIL_PRAISE,
             first_person_intent=FirstPersonIntent.NONE,
@@ -180,29 +180,30 @@ class TestEngagementAuditRebuildV8(unittest.TestCase):
         self.assertTrue(os.path.exists(unresp_csv))
         self.assertTrue(os.path.exists(non_buddy_csv))
 
-        # Check Master CSV row count
+        # Check Master CSV row count & Korean headers
         with open(master_csv, "r", encoding="utf-8-sig") as f:
             reader = csv.DictReader(f)
             rows = list(reader)
             self.assertEqual(len(rows), 2)
-            self.assertEqual(rows[0]["blog_id"], "b1")
-            self.assertEqual(rows[0]["both_like_and_comment"], "Y")
-            self.assertEqual(rows[1]["no_reaction"], "Y")
+            self.assertEqual(rows[0]["블로그ID"], "b1")
+            self.assertEqual(rows[0]["블로그명"], "타이틀1")
+            self.assertEqual(rows[0]["공감댓글모두"], "Y")
+            self.assertEqual(rows[1]["무반응여부"], "Y")
 
-        # Check Unresponsive CSV row count
+        # Check Unresponsive CSV row count & Korean headers
         with open(unresp_csv, "r", encoding="utf-8-sig") as f:
             reader = csv.DictReader(f)
             rows = list(reader)
             self.assertEqual(len(rows), 1)
-            self.assertEqual(rows[0]["blog_id"], "b2")
-            self.assertEqual(rows[0]["is_recent_buddy"], "Y")
+            self.assertEqual(rows[0]["블로그ID"], "b2")
+            self.assertEqual(rows[0]["신규추가유예"], "Y")
 
-        # Check Non-buddy CSV row count
+        # Check Non-buddy CSV row count & Korean headers
         with open(non_buddy_csv, "r", encoding="utf-8-sig") as f:
             reader = csv.DictReader(f)
             rows = list(reader)
             self.assertEqual(len(rows), 1)
-            self.assertEqual(rows[0]["blog_id"], "stranger_1")
+            self.assertEqual(rows[0]["블로그ID"], "stranger_1")
 
 
 if __name__ == "__main__":

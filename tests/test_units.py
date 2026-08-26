@@ -80,7 +80,7 @@ class TestPositiveSafetyValidator(unittest.TestCase):
         self.assertIn("banned_fake_experience", r)
 
         # 5. Valid positive candidate
-        c5 = CommentCandidate(body="딸기라떼 색감이 너무 예쁘네요. 저도 한번 마셔보고 싶어요 :)", category="CAFE", reaction_intent=ReactionIntent.TRY_INTENT, first_person_intent=FirstPersonIntent.WANT_TO_DRINK, subject="딸기라떼", template_id="t5")
+        c5 = CommentCandidate(body="딸기라떼 색감이 너무 예쁘네요. 저도 한번 마셔보고 싶어요.", category="CAFE", reaction_intent=ReactionIntent.TRY_INTENT, first_person_intent=FirstPersonIntent.WANT_TO_DRINK, subject="딸기라떼", template_id="t5")
         valid, r = PositiveSafetyValidator.validate_candidate(c5)
         self.assertTrue(valid)
 
