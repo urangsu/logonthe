@@ -1,0 +1,170 @@
+{
+  "_comment": "네이버 블로그 자동화 대상 페이지별 DOM 요소, 셀렉터 및 속성 데이터베이스",
+  "version": "1.0.0",
+  "environments": {
+    "mobile_feed": {
+      "target_urls": [
+        "https://m.blog.naver.com/FeedList.naver",
+        "https://m.blog.naver.com/Recommendation.naver"
+      ],
+      "elements": {
+        "card_wrapper": {
+          "description": "피드 게시글 카드 래퍼 (Card Scope)",
+          "primary_selector": "li.card_wrapper__F0VEP",
+          "fallback_selectors": [
+            "li[class*='card_wrapper__']",
+            "li.item__rkExs",
+            "li[class*='item__']",
+            "div[class*='card_wrapper']"
+          ]
+        },
+        "post_link": {
+          "description": "게시글 이동 상세 링크",
+          "primary_selector": "a.link__XWBJA",
+          "fallback_selectors": [
+            "a[class*='link__']",
+            "a[data-click-area*='card']",
+            "a[href*='m.blog.naver.com/']"
+          ],
+          "target_attribute": "href"
+        },
+        "author_name": {
+          "description": "작성자 / 블로그 닉네임",
+          "primary_selector": "span.name__g5g2P",
+          "fallback_selectors": ["span[class*='name__']", "span.author"]
+        },
+        "post_title": {
+          "description": "게시글 제목",
+          "primary_selector": "strong.title__Uj_5q",
+          "fallback_selectors": ["strong[class*='title__']", ".title"]
+        },
+        "likes_count": {
+          "description": "공감 수 카운터",
+          "primary_selector": "span.likes__Mw9X3",
+          "fallback_selectors": ["span[class*='likes__']"]
+        },
+        "comments_count": {
+          "description": "댓글 수 카운터",
+          "primary_selector": "span.comments__Kh_zi",
+          "fallback_selectors": ["span[class*='comments__']"]
+        }
+      }
+    },
+    "mobile_post_detail": {
+      "target_url_pattern": "https://m.blog.naver.com/{blogId}/{logNo}",
+      "elements": {
+        "interaction_bar": {
+          "description": "하단 고정 인터랙션 플로팅 바",
+          "primary_selector": "div.Interact__comment_area--tf6DM, div[class*='Interact__']"
+        },
+        "like_button": {
+          "description": "공감(하트) 버튼",
+          "primary_selector": "button.u_likeit_button, a.u_likeit_button",
+          "fallback_selectors": [
+            "div[class*='Interact__'] button:has(.blind:text-is('공감'))",
+            "button[data-click-area='pst.like']",
+            "a._sympathyButton"
+          ],
+          "state_signatures": {
+            "not_liked": {
+              "class_contains": "off",
+              "aria_pressed": "false",
+              "icon_class": "__reaction__zeroface"
+            },
+            "already_liked": {
+              "class_contains": "_on",
+              "aria_pressed": "true",
+              "icon_class": "__reaction__like",
+              "accent_color": "rgb(3, 199, 90)"
+            }
+          }
+        },
+        "comment_open_button": {
+          "description": "댓글 레이어 열기 버튼",
+          "primary_selector": "button.Interact__comment_btn--Wbuoq",
+          "fallback_selectors": [
+            "button[class*='Interact__comment_btn']",
+            "button:has(.blind:text-is('댓글'))",
+            "button[data-click-area='pst.re']",
+            "a.btn_comment"
+          ]
+        },
+        "comment_editor": {
+          "description": "댓글 작성 ContentEditable 입력창",
+          "primary_selector": "div#naverComment__write_textarea",
+          "fallback_selectors": [
+            "#naverComment__write_textarea",
+            "div.u_cbox_text[contenteditable='true']",
+            "textarea.u_cbox_text"
+          ],
+          "activation_trigger": "div.u_cbox_write_box, div.u_cbox_write_inner"
+        },
+        "secret_checkbox": {
+          "description": "비밀댓글 설정 체크박스 및 라벨",
+          "input_selector": "input#naverComment__write_textarea_secret_check",
+          "label_selector": "label[for='naverComment__write_textarea_secret_check'], label.u_cbox_secret_label",
+          "fallback_selectors": ["input.u_cbox_secret_check"]
+        },
+        "submit_button": {
+          "description": "댓글 최종 등록 버튼",
+          "primary_selector": "button.u_cbox_btn_upload",
+          "fallback_selectors": [
+            "button.__uis_naverComment_writeButton",
+            "button[data-action='write#request']",
+            ".u_cbox_btn_upload",
+            "button:has-text('등록')"
+          ]
+        },
+        "login_notice": {
+          "description": "비로그인 상태 알림 영역",
+          "selector": ".u_cbox_type_logged_out, .u_cbox_guide"
+        }
+      }
+    },
+    "pc_section_feed": {
+      "target_url": "https://section.blog.naver.com/BlogHome.naver?directoryNo=0&currentPage=1&groupId=0",
+      "elements": {
+        "like_button": {
+          "description": "PC 피드 공감 버튼",
+          "primary_selector": "button.u_likeit_list_module_link",
+          "fallback_selectors": [
+            "a.u_likeit_list_module_link",
+            "div.u_likeit_list_module button",
+            "button[data-like-article]"
+          ],
+          "state_signatures": {
+            "not_liked_icon": "__reaction__zeroface",
+            "liked_icon": "__reaction__like",
+            "liked_color": "rgb(3, 199, 90)"
+          }
+        },
+        "pagination": {
+          "container": "div.pagination",
+          "page_button": "a.item[aria-label='{page}페이지'], a[ng-click*='loadPage({page})']",
+          "next_group_button": "a.button_next, a[ng-click*='goNextGroup()']"
+        }
+      }
+    },
+    "pc_post_detail": {
+      "target_url_format": "https://blog.naver.com/PostView.naver?blogId={blogId}&logNo={logNo}&redirect=Dlog&widgetTypeCall=true&directAccess=true",
+      "elements": {
+        "post_footer": {
+          "description": "게시글 본문 푸터 (연속보기 방지 스크롤 지점)",
+          "primary_selector": "div.wrap_postcomment, div.post_footer_contents, div.area_comment"
+        },
+        "comment_open_button": {
+          "primary_selector": "a.btn_comment, a._commentCount, #btn_comment_2"
+        },
+        "comment_textarea": {
+          "primary_selector": "textarea.u_cbox_text"
+        },
+        "secret_checkbox": {
+          "primary_selector": "input#secret_chk, label[for='secret_chk']"
+        },
+        "submit_button": {
+          "primary_selector": "button.u_cbox_btn_upload"
+        }
+      }
+    }
+  }
+}

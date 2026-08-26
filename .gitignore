@@ -9,11 +9,11 @@ venv/
 ENV/
 
 # Chrome / User Profile (Sensitive Login Sessions & Cookies)
-data/
 data/user_profile/
 data/cdp_profile/
 data/browser_profile/
 data/history.json
+data/*.log
 
 # OS specific
 .DS_Store
