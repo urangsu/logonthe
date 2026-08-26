@@ -123,22 +123,65 @@ class MainWindow(ctk.CTk):
         src_frame.pack(fill="x", padx=10, pady=(4, 2))
 
         ctk.CTkLabel(src_frame, text="피드 대상:", font=ctk.CTkFont(weight="bold")).grid(row=0, column=0, padx=4, pady=2, sticky="w")
-        self.source_var = ctk.StringVar(value=self.config_service.get("feed_source", FeedSourceType.NEIGHBOR.value))
+        self.source_var = ctk.StringVar(value=self.config_service.get("feed_source", FeedSourceType.TARGETED_SEARCH.value))
 
         ctk.CTkRadioButton(
-            src_frame, text="이웃 새글 피드 (FeedList)",
+            src_frame, text="이웃 새글 (FeedList)",
             variable=self.source_var, value=FeedSourceType.NEIGHBOR.value, command=self._on_source_change
-        ).grid(row=0, column=1, padx=6, pady=2)
+        ).grid(row=0, column=1, padx=4, pady=2)
 
         ctk.CTkRadioButton(
-            src_frame, text="탐색 추천 피드 (Recommendation)",
+            src_frame, text="🎯 관심주제 탐색 (추천)",
+            variable=self.source_var, value=FeedSourceType.TARGETED_SEARCH.value, command=self._on_source_change
+        ).grid(row=0, column=2, padx=4, pady=2)
+
+        ctk.CTkRadioButton(
+            src_frame, text="추천 피드 (보조)",
             variable=self.source_var, value=FeedSourceType.RECOMMENDATION.value, command=self._on_source_change
-        ).grid(row=0, column=2, padx=6, pady=2)
+        ).grid(row=0, column=3, padx=4, pady=2)
 
         ctk.CTkRadioButton(
-            src_frame, text="URL 직접 입력 목록",
+            src_frame, text="URL 직접 입력",
             variable=self.source_var, value=FeedSourceType.DIRECT.value, command=self._on_source_change
-        ).grid(row=0, column=3, padx=6, pady=2)
+        ).grid(row=0, column=4, padx=4, pady=2)
+
+        # 🎯 관심주제 탐색 상세 설정 프레임 (기본 노출)
+        self.discovery_frame = ctk.CTkFrame(cfg_card, fg_color="#1E293B", corner_radius=6)
+        
+        disc_head = ctk.CTkFrame(self.discovery_frame, fg_color="transparent")
+        disc_head.pack(fill="x", padx=8, pady=(4, 2))
+        ctk.CTkLabel(disc_head, text="탐색 주제 선택:", font=ctk.CTkFont(weight="bold", size=12), text_color="#38BDF8").pack(side="left")
+
+        # 6대 생활형 카테고리 체크박스
+        saved_cats = self.config_service.get("discovery_categories", ["FOOD", "CAFE", "PARENTING", "LIVING", "TRAVEL", "LIFESTYLE"])
+        self.cat_vars = {
+            "FOOD": ctk.BooleanVar(value="FOOD" in saved_cats),
+            "CAFE": ctk.BooleanVar(value="CAFE" in saved_cats),
+            "PARENTING": ctk.BooleanVar(value="PARENTING" in saved_cats),
+            "LIVING": ctk.BooleanVar(value="LIVING" in saved_cats),
+            "TRAVEL": ctk.BooleanVar(value="TRAVEL" in saved_cats),
+            "LIFESTYLE": ctk.BooleanVar(value="LIFESTYLE" in saved_cats)
+        }
+        
+        cat_row = ctk.CTkFrame(self.discovery_frame, fg_color="transparent")
+        cat_row.pack(fill="x", padx=8, pady=2)
+        ctk.CTkCheckBox(cat_row, text="맛집/음식", variable=self.cat_vars["FOOD"]).pack(side="left", padx=4)
+        ctk.CTkCheckBox(cat_row, text="카페/디저트", variable=self.cat_vars["CAFE"]).pack(side="left", padx=4)
+        ctk.CTkCheckBox(cat_row, text="육아", variable=self.cat_vars["PARENTING"]).pack(side="left", padx=4)
+        ctk.CTkCheckBox(cat_row, text="리빙/살림", variable=self.cat_vars["LIVING"]).pack(side="left", padx=4)
+        ctk.CTkCheckBox(cat_row, text="여행", variable=self.cat_vars["TRAVEL"]).pack(side="left", padx=4)
+        ctk.CTkCheckBox(cat_row, text="일상", variable=self.cat_vars["LIFESTYLE"]).pack(side="left", padx=4)
+
+        # 내 검색어 입력란
+        custom_q_row = ctk.CTkFrame(self.discovery_frame, fg_color="transparent")
+        custom_q_row.pack(fill="x", padx=8, pady=(2, 4))
+        ctk.CTkLabel(custom_q_row, text="내 검색어 추가 (쉼표 구분):", font=ctk.CTkFont(size=11)).pack(side="left", padx=(0, 4))
+        self.custom_discovery_entry = ctk.CTkEntry(custom_q_row, placeholder_text="예: 광양 맛집, 순천 카페, 아이랑 여수", height=26)
+        self.custom_discovery_entry.pack(side="left", fill="x", expand=True, padx=4)
+        saved_custom = ", ".join(self.config_service.get("custom_discovery_queries", []))
+        if saved_custom:
+            self.custom_discovery_entry.insert(0, saved_custom)
+        add_mac_clipboard_support(self.custom_discovery_entry, self)
 
         # Direct URLs Box (Hidden by default)
         self.direct_url_frame = ctk.CTkFrame(cfg_card)
@@ -146,6 +189,12 @@ class MainWindow(ctk.CTk):
         self.direct_url_textbox = ctk.CTkTextbox(self.direct_url_frame, height=50, font=ctk.CTkFont(size=12))
         self.direct_url_textbox.pack(fill="x", padx=8, pady=2)
         add_mac_clipboard_support(self.direct_url_textbox, self)
+
+        # 초기 뷰 상태 적용
+        if self.source_var.get() == FeedSourceType.TARGETED_SEARCH.value:
+            self.discovery_frame.pack(fill="x", padx=10, pady=3)
+        elif self.source_var.get() == FeedSourceType.DIRECT.value:
+            self.direct_url_frame.pack(fill="x", padx=10, pady=3)
 
         # Operation Options & Limits
         opt_frame = ctk.CTkFrame(cfg_card, fg_color="transparent")
@@ -481,9 +530,15 @@ class MainWindow(ctk.CTk):
             logger.log(f"❌ [GEMINI/TEST] 연결 실패: {diag.get('message')}", "WARNING")
 
     def _on_source_change(self):
-        if self.source_var.get() == FeedSourceType.DIRECT.value:
+        val = self.source_var.get()
+        if val == FeedSourceType.TARGETED_SEARCH.value:
+            self.discovery_frame.pack(fill="x", padx=10, pady=3)
+            self.direct_url_frame.pack_forget()
+        elif val == FeedSourceType.DIRECT.value:
+            self.discovery_frame.pack_forget()
             self.direct_url_frame.pack(fill="x", padx=10, pady=3)
         else:
+            self.discovery_frame.pack_forget()
             self.direct_url_frame.pack_forget()
 
     def _update_ui_state(self, state: BotRuntimeState):
@@ -707,9 +762,19 @@ class MainWindow(ctk.CTk):
                 messagebox.showwarning("입력 오류", "URL 직접 입력 목록을 1개 이상 입력해 주세요.")
                 return
 
+        # 관심주제 설정 추출
+        enabled_discovery_cats = [cat for cat, v in self.cat_vars.items() if v.get()]
+        if not enabled_discovery_cats:
+            enabled_discovery_cats = ["FOOD", "CAFE", "PARENTING", "LIVING", "TRAVEL", "LIFESTYLE"]
+
+        raw_custom_q = self.custom_discovery_entry.get().strip()
+        custom_queries_list = [q.strip() for q in raw_custom_q.split(",") if q.strip()]
+
         # Config 단조 업데이트 및 원자적 저장 (update_many 사용)
         cfg_data = {
             "feed_source": source_val,
+            "discovery_categories": enabled_discovery_cats,
+            "custom_discovery_queries": custom_queries_list,
             "max_feed_items": max_items,
             "like_enabled": self.like_enabled_var.get(),
             "comment_enabled": self.comment_enabled_var.get(),

@@ -1,6 +1,6 @@
 {
   "schema_version": 2,
-  "feed_source": "neighbor",
+  "feed_source": "recommendation",
   "max_feed_items": 42,
   "like_enabled": true,
   "comment_enabled": true,
@@ -8,7 +8,7 @@
   "general_suffix": "",
   "fixed_suffix": "",
   "recommendation_suffix_enabled": true,
-  "recommendation_suffix": "",
+  "recommendation_suffix": "제 블로그도 놀러오세요~",
   "secret_comment": false,
   "browser_mode": "persistent",
   "direct_urls": [],

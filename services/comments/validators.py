@@ -24,7 +24,8 @@ class PositiveSafetyValidator:
 
     BANNED_FAKE_EXPERIENCES = [
         "저도 가봤", "저도 먹어봤", "저도 써봤", "저도 구매했", "저도 이용해봤",
-        "저희 아이도", "우리 강아지도", "우리 고양이도", "저희 집도", "저희 가족도", "저도 예전에"
+        "저희 아이도", "우리 강아지도", "우리 고양이도", "저희 집도", "저희 가족도", "저도 예전에",
+        "더라구요", "더군요"
     ]
 
     BANNED_BODY_EVALUATIONS = [
@@ -45,11 +46,21 @@ class PositiveSafetyValidator:
 
     BANNED_KKOK_MACRO = [
         "꼭 가보고", "꼭 가봐야", "꼭 먹어", "꼭 들러", "꼭 써보고", "꼭 방문",
-        "꼭 가볼", "꼭 봐야", "꼭 참고", "꼭 찾아", "꼭 사야", "꼭 뽑아"
+        "꼭 가볼", "꼭 봐야", "꼭 참고", "꼭 찾아", "꼭 사야", "꼭 뽑아", "반드시", "무조건"
+    ]
+
+    BANNED_AI_SUMMARY = [
+        "전체적으로", "무엇보다", "특히 인상", "인상적이네요", "인상적입니다",
+        "알찬 정보", "유용한 정보", "좋은 정보", "정리가 잘 되어", "한눈에",
+        "구성이 돋보이", "매력적이네요", "눈길을 끄네요", "완성도가"
+    ]
+
+    BANNED_EXAGGERATIONS = [
+        "취향저격", "취저", "못 참죠", "못참죠", "방문각", "구매각", "강추", "대박"
     ]
 
     BANNED_EMOTICONS = [
-        ":)", ":D", "^^", "ㅎㅎ", "ㅋㅋ", "☺️", "😊", "😄", "😆", "❤️", "💕"
+        ":)", ":D", "^^", "ㅎㅎ", "ㅋㅋ", "☺️", "😊", "😄", "😆", "❤️", "💕", "ㅠㅠ", "ㅜㅜ"
     ]
 
     @classmethod
@@ -97,17 +108,27 @@ class PositiveSafetyValidator:
             if phrase in text:
                 return False, f"banned_private_question: '{phrase}'"
 
-        # 9. '꼭' 매크로 어휘 검사
+        # 9. '꼭' / '반드시' 매크로 어휘 검사
         for phrase in cls.BANNED_KKOK_MACRO:
             if phrase in text:
                 return False, f"banned_kkok_phrase: '{phrase}'"
 
-        # 10. 이모티콘 및 웃는 문자 금지 검사
+        # 10. AI 요약/보고서 어투 검사
+        for phrase in cls.BANNED_AI_SUMMARY:
+            if phrase in text:
+                return False, f"banned_ai_summary: '{phrase}'"
+
+        # 11. 과장/인터넷 유행어 검사
+        for phrase in cls.BANNED_EXAGGERATIONS:
+            if phrase in text:
+                return False, f"banned_exaggeration: '{phrase}'"
+
+        # 12. 이모티콘 및 웃는 문자 금지 검사
         for emo in cls.BANNED_EMOTICONS:
             if emo in text:
                 return False, f"banned_emoticon: '{emo}'"
 
-        # 11. 길이 적합성 검사 (12자 이상 100자 이하, 101자 이상 거부)
+        # 13. 길이 적합성 검사 (12자 이상 100자 이하, 101자 이상 거부)
         if len(text) < 12 or len(text) > 100:
             return False, f"length_out_of_bounds: {len(text)}자 (허용: 12~100자)"
 

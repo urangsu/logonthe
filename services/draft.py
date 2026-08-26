@@ -71,9 +71,10 @@ class DraftService:
         if (text.startswith('"') and text.endswith('"')) or (text.startswith("'") and text.endswith("'")):
             text = text[1:-1].strip()
 
-        # 6. '꼭' 단어 및 매크로 어휘 자동 소거 / 정규화
-        text = re.sub(r'\b꼭\s+', '', text)
-        text = re.sub(r'\s+꼭\s+', ' ', text)
+        # 6. '꼭', '반드시', '대박', '강추', '취저' 등 매크로/유행어 및 AI 요약 서두 자동 소거
+        text = re.sub(r'^(?:전체적으로|무엇보다도|무엇보다|특히)\s*[,:]*\s*', '', text)
+        text = re.sub(r'\b(?:꼭|반드시|무조건|대박|취저|취향저격|강추)\s+', '', text)
+        text = re.sub(r'\s+(?:꼭|반드시|무조건|대박|취저|취향저격|강추)\s+', ' ', text)
         text = re.sub(r'꼭\s*(가보고|가봐야|먹어|방문|써보고|가야|참고|봐야|사야|뽑아)', r'\1', text)
 
         # 7. 모든 이모지 및 웃는 텍스트 이모티콘/문자 자동 소거

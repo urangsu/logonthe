@@ -184,3 +184,7 @@ class DirectUrlSource:
 
     def is_exhausted(self) -> bool:
         return True
+
+
+# Alias/Re-export TargetedSearchFeedSource for convenience
+from naver.discovery.search_source import TargetedSearchFeedSource

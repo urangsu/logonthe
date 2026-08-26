@@ -11,7 +11,7 @@ from app.errors import (
 )
 from app.processor import PostProcessor, StopRequestedException
 from browser.session import BrowserSession, interruptible_wait
-from naver.sources import NeighborFeedSource, RecommendationFeedSource, DirectUrlSource, FeedSource
+from naver.sources import NeighborFeedSource, RecommendationFeedSource, DirectUrlSource, TargetedSearchFeedSource, FeedSource
 from naver.auth_guard import NaverAuthGuard
 from services.config import ConfigService
 from services.history import HistoryStore
@@ -115,6 +115,18 @@ class FeedController:
             source: FeedSource
             if source_type == FeedSourceType.NEIGHBOR:
                 source = NeighborFeedSource(feed_page, max_items=max_items, stop_event=self.stop_event)
+            elif source_type == FeedSourceType.TARGETED_SEARCH:
+                discovery_cats = self.config.get("discovery_categories", ["FOOD", "CAFE", "PARENTING", "LIVING", "TRAVEL", "LIFESTYLE"])
+                custom_queries = self.config.get("custom_discovery_queries", [])
+                posts_per_q = int(self.config.get("posts_per_query", 3))
+                source = TargetedSearchFeedSource(
+                    feed_page,
+                    max_items=max_items,
+                    stop_event=self.stop_event,
+                    enabled_categories=discovery_cats,
+                    custom_queries=custom_queries,
+                    posts_per_query=posts_per_q
+                )
             elif source_type == FeedSourceType.RECOMMENDATION:
                 source = RecommendationFeedSource(feed_page, max_items=max_items, stop_event=self.stop_event)
             else:

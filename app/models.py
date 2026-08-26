@@ -5,6 +5,7 @@ from typing import Optional
 
 class FeedSourceType(str, Enum):
     NEIGHBOR = "neighbor"
+    TARGETED_SEARCH = "targeted_search"
     RECOMMENDATION = "recommendation"
     DIRECT = "direct"
 
