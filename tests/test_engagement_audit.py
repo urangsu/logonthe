@@ -37,29 +37,38 @@ class TestEngagementAuditV7(unittest.TestCase):
         self.assertFalse(valid_over)
         self.assertIn("length_out_of_bounds", reason)
 
-    def test_audit_deduplication_and_merge_by_blog_id(self):
-        """동일한 blog_id에 대해 공감과 댓글이 합산되어 하나의 행으로 통합되는지 검증"""
+    def test_audit_deduplication_and_unresponsive_buddies(self):
+        """이웃 전수와 반응자 간의 차집합(무반응 이웃) 및 유예 필터링 검증"""
         page_mock = MagicMock()
+        from services.buddy_list_collector import BuddyInfo
 
-        # Mock Recent posts
-        with patch("services.my_blog_recent_posts.MyBlogRecentPostService.fetch_recent_posts") as mock_posts, \
+        with patch("services.buddy_list_collector.BuddyListCollector.collect_all_buddies") as mock_buddies, \
+             patch("services.my_blog_recent_posts.MyBlogRecentPostService.fetch_recent_posts") as mock_posts, \
              patch("services.reaction_participant_collector.ReactionParticipantCollector.collect") as mock_likers, \
              patch("services.comment_participant_collector.CommentParticipantCollector.collect") as mock_commenters:
+
+            # 4명의 등록 이웃
+            mock_buddies.return_value = {
+                "user_a": BuddyInfo("user_a", "사용자A", "A블로그", "친한이웃", "서로이웃", "26.08.26.", "26.01.01."),
+                "user_b": BuddyInfo("user_b", "사용자B", "B블로그", "기본", "이웃", "26.08.20.", "26.08.26."), # 신규 (유예 대상)
+                "user_unresp1": BuddyInfo("user_unresp1", "무반응1", "U1블로그", "안한놈", "서로이웃", "26.07.01.", "26.05.01."),
+                "user_unresp2": BuddyInfo("user_unresp2", "무반응2", "U2블로그", "사기꾼", "서로이웃", "26.06.01.", "26.04.01.")
+            }
 
             mock_posts.return_value = [
                 {"log_no": "111", "url": "https://m.blog.naver.com/test_me/111", "title": "첫번째 글"},
                 {"log_no": "222", "url": "https://m.blog.naver.com/test_me/222", "title": "두번째 글"}
             ]
 
-            # Post 1: user_a liked & commented, user_b liked
-            # Post 2: user_a liked, user_c commented
+            # user_a는 좋아요와 댓글 남김, user_b는 댓글 남김 (반응자)
+            # user_unresp1, user_unresp2는 반응 없음 (무반응)
             mock_likers.side_effect = [
-                ([{"blog_id": "user_a", "nickname": "사용자A"}, {"blog_id": "user_b", "nickname": "사용자B"}], "complete"),
-                ([{"blog_id": "user_a", "nickname": "사용자A"}], "complete")
+                ([{"blog_id": "user_a", "nickname": "사용자A"}], "complete"),
+                ([], "complete")
             ]
             mock_commenters.side_effect = [
-                ([{"blog_id": "user_a", "nickname": "사용자A", "comment_sample": "잘봤어요!"}], "complete"),
-                ([{"blog_id": "user_c", "nickname": "사용자C", "comment_sample": "멋지네요"}], "complete")
+                ([{"blog_id": "user_a", "nickname": "사용자A", "comment_sample": "좋아요"}], "complete"),
+                ([{"blog_id": "user_b", "nickname": "사용자B", "comment_sample": "멋져요"}], "complete")
             ]
 
             res = EngagementAuditService.run_audit(
@@ -70,21 +79,15 @@ class TestEngagementAuditV7(unittest.TestCase):
 
             self.assertTrue(res["success"])
             rep = res["report"]
-            self.assertEqual(rep["recent_post_count"], 2)
-            self.assertEqual(rep["unique_participant_count"], 3)  # user_a, user_b, user_c
-            self.assertEqual(rep["liker_count"], 2)               # user_a, user_b
-            self.assertEqual(rep["commenter_count"], 2)           # user_a, user_c
-            self.assertEqual(rep["both_count"], 1)                # user_a
+            self.assertEqual(rep["total_buddies_count"], 4)
+            self.assertEqual(rep["reacted_buddies_count"], 2)      # user_a, user_b
+            self.assertEqual(rep["unresponsive_buddies_count"], 2) # user_unresp1, user_unresp2
 
-            people = {p["blog_id"]: p for p in rep["people"]}
-            self.assertEqual(people["user_a"]["liked_post_count"], 2)
-            self.assertEqual(people["user_a"]["commented_post_count"], 1)
-            self.assertEqual(people["user_a"]["total_engagement_count"], 3)
-            self.assertEqual(people["user_b"]["total_engagement_count"], 1)
-            self.assertEqual(people["user_c"]["total_engagement_count"], 1)
+            unresp_ids = {u["blog_id"] for u in rep["unresponsive_buddies"]}
+            self.assertEqual(unresp_ids, {"user_unresp1", "user_unresp2"})
 
     def test_engagement_audit_store_creates_valid_csv(self):
-        """JSON 및 CSV 파일이 올바르게 생성되는지 검증"""
+        """JSON 및 무반응자 CSV 파일이 올바르게 생성되는지 검증"""
         test_report = {
             "generated_at": "2026-08-26 20:00:00",
             "blog_id": "test_blog",
@@ -101,20 +104,32 @@ class TestEngagementAuditV7(unittest.TestCase):
                     "commented_posts": ["글1"],
                     "comment_samples": ["좋은 글이에요"]
                 }
+            ],
+            "unresponsive_buddies": [
+                {
+                    "blog_id": "ghost1",
+                    "nickname": "유령이웃",
+                    "blog_title": "유령의집",
+                    "group_name": "안한놈",
+                    "buddy_type": "서로이웃",
+                    "added_date": "26.01.01.",
+                    "last_post_date": "26.02.01.",
+                    "is_grace_period": False
+                }
             ]
         }
-        json_p, csv_p = EngagementAuditStore.save(test_report)
+        json_p, csv_p, unresp_csv_p = EngagementAuditStore.save(test_report)
         self.assertTrue(os.path.exists(json_p))
         self.assertTrue(os.path.exists(csv_p))
+        self.assertTrue(os.path.exists(unresp_csv_p))
 
-        with open(csv_p, "r", encoding="utf-8-sig") as f:
+        with open(unresp_csv_p, "r", encoding="utf-8-sig") as f:
             reader = csv.DictReader(f)
             rows = list(reader)
             self.assertEqual(len(rows), 1)
-            self.assertEqual(rows[0]["blog_id"], "friend1")
-            self.assertEqual(rows[0]["total_engagement_count"], "3")
-            self.assertEqual(rows[0]["is_liker"], "Y")
-            self.assertEqual(rows[0]["is_commenter"], "Y")
+            self.assertEqual(rows[0]["blog_id"], "ghost1")
+            self.assertEqual(rows[0]["group_name"], "안한놈")
+            self.assertEqual(rows[0]["is_grace_period"], "N")
 
 
 if __name__ == "__main__":

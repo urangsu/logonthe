@@ -72,18 +72,23 @@ class CommentParticipantCollector:
                         let profileUrl = "";
                         if (userLink) {
                             const href = userLink.href || "";
-                            if (href.includes("m.blog.naver.com/")) {
-                                targetId = href.split("m.blog.naver.com/")[1].split("?")[0].split("/")[0];
+                            if (href.includes("blogId=")) {
+                                const m = href.match(/blogId=([a-zA-Z0-9_-]+)/);
+                                if (m) targetId = m[1];
+                            } else if (href.includes("m.blog.naver.com/")) {
+                                const part = href.split("m.blog.naver.com/")[1];
+                                targetId = part.split("?")[0].split("/")[0];
                             } else if (href.includes("blog.naver.com/")) {
-                                targetId = href.split("blog.naver.com/")[1].split("?")[0].split("/")[0];
+                                const part = href.split("blog.naver.com/")[1];
+                                targetId = part.split("?")[0].split("/")[0];
                             }
-                            profileUrl = href;
+                            profileUrl = targetId ? ("https://m.blog.naver.com/" + targetId) : href;
                         }
 
                         const nick = (nickEl ? nickEl.innerText : (targetId || '')).trim();
                         const commentText = (textEl ? textEl.innerText : '').trim().replace(/\\n/g, ' ');
 
-                        if (targetId && !seen.has(targetId) && !targetId.includes("Post") && !targetId.includes("Sympathy")) {
+                        if (targetId && !seen.has(targetId) && !targetId.includes("PostList") && !targetId.includes("PostView") && !targetId.includes("Sympathy")) {
                             seen.add(targetId);
                             results.push({
                                 blog_id: targetId,

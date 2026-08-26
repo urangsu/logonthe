@@ -630,21 +630,25 @@ class MainWindow(ctk.CTk):
                 if res.get("success"):
                     rep = res["report"]
                     csv_path = res["csv_path"]
+                    unresp_csv = res.get("unresponsive_csv_path", "")
                     msg = (
-                        f"🎉 [내 블로그 최근 반응자 수집 완료]\n\n"
-                        f"• 분석 대상 글: {rep['recent_post_count']}개\n"
-                        f"• 👥 고유 반응자: {rep['unique_participant_count']}명\n"
-                        f"• ❤️ 공감 참여자: {rep['liker_count']}명\n"
-                        f"• 💬 댓글 작성자: {rep['commenter_count']}명\n"
-                        f"• 🌟 공감+댓글 모두 참여: {rep['both_count']}명\n\n"
-                        f"저장 위치:\n{csv_path}"
+                        f"🎉 [내 블로그 이웃 전수 및 무반응 감사 완료]\n\n"
+                        f"• 분석 대상 최근 글: {rep['recent_post_count']}개\n"
+                        f"• 👥 전체 등록 이웃: {rep.get('total_buddies_count', 0)}명\n"
+                        f"• ❤️ 최근 글 반응 이웃: {rep.get('reacted_buddies_count', 0)}명\n"
+                        f"• 🚫 무반응 이웃: {rep.get('unresponsive_buddies_count', 0)}명\n"
+                        f"  (48시간 신규 유예: {rep.get('grace_period_buddies_count', 0)}명 / 실질 무반응: {rep.get('real_unresponsive_count', 0)}명)\n\n"
+                        f"• 🌟 고유 외부/이웃 반응자: {rep['unique_participant_count']}명\n"
+                        f"  (공감 참여: {rep['liker_count']}명 / 댓글 작성: {rep['commenter_count']}명)\n\n"
+                        f"무반응 이웃 CSV:\n{unresp_csv}\n\n"
+                        f"무반응 이웃 CSV 파일을 바로 여시겠습니까?"
                     )
 
                     def show_dialog():
-                        ans = messagebox.askyesno("수집 완료", msg + "\n\n생성된 CSV 파일을 바로 여시겠습니까?")
+                        ans = messagebox.askyesno("감사 완료", msg)
                         if ans:
                             try:
-                                subprocess.run(["open", csv_path])
+                                subprocess.run(["open", unresp_csv or csv_path])
                             except Exception:
                                 pass
 

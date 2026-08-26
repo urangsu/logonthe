@@ -33,5 +33,10 @@
   "gemini_browser_mode": "managed_playwright",
   "gemini_web_enabled": true,
   "gemini_mode": "new",
-  "gemini_custom_url": "https://gemini.google.com/app/0a1545681329aa0a?hl=ko"
+  "gemini_custom_url": "https://gemini.google.com/app/0a1545681329aa0a?hl=ko",
+  "user_learning_record_enabled": true,
+  "auto_prompt_learning_enabled": false,
+  "auto_style_apply_enabled": false,
+  "my_blog_id": "iwbbt",
+  "engagement_audit_recent_posts": 5
 }
