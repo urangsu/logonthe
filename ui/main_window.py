@@ -418,6 +418,13 @@ class MainWindow(ctk.CTk):
         ).pack(side="left", padx=3)
 
         ctk.CTkButton(
+            btn_frame, text="👥 내 반응자 수집", width=125, height=38,
+            fg_color="#7C3AED", hover_color="#6D28D9",
+            font=ctk.CTkFont(size=13, weight="bold"),
+            command=self._run_engagement_audit
+        ).pack(side="left", padx=3)
+
+        ctk.CTkButton(
             btn_frame, text="🔓 락 초기화", width=85, height=38,
             fg_color="#475569", hover_color="#334155",
             command=self._reset_lock
@@ -581,6 +588,75 @@ class MainWindow(ctk.CTk):
             finally:
                 session.close()
                 self.after(0, lambda: self.btn_start.configure(state="normal"))
+
+        threading.Thread(target=task, daemon=True).start()
+
+    def _run_engagement_audit(self):
+        """내 블로그 최근 글(기본 5개)의 공감/댓글 반응자 통합 수집 및 CSV/JSON 저장 (One-shot)"""
+        from tkinter import simpledialog
+        from services.engagement_audit_service import EngagementAuditService
+        import subprocess
+
+        saved_id = self.config_service.get("my_blog_id", "")
+        blog_id = simpledialog.askstring(
+            "내 블로그 ID 입력",
+            "반응자를 수집할 네이버 블로그 ID를 입력하세요 (예: iwbbt):",
+            initialvalue=saved_id or "",
+            parent=self
+        )
+        if not blog_id or not blog_id.strip():
+            return
+
+        blog_id = blog_id.strip()
+        self.config_service.set("my_blog_id", blog_id)
+
+        if ProfileLockManager.is_locked(USER_DATA_DIR):
+            messagebox.showwarning("알림", "프로필이 사용 중입니다. 실행 중인 브라우저나 작업을 먼저 중지해 주세요.")
+            return
+
+        logger.log(f"👥 [AUDIT] '{blog_id}' 블로그 최근 글 반응자 수집을 시작합니다...")
+
+        def task():
+            session = BrowserSession(headless=True)
+            try:
+                ctx = session.start()
+                page = ctx.new_page()
+                res = EngagementAuditService.run_audit(
+                    page=page,
+                    my_blog_id=blog_id,
+                    recent_post_count=int(self.config_service.get("engagement_audit_recent_posts", 5))
+                )
+
+                if res.get("success"):
+                    rep = res["report"]
+                    csv_path = res["csv_path"]
+                    msg = (
+                        f"🎉 [내 블로그 최근 반응자 수집 완료]\n\n"
+                        f"• 분석 대상 글: {rep['recent_post_count']}개\n"
+                        f"• 👥 고유 반응자: {rep['unique_participant_count']}명\n"
+                        f"• ❤️ 공감 참여자: {rep['liker_count']}명\n"
+                        f"• 💬 댓글 작성자: {rep['commenter_count']}명\n"
+                        f"• 🌟 공감+댓글 모두 참여: {rep['both_count']}명\n\n"
+                        f"저장 위치:\n{csv_path}"
+                    )
+
+                    def show_dialog():
+                        ans = messagebox.askyesno("수집 완료", msg + "\n\n생성된 CSV 파일을 바로 여시겠습니까?")
+                        if ans:
+                            try:
+                                subprocess.run(["open", csv_path])
+                            except Exception:
+                                pass
+
+                    self.after(0, show_dialog)
+                else:
+                    err_msg = res.get('error', 'unknown')
+                    self.after(0, lambda: messagebox.showwarning("수집 실패", f"반응자 수집 실패: {err_msg}"))
+            except Exception as e:
+                logger.log(f"❌ [AUDIT] 수집 중 오류: {e}", "ERROR")
+                self.after(0, lambda: messagebox.showerror("오류", f"수집 중 오류 발생: {e}"))
+            finally:
+                session.close()
 
         threading.Thread(target=task, daemon=True).start()
 

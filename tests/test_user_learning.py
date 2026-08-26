@@ -15,9 +15,22 @@ class TestUserLearningAndCorpus(unittest.TestCase):
         self.orig_user_file = USER_LEARNING_FILE
         self.orig_acc_file = ACCUMULATED_COMMENTS_FILE
 
-    def test_length_validator_permits_natural_gemini_length(self):
-        """101자 등 자연스러운 1~2문장 Gemini 답변(12~180자)이 정상 통과함을 검증"""
-        cand = CommentCandidate(
+    def test_length_validator_enforces_100_char_hard_max(self):
+        """댓글 길이 정책(v7): 100자 이하는 통과, 101자 이상은 reject 검증"""
+        # 1. 50자 (정상 통과)
+        cand_ok = CommentCandidate(
+            body="탐론 렌즈 가성비 구성이 알차네요! 펜탁스 색감도 너무 예뻐요 ㅎㅎ",
+            category="IT_GADGET",
+            reaction_intent=ReactionIntent.DETAIL_PRAISE,
+            first_person_intent=FirstPersonIntent.NONE,
+            subject="탐론",
+            template_id="test"
+        )
+        valid, reason = PositiveSafetyValidator.validate_candidate(cand_ok)
+        self.assertTrue(valid)
+
+        # 2. 101자 (거부)
+        cand_over = CommentCandidate(
             body="탐론 70-300mm 망원 렌즈 가성비 구성이 정말 알차 보이네요! 펜탁스 바디에 마운트한 사진 보니까 색감도 너무 예쁘게 잘 나오는 것 같아요 ㅎㅎ 다음에 출사 갈 때 저도 꼭 써보고 싶네요!",
             category="IT_GADGET",
             reaction_intent=ReactionIntent.DETAIL_PRAISE,
@@ -25,9 +38,10 @@ class TestUserLearningAndCorpus(unittest.TestCase):
             subject="탐론",
             template_id="test"
         )
-        self.assertTrue(len(cand.body) > 100)
-        valid, reason = PositiveSafetyValidator.validate_candidate(cand)
-        self.assertTrue(valid, f"Expected valid, got reason: {reason}")
+        self.assertTrue(len(cand_over.body) > 100)
+        valid_over, reason_over = PositiveSafetyValidator.validate_candidate(cand_over)
+        self.assertFalse(valid_over)
+        self.assertIn("length_out_of_bounds", reason_over)
 
     def test_user_learning_service_records_edit(self):
         """사용자가 수정한 최종 댓글이 학습용 JSON 파일에 올바르게 축적되는지 검증"""

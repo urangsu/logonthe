@@ -52,7 +52,14 @@ DEFAULT_CONFIG_V2: Dict[str, Any] = {
     "gemini_browser_mode": "existing_chrome_mac",
     "gemini_web_enabled": True,
     "gemini_mode": "new",
-    "gemini_custom_url": "https://gemini.google.com/app/0a1545681329aa0a?hl=ko"
+    "gemini_custom_url": "https://gemini.google.com/app/0a1545681329aa0a?hl=ko",
+
+    # User Learning & Engagement Audit (v7.0)
+    "user_learning_record_enabled": True,
+    "auto_prompt_learning_enabled": False,
+    "auto_style_apply_enabled": False,
+    "my_blog_id": "",
+    "engagement_audit_recent_posts": 5
 }
 
 
