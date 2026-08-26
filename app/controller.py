@@ -40,15 +40,17 @@ class FeedController:
         history: HistoryStore,
         state_mgr: StateManager,
         stop_event: threading.Event,
-        command_bridge: Optional[ClipboardCommandBridge] = None
+        command_bridge: Optional[ClipboardCommandBridge] = None,
+        pause_event: Optional[threading.Event] = None
     ):
         self.config = config
         self.history = history
         self.state_mgr = state_mgr
         self.stop_event = stop_event
+        self.pause_event = pause_event
         self.command_bridge = command_bridge
         self.session: Optional[BrowserSession] = None
-        self.pacing = PacingService(config=config, stop_event=stop_event, state_manager=state_mgr)
+        self.pacing = PacingService(config=config, stop_event=stop_event, state_manager=state_mgr, pause_event=pause_event)
 
     def run(self):
         source_type_str = self.config.get("feed_source", FeedSourceType.NEIGHBOR.value)
@@ -138,7 +140,8 @@ class FeedController:
                 pacing_service=self.pacing,
                 command_bridge=self.command_bridge,
                 state_manager=self.state_mgr,
-                stop_event=self.stop_event
+                stop_event=self.stop_event,
+                pause_event=self.pause_event
             )
 
             processed_keys = set()

@@ -25,10 +25,17 @@ class PacingService:
     모바일 피드 어시스턴트 작업 속도 조절(Pacing) 서비스
     - 모든 랜덤 시간 계산 및 interruptible 대기를 단일 모듈에서 총괄
     """
-    def __init__(self, config, stop_event: Optional[threading.Event] = None, state_manager = None):
+    def __init__(
+        self,
+        config,
+        stop_event: Optional[threading.Event] = None,
+        state_manager = None,
+        pause_event: Optional[threading.Event] = None
+    ):
         self.config = config
         self.stop_event = stop_event
         self.state_manager = state_manager
+        self.pause_event = pause_event
 
     def _range(self, min_key: str, max_key: str, default_min: float = 1.0, default_max: float = 2.5) -> Tuple[float, float]:
         low = float(self.config.get(min_key, default_min))
@@ -47,7 +54,7 @@ class PacingService:
             return PacingResult(PacingKind.ACTION, 0.0)
 
         seconds = round(random.uniform(low, high), 2)
-        interrupted = interruptible_wait(self.stop_event, seconds)
+        interrupted = interruptible_wait(self.stop_event, seconds, pause_event=self.pause_event)
         return PacingResult(PacingKind.ACTION, seconds, interrupted)
 
     def wait_next_post(self) -> PacingResult:
@@ -65,7 +72,7 @@ class PacingService:
             self.state_manager.update(new_state=FeedState.PACING, message=f"다음 글로 이동 전 대기 중... ({seconds:.1f}초)")
 
         logger.log(f"[PACING] 다음 글 진입 전 {seconds:.1f}초 대기...")
-        interrupted = interruptible_wait(self.stop_event, seconds)
+        interrupted = interruptible_wait(self.stop_event, seconds, pause_event=self.pause_event)
         return PacingResult(PacingKind.NEXT_POST, seconds, interrupted)
 
     def maybe_pause(self) -> Optional[PacingResult]:
@@ -89,5 +96,5 @@ class PacingService:
             self.state_manager.update(new_state=FeedState.PAUSED, message=f"잠시 쉬는 중... ({seconds:.1f}초)")
 
         logger.log(f"☕ [PAUSE] 작업 간격 조정을 위해 {seconds:.1f}초 동안 잠시 대기합니다.")
-        interrupted = interruptible_wait(self.stop_event, seconds)
+        interrupted = interruptible_wait(self.stop_event, seconds, pause_event=self.pause_event)
         return PacingResult(PacingKind.PAUSE, seconds, interrupted)

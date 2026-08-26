@@ -162,14 +162,33 @@ def ensure_page_alive(page: Optional[Page]):
             raise
 
 
-def interruptible_wait(stop_event: Optional[threading.Event], seconds: float, step: float = 0.1) -> bool:
-    """stop_event 신호를 즉각 감지하며 주어진 시간만큼 대기 (중지 요청 시 True 반환)"""
+def interruptible_wait(
+    stop_event: Optional[threading.Event],
+    seconds: float,
+    step: float = 0.1,
+    pause_event: Optional[threading.Event] = None
+) -> bool:
+    """stop_event 및 pause_event 신호를 즉각 감지하며 주어진 시간만큼 대기 (중지 요청 시 True 반환)"""
+    if stop_event and stop_event.is_set():
+        return True
+
+    # 일시정지 상태 대기
+    while pause_event and pause_event.is_set():
+        if stop_event and stop_event.is_set():
+            return True
+        time.sleep(step)
+
     if seconds <= 0:
         return bool(stop_event and stop_event.is_set())
+
     elapsed = 0.0
     while elapsed < seconds:
         if stop_event and stop_event.is_set():
             return True
+        while pause_event and pause_event.is_set():
+            if stop_event and stop_event.is_set():
+                return True
+            time.sleep(step)
         sleep_dur = min(step, seconds - elapsed)
         time.sleep(sleep_dur)
         elapsed += sleep_dur

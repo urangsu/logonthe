@@ -83,6 +83,7 @@ class MainWindow(ctk.CTk):
         self.state_mgr = StateManager()
         self.command_bridge = ClipboardCommandBridge()
         self.stop_event = threading.Event()
+        self.pause_event = threading.Event()
         self.worker_thread: Optional[threading.Thread] = None
 
         self._build_ui()
@@ -399,6 +400,12 @@ class MainWindow(ctk.CTk):
         )
         self.btn_start.pack(side="left", expand=True, fill="x", padx=3)
 
+        self.btn_pause = ctk.CTkButton(
+            btn_frame, text="⏸️ 일시정지", fg_color="#D97706", hover_color="#B45309", height=38,
+            font=ctk.CTkFont(size=14, weight="bold"), command=self._toggle_pause, state="disabled"
+        )
+        self.btn_pause.pack(side="left", expand=True, fill="x", padx=3)
+
         self.btn_stop = ctk.CTkButton(
             btn_frame, text="⏹ 작업 즉시 중지", fg_color="#DC2626", hover_color="#B91C1C", height=38,
             font=ctk.CTkFont(size=14, weight="bold"), command=self._stop_task, state="disabled"
@@ -658,8 +665,10 @@ class MainWindow(ctk.CTk):
         logger.log(f"[CONFIG] 공감수 제외 기준: {like_thresh}개 (source=data/config.json)")
 
         self.btn_start.configure(state="disabled")
+        self.btn_pause.configure(state="normal", text="⏸️ 일시정지", fg_color="#D97706", hover_color="#B45309")
         self.btn_stop.configure(state="normal")
         self.stop_event.clear()
+        self.pause_event.clear()
         self.command_bridge.clear()
 
         controller = FeedController(
@@ -667,7 +676,8 @@ class MainWindow(ctk.CTk):
             history=self.history_store,
             state_mgr=self.state_mgr,
             stop_event=self.stop_event,
-            command_bridge=self.command_bridge
+            command_bridge=self.command_bridge,
+            pause_event=self.pause_event
         )
 
         def worker():
@@ -679,11 +689,28 @@ class MainWindow(ctk.CTk):
         self.worker_thread = threading.Thread(target=worker, daemon=True)
         self.worker_thread.start()
 
+    def _toggle_pause(self):
+        if not self.worker_thread or not self.worker_thread.is_alive():
+            return
+        if not self.pause_event.is_set():
+            self.pause_event.set()
+            self.btn_pause.configure(text="▶️ 작업 재개", fg_color="#2563EB", hover_color="#1D4ED8")
+            logger.log("⏸️ 작업이 일시정지되었습니다. [▶️ 작업 재개] 버튼을 누르면 이어서 진행합니다.", "WARNING")
+            self.state_mgr.update(new_state=FeedState.PAUSED, message="작업 일시정지됨 (재개 대기 중)")
+        else:
+            self.pause_event.clear()
+            self.btn_pause.configure(text="⏸️ 일시정지", fg_color="#D97706", hover_color="#B45309")
+            logger.log("▶️ 작업을 다시 재개합니다.")
+            self.state_mgr.update(message="작업 재개됨")
+
     def _stop_task(self):
         if self.worker_thread and self.worker_thread.is_alive():
+            self.pause_event.clear()
             self.stop_event.set()
             logger.log("⏹ 작업 중지 신호 전송됨: 현재 단계 완료 즉시 안전하게 종료합니다...", "WARNING")
 
     def _on_task_finished(self):
         self.btn_start.configure(state="normal")
+        self.btn_pause.configure(state="disabled", text="⏸️ 일시정지", fg_color="#D97706", hover_color="#B45309")
         self.btn_stop.configure(state="disabled")
+        self.pause_event.clear()

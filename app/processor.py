@@ -51,7 +51,8 @@ class PostProcessor:
         pacing_service: Optional[PacingService] = None,
         command_bridge: Optional[ClipboardCommandBridge] = None,
         state_manager: Optional[StateManager] = None,
-        stop_event: Optional[threading.Event] = None
+        stop_event: Optional[threading.Event] = None,
+        pause_event: Optional[threading.Event] = None
     ):
         self.config = config
         self.like_enabled = like_enabled
@@ -70,6 +71,7 @@ class PostProcessor:
         self.command_bridge = command_bridge
         self.state_mgr = state_manager
         self.stop_event = stop_event
+        self.pause_event = pause_event
 
     def process(
         self,
