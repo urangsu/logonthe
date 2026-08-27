@@ -1,9 +1,9 @@
-import re
-from typing import Any, Dict, List, Optional, Tuple, Literal
-from dataclasses import dataclass
-from playwright.sync_api import Page
+"""Read the buddy-management table without changing any relationship or setting."""
+from dataclasses import dataclass, field
+from typing import Optional
 from browser.session import interruptible_wait
-from src.logger import logger
+from services.audit_models import canonical_blog_id, fingerprint, nonnegative_int, now_kst
+from services.reaction_participant_collector import CANONICAL_ID_JS
 
 
 @dataclass
@@ -12,257 +12,197 @@ class BuddyInfo:
     nickname: str
     blog_title: str
     group_name: str
-    buddy_type: str        # "서로이웃" | "이웃"
+    buddy_type: str
     last_post_date: Optional[str]
     added_date: str
+    new_posts_setting: str = "unknown"
+    setting_observed_at: Optional[str] = None
+    setting_evidence: Optional[str] = None
 
 
 @dataclass
 class BuddyCollectionResult:
-    buddies: Dict[str, BuddyInfo]
-    state: Literal["complete", "partial", "failed"]
+    buddies: dict
+    state: str
     expected_total: Optional[int]
     collected_total: int
     pages_visited: int
-    page_fingerprints: List[str]
+    page_fingerprints: list
     error: Optional[str] = None
+    quality_issues: list = field(default_factory=list)
+    source_kind: str = "live"
+    capability_verified: bool = False
+    terminal: bool = False
+
+
+BUDDY_SCOPE_JS = r"""
+const rowMarker = "input[name='buddySeq'], input[name='buddyBlogNo']";
+function headersFor(table) {
+    const header = table.querySelector('thead tr') || table.querySelector('tr:has(th)');
+    if (!header) return [];
+    return Array.from(header.querySelectorAll(':scope > th, :scope > td')).map(cell => {
+        const clone = cell.cloneNode(true);
+        clone.querySelectorAll('select, option').forEach(x => x.remove());
+        return {text: clone.textContent.replace(/\s+/g, ''), full: cell.textContent.replace(/\s+/g, ''), hasSelect: !!cell.querySelector('select')};
+    });
+}
+function nameIndex(headings) {
+    return headings.findIndex(h => !h.hasSelect && /^(이웃|이웃블로그|이웃이름|블로그명|닉네임)$/.test(h.text));
+}
+function buddyTables() {
+    return Array.from(document.querySelectorAll('table')).filter(table => {
+        const headings = headersFor(table);
+        return shown(table) && nameIndex(headings) >= 0 && headings.some(h => /추가일|등록일/.test(h.text)) &&
+            (table.querySelector(rowMarker) || /등록된 이웃이 없습니다|이웃이 없습니다/.test(table.textContent));
+    });
+}
+function pagerFor(table) {
+    // A pager must share a close ancestor with exactly this buddy table. No global fallback.
+    let scope = table.parentElement;
+    for (let depth = 0; scope && depth < 3 && !['BODY', 'HTML'].includes(scope.tagName); depth++, scope = scope.parentElement) {
+        if (buddyTables().filter(t => scope.contains(t)).length !== 1) return null;
+        const pagers = Array.from(scope.querySelectorAll('.paginate, .pagination, .paging')).filter(shown);
+        if (pagers.length === 1) return pagers[0];
+        if (pagers.length > 1) return null;
+    }
+    return null;
+}
+function pagerInfo(pager) {
+    if (!pager) return {nextPage: null, terminal: false, nextLink: null};
+    const currentNodes = Array.from(pager.querySelectorAll('[aria-current=page], strong, em')).filter(el => shown(el) && /^\d+$/.test(el.textContent.trim()));
+    const currentValues = [...new Set(currentNodes.map(el => Number(el.textContent.trim())))];
+    const current = currentValues.length === 1 && currentValues[0] > 0 ? currentValues[0] : null;
+    const links = Array.from(pager.querySelectorAll('a')).filter(shown);
+    const label = a => [a.textContent, a.getAttribute('aria-label'), a.getAttribute('title'), a.querySelector('img')?.alt].filter(Boolean).join(' ').trim();
+    const disabled = a => a.getAttribute('aria-disabled') === 'true' || a.classList.contains('disabled');
+    const numeric = links.filter(a => /^\d+$/.test(a.textContent.trim()) && !disabled(a));
+    const nextNumeric = current ? numeric.filter(a => Number(a.textContent.trim()) > current).sort((a,b) => Number(a.textContent.trim()) - Number(b.textContent.trim()))[0] : null;
+    const nextControls = links.filter(a => a.rel === 'next' || /다음|next|^>+$/i.test(label(a)));
+    const nextControl = nextControls.find(a => !disabled(a));
+    const unexplained = links.some(a => !/^\d+$/.test(a.textContent.trim()) && !nextControls.includes(a) && !/이전|처음|prev|first|^<+$/i.test(label(a)));
+    const numbers = numeric.map(a => Number(a.textContent.trim()));
+    if (current) numbers.push(current);
+    // A consecutive range alone is terminal only when it begins at page 1;
+    // later windows need an explicit disabled next control.
+    const sorted = [...new Set(numbers)].sort((a,b) => a-b);
+    const fullRange = sorted.length > 0 && sorted[0] === 1 && sorted.every((n,i) => n === i + 1);
+    const terminal = !!current && !nextNumeric && !nextControl && !unexplained &&
+        ((fullRange && current === sorted[sorted.length - 1]) || nextControls.some(disabled));
+    return {nextPage: nextNumeric ? Number(nextNumeric.textContent.trim()) : nextControl && current ? current + 1 : null,
+        terminal, nextLink: nextNumeric || nextControl || null};
+}
+"""
+
+BUDDY_DOM = "() => {" + CANONICAL_ID_JS + BUDDY_SCOPE_JS + r"""
+    const candidates = buddyTables();
+    if (candidates.length !== 1) return {scopeVerified: false, items: [], terminal: false};
+    const table = candidates[0], headings = headersFor(table);
+    const index = re => headings.findIndex(h => re.test(h.text));
+    const groupIdx = index(/^그룹/), nameIdx = nameIndex(headings);
+    const typeIdx = headings.findIndex(h => /^(이웃)?구분$/.test(h.text) || (h.hasSelect && /^이웃/.test(h.text)));
+    const addIdx = index(/추가일|등록일/), lastIdx = index(/최근.*(글|작성)|마지막.*글/), settingIdx = index(/새글소식|새글알림/);
+    const items = []; let unresolved = 0;
+    for (const row of table.querySelectorAll('tbody > tr')) {
+        if (!row.querySelector(rowMarker)) continue;
+        const cells = Array.from(row.querySelectorAll(':scope > td'));
+        const cell = i => i >= 0 && cells[i] ? cells[i] : null;
+        const text = i => cell(i)?.textContent.trim() || '';
+        const nameCell = cell(nameIdx);
+        // Numeric buddyBlogNo values and unknown javascript links are not blog IDs.
+        const links = nameCell ? Array.from(nameCell.querySelectorAll('a[href]')) : [];
+        const ids = [...new Set(links.map(a => blogIdentity(a.href)).filter(Boolean))];
+        if (ids.length !== 1) { unresolved++; continue; }
+        const id = ids[0], link = links.find(a => blogIdentity(a.href) === id);
+        const raw = text(nameIdx) || link.textContent.trim();
+        const checkbox = cell(settingIdx)?.querySelector('input[type=checkbox]');
+        items.push({blog_id: id, nickname: raw.split('|')[0].trim() || id, blog_title: raw.includes('|') ? raw.split('|')[1].trim() : '',
+            group_name: text(groupIdx), buddy_type: /서로이웃/.test(text(typeIdx)) ? '서로이웃' : text(typeIdx) === '이웃' ? '이웃' : 'unknown',
+            added_date: text(addIdx), last_post_date: text(lastIdx),
+            new_posts_setting: 'unknown', setting_semantics_verified: false,
+            setting_evidence: checkbox ? 'native_checkbox:' + String(checkbox.checked) : null});
+    }
+    const scope = table.parentElement;
+    const total = scope.querySelector('.total, .buddy_count');
+    const expected = total && /이웃/.test(total.textContent) ? countValue(total) : null;
+    const pager = pagerInfo(pagerFor(table));
+    const registeredRows = table.querySelectorAll(rowMarker).length;
+    const empty = !registeredRows && /등록된 이웃이 없습니다|이웃이 없습니다/.test(table.textContent);
+    return {scopeVerified: true, items, expectedTotal: expected, unresolvedEntries: unresolved,
+        nextPage: pager.nextPage, terminal: empty || pager.terminal};
+}"""
+
+BUDDY_NEXT_DOM = "(pageNo) => {" + CANONICAL_ID_JS + BUDDY_SCOPE_JS + r"""
+    const tables = buddyTables();
+    if (tables.length !== 1) return false;
+    const pager = pagerInfo(pagerFor(tables[0]));
+    if (!pager.nextLink || pager.nextPage !== pageNo) return false;
+    pager.nextLink.click();
+    return true;
+}"""
+
 
 
 class BuddyListCollector:
-    """
-    네이버 블로그 관리자 페이지(BuddyListManage.naver)를 순회하여
-    전체 이웃 목록(194명 등 전수)을 수집하는 서비스 (v8.0)
-    - Frame 내 goPage(N) 페이지네이션 및 DOM 검증
-    - 페이지별 지문(Fingerprint) 추적으로 중복/루프 방어
-    - Column-index 헤더 매핑으로 견고한 파싱
-    - COMPLETE / PARTIAL / FAILED 3-state 보증
-    """
-
     @classmethod
-    def collect_all_buddies(
-        cls,
-        page: Page,
-        blog_id: str,
-        stop_event: Optional[Any] = None
-    ) -> BuddyCollectionResult:
-        if not blog_id or not blog_id.strip():
-            return BuddyCollectionResult(
-                buddies={},
-                state="failed",
-                expected_total=None,
-                collected_total=0,
-                pages_visited=0,
-                page_fingerprints=[],
-                error="blog_id_empty"
-            )
-
-        b_id = blog_id.strip()
-        logger.log(f"📋 [BUDDY] '{b_id}' 블로그의 전체 이웃 목록 전수 수집 시작...")
-
-        url = f"https://admin.blog.naver.com/BuddyListManage.naver?blogId={b_id}"
+    def collect_all_buddies(cls, page, blog_id, stop_event=None):
+        buddies = {}; marks = []; issues = []; expected = None; terminal = False; scoped = False; cancelled = False
+        if not canonical_blog_id(blog_id):
+            return BuddyCollectionResult({}, "failed", None, 0, 0, [], "blog_id_invalid")
         try:
-            page.goto(url, wait_until="domcontentloaded", timeout=25000)
-            interruptible_wait(stop_event, 1.5)
-
+            if stop_event and stop_event.is_set():
+                return BuddyCollectionResult({}, "cancelled", None, 0, 0, [], "stop_requested")
+            page.goto(f"https://admin.blog.naver.com/BuddyListManage.naver?blogId={blog_id}", wait_until="domcontentloaded", timeout=25000)
+            interruptible_wait(stop_event, 0.5)
             frame = page.frame("papermain") or page.main_frame
-
-            all_buddies: Dict[str, BuddyInfo] = {}
-            page_no = 1
-            page_fingerprints: List[str] = []
-            expected_total: Optional[int] = None
-
-            while True:
+            for _ in range(100):
                 if stop_event and stop_event.is_set():
-                    return BuddyCollectionResult(
-                        buddies=all_buddies,
-                        state="partial",
-                        expected_total=expected_total,
-                        collected_total=len(all_buddies),
-                        pages_visited=page_no,
-                        page_fingerprints=page_fingerprints,
-                        error="stop_requested"
-                    )
-
-                # 현재 페이지 데이터 파싱
-                page_data = frame.evaluate(r"""
-                    () => {
-                        const totalEl = document.querySelector(".total, em.point, strong.point, .align_r em");
-                        let expected = null;
-                        if (totalEl) {
-                            const numM = totalEl.innerText.replace(/,/g, '').match(/\d+/);
-                            if (numM) expected = parseInt(numM[0], 10);
-                        }
-
-                        // 헤더 인덱스 매핑
-                        const ths = Array.from(document.querySelectorAll("table.table_style th, table th")).map(th => th.innerText.trim());
-                        let groupIdx = 1, typeIdx = 2, nameIdx = 3, addDateIdx = -1, lastDateIdx = -1;
-
-                        ths.forEach((txt, idx) => {
-                            if (txt.includes("그룹")) groupIdx = idx;
-                            else if (txt.includes("이웃구분") || txt.includes("구분")) typeIdx = idx;
-                            else if (txt.includes("이웃") && (txt.includes("블로그") || txt.includes("이름"))) nameIdx = idx;
-                            else if (txt.includes("추가일")) addDateIdx = idx;
-                            else if (txt.includes("최근") || txt.includes("작성일")) lastDateIdx = idx;
-                        });
-
-                        const rows = Array.from(document.querySelectorAll("table.table_style tbody tr, tbody tr")).filter(r => {
-                            return r.querySelector("input[name='buddySeq']") || r.querySelector("a[href*='blog.naver.com']");
-                        });
-
-                        const items = [];
-                        for (let r of rows) {
-                            const userLink = r.querySelector("a[href*='blog.naver.com']");
-                            if (!userLink) continue;
-
-                            const href = userLink.href || "";
-                            let targetId = null;
-                            if (href.includes("blog.naver.com/")) {
-                                targetId = href.split("blog.naver.com/")[1].split("?")[0].split("/")[0];
-                            }
-                            if (!targetId || targetId === 'PostList.naver' || targetId === 'BuddyListManage.naver') {
-                                continue;
-                            }
-
-                            const tds = Array.from(r.querySelectorAll("td"));
-                            let groupName = (groupIdx >= 0 && groupIdx < tds.length) ? tds[groupIdx].innerText.trim() : "";
-                            let buddyType = (typeIdx >= 0 && typeIdx < tds.length && tds[typeIdx].innerText.includes("서로이웃")) ? "서로이웃" : "이웃";
-                            
-                            let rawName = (nameIdx >= 0 && nameIdx < tds.length) ? tds[nameIdx].innerText.trim() : userLink.innerText.trim();
-                            let nick = rawName.split("|")[0].trim();
-                            let title = rawName.includes("|") ? rawName.split("|")[1].trim() : "";
-
-                            let addedDate = "";
-                            let lastPostDate = "";
-                            const dateTds = tds.map(td => td.innerText.trim()).filter(t => /\d{2}\.\d{2}\.\d{2}/.test(t));
-                            if (dateTds.length >= 2) {
-                                addedDate = dateTds[0];
-                                lastPostDate = dateTds[1];
-                            } else if (dateTds.length === 1) {
-                                addedDate = dateTds[0];
-                            }
-
-                            items.push({
-                                blog_id: targetId,
-                                nickname: nick || targetId,
-                                blog_title: title,
-                                group_name: groupName,
-                                buddy_type: buddyType,
-                                added_date: addedDate,
-                                last_post_date: lastPostDate
-                            });
-                        }
-
-                        // 페이지네이션 링크 추출
-                        const nextLinks = Array.from(document.querySelectorAll(".paginate a, .pagination a, .paging a")).map(a => ({
-                            text: a.innerText.trim(),
-                            onclick: a.getAttribute("onclick") || a.href
-                        }));
-
-                        return {
-                            expectedTotal: expected,
-                            items: items,
-                            nextLinks: nextLinks,
-                            firstId: items.length > 0 ? items[0].blog_id : null
-                        };
-                    }
-                """)
-
-                if expected_total is None and page_data.get("expectedTotal"):
-                    expected_total = page_data["expectedTotal"]
-                    logger.log(f"📊 [BUDDY] 관리자 페이지 기준 총 이웃 수: {expected_total}명")
-
-                items = page_data.get("items", [])
-                if not items:
-                    logger.log(f"⚠️ [BUDDY] {page_no}페이지에서 행을 찾지 못했습니다.", "WARNING")
-                    break
-
-                first_id = page_data.get("firstId", "")
-                fingerprint = f"p{page_no}_{first_id}_{len(items)}"
-
-                if fingerprint in page_fingerprints:
-                    logger.log(f"⚠️ [BUDDY] 중복 페이지 지문 감지 ({fingerprint}) - 페이지네이션 종료", "WARNING")
-                    break
-
-                page_fingerprints.append(fingerprint)
-
-                new_on_page = 0
-                for it in items:
-                    t_id = it["blog_id"]
-                    if t_id not in all_buddies:
-                        all_buddies[t_id] = BuddyInfo(
-                            blog_id=t_id,
-                            nickname=it["nickname"],
-                            blog_title=it["blog_title"],
-                            group_name=it["group_name"],
-                            buddy_type=it["buddy_type"],
-                            last_post_date=it["last_post_date"] or None,
-                            added_date=it["added_date"]
-                        )
-                        new_on_page += 1
-
-                logger.log(f"   📄 [Page {page_no}] {len(items)}명 수집 (누적 {len(all_buddies)}명 / 신규 {new_on_page}명)")
-
-                # 다음 페이지 존재 여부 확인
-                next_page_no = page_no + 1
-                has_next = any(nl["text"] == str(next_page_no) for nl in page_data["nextLinks"])
-                if not has_next:
-                    has_next_btn = any(nl["text"] in (">", "다음", "Next") for nl in page_data["nextLinks"])
-                    if not has_next_btn:
-                        logger.log("🏁 [BUDDY] 마지막 페이지에 도달했습니다.")
-                        break
-
-                # goPage(next_page_no) 실행
-                navigated = frame.evaluate(f"""
-                    () => {{
-                        if (typeof goPage === 'function') {{
-                            goPage({next_page_no});
-                            return true;
-                        }}
-                        const btn = Array.from(document.querySelectorAll('.paginate a, .pagination a, .paging a')).find(a => a.innerText.trim() === '{next_page_no}');
-                        if (btn) {{
-                            btn.click();
-                            return true;
-                        }}
-                        return false;
-                    }}
-                """)
-
-                if not navigated:
-                    logger.log(f"⚠️ [BUDDY] {next_page_no}페이지 이동 실패", "WARNING")
-                    break
-
-                interruptible_wait(stop_event, 1.2)
-                page_no = next_page_no
-
-            collected_count = len(all_buddies)
-            state: Literal["complete", "partial", "failed"] = "complete"
-
-            if expected_total is not None and collected_count < expected_total:
-                state = "partial"
-                logger.log(f"⚠️ [BUDDY] 기대 이웃 수({expected_total}명) 대비 수집 수({collected_count}명) 부족 -> PARTIAL", "WARNING")
-            elif collected_count == 0:
-                state = "failed"
+                    cancelled = True; issues.append("stop_requested"); break
+                data = frame.evaluate(BUDDY_DOM)
+                if not isinstance(data, dict) or data.get("scopeVerified") is not True:
+                    issues.append("buddy_table_scope_unverified"); break
+                scoped = True
+                raw = data.get("items", [])
+                mark = fingerprint(sorted((item.get("blog_id", ""), item.get("added_date", "")) for item in raw))
+                if mark in marks:
+                    issues.append("duplicate_page"); break
+                marks.append(mark)
+                count = nonnegative_int(data.get("expectedTotal"))
+                if count is not None:
+                    if expected is not None and expected != count:
+                        issues.append("displayed_count_changed")
+                    expected = count
+                new_ids = 0
+                for item in raw:
+                    identity = canonical_blog_id(item.get("blog_id"))
+                    if not identity:
+                        issues.append("invalid_buddy_identity"); continue
+                    if identity in buddies:
+                        issues.append("overlapping_buddy_pages"); continue
+                    setting = item.get("new_posts_setting")
+                    setting = setting if item.get("setting_semantics_verified") is True and setting in {"on", "off"} else "unknown"
+                    buddies[identity] = BuddyInfo(identity, item.get("nickname") or identity, item.get("blog_title", ""),
+                        item.get("group_name", ""), item.get("buddy_type", "unknown"), item.get("last_post_date") or None,
+                        item.get("added_date", ""), setting, now_kst().isoformat(), item.get("setting_evidence"))
+                    new_ids += 1
+                if data.get("unresolvedEntries", 0): issues.append("unresolved_buddy_rows")
+                terminal = data.get("terminal") is True
+                if terminal: break
+                if not new_ids:
+                    issues.append("no_progress"); break
+                next_page = nonnegative_int(data.get("nextPage"))
+                if next_page is None:
+                    issues.append("terminal_evidence_missing"); break
+                if frame.evaluate(BUDDY_NEXT_DOM, next_page) is not True:
+                    issues.append("pagination_failed"); break
+                interruptible_wait(stop_event, 0.5)
             else:
-                logger.log(f"✅ [BUDDY] 전체 이웃 {collected_count}명 전수 수집 완료 (COMPLETE)!")
-
-            return BuddyCollectionResult(
-                buddies=all_buddies,
-                state=state,
-                expected_total=expected_total,
-                collected_total=collected_count,
-                pages_visited=page_no,
-                page_fingerprints=page_fingerprints,
-                error=None if state == "complete" else "collection_incomplete"
-            )
-
-        except Exception as e:
-            logger.log(f"❌ [BUDDY] 이웃 전수 수집 실패: {e}", "ERROR")
-            return BuddyCollectionResult(
-                buddies={},
-                state="failed",
-                expected_total=None,
-                collected_total=0,
-                pages_visited=0,
-                page_fingerprints=[],
-                error=str(e)
-            )
+                issues.append("page_limit_reached")
+        except Exception:
+            issues.append("buddy_collection_error")
+        if stop_event and stop_event.is_set(): cancelled = True
+        if expected is not None and expected != len(buddies): issues.append("displayed_count_mismatch")
+        if not terminal and not issues: issues.append("terminal_evidence_missing")
+        state = "cancelled" if cancelled else "failed" if not scoped else "partial" if issues else "complete"
+        return BuddyCollectionResult(buddies, state, expected, len(buddies), len(marks), marks,
+                                     None if state == "complete" else (issues[0] if issues else "stop_requested"),
+                                     list(dict.fromkeys(issues)), terminal=terminal)

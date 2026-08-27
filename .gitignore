@@ -7,6 +7,14 @@ __pycache__/
 env/
 venv/
 ENV/
+.venv/
+config_backups/
+data/config_backups/
+*.lock
+data/*.sqlite3*
+data/audit_exports/
+data/helper_drafts/
+oauth-client*.json
 
 # Chrome / User Profile (Sensitive Login Sessions & Cookies)
 data/user_profile/

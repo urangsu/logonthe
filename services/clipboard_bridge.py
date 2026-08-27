@@ -23,6 +23,15 @@ class ClipboardCommandBridge:
         except queue.Empty:
             return None
 
+    def send_helper_action(self, action: str, *, post_key: str, request_id: str,
+                           navigation_version: int, text: str = ""):
+        """Helper actions must identify the exact displayed post and navigation."""
+        self._queue.put(WorkerCommand(
+            kind=WorkerCommandType.HELPER_ACTION, action=action, text=text,
+            post_key=post_key, request_id=request_id,
+            navigation_version=navigation_version,
+        ))
+
     def clear(self):
         """큐 비우기"""
         while not self._queue.empty():

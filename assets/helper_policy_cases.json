@@ -1,0 +1,80 @@
+[
+  {
+    "name": "minimum",
+    "text": "가가가가가가가가가가가가",
+    "valid": true
+  },
+  {
+    "name": "too_short",
+    "text": "가가가가가가가가가가가",
+    "valid": false
+  },
+  {
+    "name": "maximum",
+    "text": "가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가",
+    "valid": true
+  },
+  {
+    "name": "overlong",
+    "text": "가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가",
+    "valid": false
+  },
+  {
+    "name": "suffix_boundary",
+    "text": "가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가",
+    "suffix": "감사해요",
+    "valid": true
+  },
+  {
+    "name": "suffix_overflow",
+    "text": "가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가",
+    "suffix": "감사해요",
+    "valid": false
+  },
+  {
+    "name": "nfc_jamo",
+    "text": "가가가가가가가가가가가가",
+    "valid": true
+  },
+  {
+    "name": "unicode_codepoints",
+    "text": "🌿🌿🌿🌿🌿🌿🌿🌿🌿🌿🌿🌿",
+    "valid": true
+  },
+  {
+    "name": "empty_with_suffix",
+    "text": "",
+    "suffix": "좋은 글 잘 읽었습니다.",
+    "valid": false
+  },
+  {
+    "name": "url",
+    "text": "잘 읽었습니다 https://example.com",
+    "valid": false
+  },
+  {
+    "name": "fence",
+    "text": "```좋은 글 잘 읽었습니다.```",
+    "valid": false
+  },
+  {
+    "name": "meta",
+    "text": "다음은 자연스럽게 작성한 댓글입니다.",
+    "valid": false
+  },
+  {
+    "name": "experience",
+    "text": "저도 다녀왔는데 정말 좋았습니다.",
+    "valid": false
+  },
+  {
+    "name": "invisible",
+    "text": "가가가가가가가가가가가가​",
+    "valid": false
+  },
+  {
+    "name": "keep_spaces",
+    "text": "  가  가  가  가  가  가  ",
+    "valid": true
+  }
+]

@@ -1,5 +1,5 @@
 import threading
-from typing import Optional, List
+from typing import Optional
 from app.models import (
     FeedSourceType, FeedPost, PostProcessResult, LikeProcessResult, CommentProcessResult,
     CommentSubmitState, LikeState, PostActionPlan
@@ -9,8 +9,9 @@ from app.errors import (
     UserStopRequestedError, FatalSessionError, RecoverablePostError,
     PostNavigationMismatchError, PostDOMContractError
 )
+from services.helper_processor import ManualHelperProcessor
 from app.processor import PostProcessor, StopRequestedException
-from browser.session import BrowserSession, interruptible_wait
+from browser.session import BrowserSession
 from naver.sources import NeighborFeedSource, RecommendationFeedSource, DirectUrlSource, TargetedSearchFeedSource, FeedSource
 from naver.auth_guard import NaverAuthGuard
 from services.config import ConfigService
@@ -28,10 +29,10 @@ class FeedController:
     - Pre-flight Login Guard: 비로그인 상태 작업 방지 (남의 조회수만 올려주는 헛돌기 차단)
     - 브라우저 세션 생명주기 관리
     - FeedSource를 통한 포스트 디스커버리
-    - PostProcessor를 통한 개별 포스트 공감/Gemini댓글 생성/승인 처리
+    - 기본은 ManualHelperProcessor, 설정에서 기존 PostProcessor 자동화 모드 선택 가능
     - Per-Post Error Boundary: 개별 글 오류(RecoverablePostError) 격리 및 세션 보호
     - 컴포넌트 레벨 멱등성(PostActionPlan을 통해 Like, Comment 독립 전달)
-    - PacingService를 통한 안전한 작업 간격 및 휴지 제어
+    - 수동 모드의 다음 글은 브라우저 도우미에서 사용자가 직접 선택
     - History 저장 및 UI State 업데이트
     """
     def __init__(
@@ -58,21 +59,7 @@ class FeedController:
         max_items = int(self.config.get("max_feed_items", 20))
         like_enabled = bool(self.config.get("like_enabled", True))
         comment_enabled = bool(self.config.get("comment_enabled", True))
-        comment_template = str(self.config.get("comment_template", ""))
-        secret_comment = bool(self.config.get("secret_comment", False))
         direct_urls = self.config.get("direct_urls", [])
-
-        ai_clipboard_enabled = bool(self.config.get("ai_clipboard_enabled", True))
-        ai_context_max_chars = int(self.config.get("ai_context_max_chars", 700))
-        ai_prompt_style = str(self.config.get("ai_prompt_style", "warm_short"))
-
-        # Gemini Bridge 설정
-        gemini_browser_mode = str(self.config.get("gemini_browser_mode", "existing_chrome_mac"))
-        gemini_web_enabled = bool(self.config.get("gemini_web_enabled", True))
-        gemini_mode = str(self.config.get("gemini_mode", "new"))
-        gemini_custom_url = str(self.config.get("gemini_custom_url", "https://gemini.google.com/app"))
-
-        gemini_url = gemini_custom_url if (gemini_mode == "custom" and gemini_custom_url) else "https://gemini.google.com/app"
 
         # 세션 초기화 (캐시 및 서킷 브레이커 리셋)
         BlogPopularityService.clear_cache()
@@ -89,25 +76,17 @@ class FeedController:
             # Pre-flight Login Guard: 비로그인 상태 검사 (헛돌기 방지)
             is_logged_in, missing_cookies = NaverAuthGuard.check_login_cookies(self.session.context)
             if not is_logged_in:
-                err_msg = "네이버 로그인이 필요합니다. [🌐 로그인 창 열기] 버튼을 눌러 로그인해 주세요."
+                err_msg = "네이버 로그인이 필요합니다. [로그인 창 열기] 버튼을 눌러 로그인해 주세요."
                 self.state_mgr.update(new_state=FeedState.ERROR, message=err_msg)
                 logger.log("==================================================", "ERROR")
-                logger.log("❌ [LOGIN_REQUIRED] 프로그램 브라우저에 네이버 로그인이 되어있지 않습니다!", "ERROR")
-                logger.log("💡 [조치 방법] 메인 화면 우측 하단의 [🌐 로그인 창 열기] 버튼을 클릭하여 네이버에 로그인하신 후 다시 [피드 작업 시작]을 눌러주세요.", "WARNING")
-                logger.log("🚫 비로그인 상태에서 타인의 조회수만 올려주는 헛돌기를 방지하기 위해 작업을 안전하게 중단합니다.", "WARNING")
+                logger.log("[LOGIN_REQUIRED] 프로그램 브라우저에 네이버 로그인이 되어있지 않습니다!", "ERROR")
+                logger.log("[조치 방법] 메인 화면 우측 하단의 [로그인 창 열기] 버튼을 클릭하여 네이버에 로그인하신 후 다시 [피드 작업 시작]을 눌러주세요.", "WARNING")
+                logger.log("비로그인 상태에서 타인의 조회수만 올려주는 헛돌기를 방지하기 위해 작업을 안전하게 중단합니다.", "WARNING")
                 logger.log("==================================================", "ERROR")
                 return
 
             feed_page = self.session.get_feed_page()
             detail_page = self.session.get_detail_page()
-
-            # managed_playwright 모드일 때만 Playwright 내부 gemini_page 준비
-            gemini_page = self.session.get_gemini_page() if (gemini_web_enabled and gemini_browser_mode == "managed_playwright") else None
-
-            # 일 방문자 통계 가드 활성화 시 stats_page 준비
-            stats_page = None
-            if like_enabled and self.config.get("daily_visitor_guard_enabled", True):
-                stats_page = self.session.get_stats_page()
 
             # 1. Feed Source 초기화
             self.state_mgr.update(new_state=FeedState.OPENING_SOURCE, message=f"피드 소스({source_type.value}) 접속 중...")
@@ -134,33 +113,50 @@ class FeedController:
 
             source.open()
 
-            # 2. PostProcessor 초기화
-            processor = PostProcessor(
-                config=self.config,
-                like_enabled=like_enabled,
-                comment_enabled=comment_enabled,
-                comment_template=comment_template,
-                secret_comment=secret_comment,
-                ai_clipboard_enabled=ai_clipboard_enabled,
-                ai_context_max_chars=ai_context_max_chars,
-                ai_prompt_style=ai_prompt_style,
-                gemini_browser_mode=gemini_browser_mode,
-                gemini_web_enabled=gemini_web_enabled,
-                gemini_url=gemini_url,
-                gemini_page=gemini_page,
-                stats_page=stats_page,
-                pacing_service=self.pacing,
-                command_bridge=self.command_bridge,
-                state_manager=self.state_mgr,
-                stop_event=self.stop_event,
-                pause_event=self.pause_event
-            )
+            # The safe manual helper remains the default. Explicitly selecting
+            # assistant_mode=false restores the prior automated Gemini/comment
+            # flow, including the existing pacing service and guards.
+            assistant_mode = bool(self.config.get("assistant_mode", True))
+            if assistant_mode:
+                processor = ManualHelperProcessor(
+                    config=self.config, command_bridge=self.command_bridge,
+                    state_manager=self.state_mgr, stop_event=self.stop_event,
+                    pause_event=self.pause_event,
+                )
+            else:
+                gemini_browser_mode = str(self.config.get("gemini_browser_mode", "existing_chrome_mac"))
+                gemini_web_enabled = bool(self.config.get("gemini_web_enabled", True))
+                gemini_mode = str(self.config.get("gemini_mode", "new"))
+                gemini_custom_url = str(self.config.get("gemini_custom_url", "https://gemini.google.com/app"))
+                gemini_url = gemini_custom_url if gemini_mode == "custom" and gemini_custom_url else "https://gemini.google.com/app"
+                gemini_page = self.session.get_gemini_page() if gemini_web_enabled and gemini_browser_mode == "managed_playwright" else None
+                stats_page = self.session.get_stats_page() if like_enabled and self.config.get("daily_visitor_guard_enabled", True) else None
+                processor = PostProcessor(
+                    config=self.config,
+                    like_enabled=like_enabled,
+                    comment_enabled=comment_enabled,
+                    comment_template=str(self.config.get("comment_template", "")),
+                    secret_comment=bool(self.config.get("secret_comment", False)),
+                    ai_clipboard_enabled=bool(self.config.get("ai_clipboard_enabled", True)),
+                    ai_context_max_chars=int(self.config.get("ai_context_max_chars", 700)),
+                    ai_prompt_style=str(self.config.get("ai_prompt_style", "warm_short")),
+                    gemini_browser_mode=gemini_browser_mode,
+                    gemini_web_enabled=gemini_web_enabled,
+                    gemini_url=gemini_url,
+                    gemini_page=gemini_page,
+                    stats_page=stats_page,
+                    pacing_service=self.pacing,
+                    command_bridge=self.command_bridge,
+                    state_manager=self.state_mgr,
+                    stop_event=self.stop_event,
+                    pause_event=self.pause_event,
+                )
 
             processed_keys = set()
             scroll_attempts = 0
 
             logger.log("==================================================")
-            logger.log(f"🤖 [ASSISTANT] 피드 작업 시작 (목표: 최대 {max_items}개)")
+            logger.log(f"[ASSISTANT] 피드 작업 시작 (목표: 최대 {max_items}개)")
 
             # 3. 디스커버리 및 처리 루프
             while len(processed_keys) < max_items and not self.stop_event.is_set():
@@ -196,10 +192,12 @@ class FeedController:
                     should_like = like_enabled and not is_local_liked
                     should_comment = comment_enabled and not is_local_commented
 
-                    if not should_like and not should_comment:
-                        logger.log(f"  ⏭️ [IDEMPOTENT] 로컬 기록 상 이미 공감 및 댓글 완료된 글입니다: {post.key}")
+                    if not assistant_mode and not should_like and not should_comment:
+                        logger.log(f"[IDEMPOTENT] 이미 공감·댓글 처리된 글을 건너뜁니다: {post.key}")
                         continue
 
+                    # Every discovered post opens the manual helper, even when both
+                    # legacy automation flags are false or local history already exists.
                     action_plan = PostActionPlan(
                         process_like=should_like,
                         process_comment=should_comment,
@@ -211,45 +209,52 @@ class FeedController:
                     try:
                         result = processor.process(detail_page, post, action_plan=action_plan)
                         self.history.record_result(result)
-                    except StopRequestedException:
+                    except UserStopRequestedError:
                         raise
                     except FatalSessionError:
                         raise
                     except RecoverablePostError as rpe:
-                        logger.log(f"  ⚠️ [POST_RECOVERABLE] 글 처리 오류 격리 ({post.key}): {rpe}", "WARNING")
+                        logger.log(f"  [POST_RECOVERABLE] 글 처리 오류 격리 ({post.key}): {rpe}", "WARNING")
                         failed_res = PostProcessResult(
                             post=post,
                             like_result=LikeProcessResult(state_before=LikeState.UNKNOWN, action_taken=False, state_after=LikeState.UNKNOWN, error=str(rpe)),
                             comment_result=CommentProcessResult(status=CommentSubmitState.FAILED, error=str(rpe))
                         )
                         self.history.record_result(failed_res)
-                        continue
+                        self.stop_event.set()
+                        break
 
                     if self.stop_event.is_set():
                         break
 
-                    # 4. 다음 글로 넘어가기 전 Pacing 대기 및 Random Pause
-                    p_res = self.pacing.wait_next_post()
-                    if p_res.interrupted or self.stop_event.is_set():
-                        break
-
-                    p_pause = self.pacing.maybe_pause()
-                    if p_pause and p_pause.interrupted or self.stop_event.is_set():
-                        break
+                    # Automated mode keeps the prior per-post pacing and
+                    # random pause behavior. Manual mode waits for explicit
+                    # next/skip controls in the browser panel.
+                    if not assistant_mode:
+                        p_res = self.pacing.wait_next_post()
+                        if p_res.interrupted or self.stop_event.is_set():
+                            break
+                        p_pause = self.pacing.maybe_pause()
+                        if p_pause and p_pause.interrupted or self.stop_event.is_set():
+                            break
 
             if self.stop_event.is_set():
-                self.state_mgr.update(new_state=FeedState.STOPPED, message="사용자에 의해 작업이 중지되었습니다.")
-                logger.log("⏹ [ASSISTANT] 사용자 요청으로 작업 중지 완료.", "WARNING")
+                self.state_mgr.update(new_state=FeedState.STOPPED, message="작업을 중지했습니다. 수정한 초안은 이 기기에 보존됩니다.")
+                logger.log("[ASSISTANT] 사용자 요청으로 작업 중지 완료.", "WARNING")
             else:
                 self.state_mgr.update(new_state=FeedState.COMPLETED, message=f"작업 완료! (총 {len(processed_keys)}개 처리)")
-                logger.log(f"✅ [ASSISTANT] 전체 피드 작업 완료! (총 {len(processed_keys)}개 처리 완료)")
+                logger.log(f"[ASSISTANT] 전체 피드 작업 완료! (총 {len(processed_keys)}개 처리 완료)")
 
-        except StopRequestedException:
-            self.state_mgr.update(new_state=FeedState.STOPPED, message="작업 중지됨.")
-            logger.log("⏹ [ASSISTANT] 작업 중지 요청 수신.", "WARNING")
+        except UserStopRequestedError:
+            self.state_mgr.update(new_state=FeedState.STOPPED, message="작업을 중지했습니다. 수정한 초안은 이 기기에 보존됩니다.")
+            logger.log("[ASSISTANT] 작업 중지 요청 수신.", "WARNING")
         except Exception as e:
-            self.state_mgr.update(new_state=FeedState.ERROR, message=f"오류 발생: {e}")
-            logger.log(f"❌ [ASSISTANT] 작업 중 오류 발생: {e}", "ERROR")
+            # Page/provider exception bodies can contain URLs, account data or
+            # response payloads. Keep the operator-facing error actionable but
+            # bounded; the detailed local log remains available for diagnosis.
+            code = type(e).__name__
+            self.state_mgr.update(new_state=FeedState.ERROR, message=f"작업 중단: {code}. 로그인·프로필 사용 상태를 확인하세요.")
+            logger.log(f"[ASSISTANT] 작업 중 오류 발생 ({code})", "ERROR")
         finally:
             if self.session:
                 self.session.close()

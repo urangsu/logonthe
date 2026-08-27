@@ -1,6 +1,9 @@
 import os
 import json
 import tempfile
+import hashlib
+import fcntl
+from pathlib import Path
 from typing import Dict, Any, Optional
 from app.models import FeedSourceType
 from src.logger import logger
@@ -13,8 +16,9 @@ DEFAULT_CONFIG_V2: Dict[str, Any] = {
     "schema_version": 2,
     "feed_source": FeedSourceType.NEIGHBOR.value,
     "max_feed_items": 20,
-    "like_enabled": True,
-    "comment_enabled": True,
+    "assistant_mode": True,
+    "like_enabled": False,
+    "comment_enabled": False,
     "comment_template": "{사진 분위기가 너무 좋네요|정말 좋아 보여요|보기만 해도 기분 좋아지는 글이네요} :)",
     "general_suffix": "오늘도 좋은 하루 보내세요 :)",
     "fixed_suffix": "오늘도 좋은 하루 보내세요 :)",
@@ -50,7 +54,7 @@ DEFAULT_CONFIG_V2: Dict[str, Any] = {
 
     # Gemini Browser Mode: "existing_chrome_mac" 또는 "managed_playwright"
     "gemini_browser_mode": "existing_chrome_mac",
-    "gemini_web_enabled": True,
+    "gemini_web_enabled": False,
     "gemini_mode": "new",
     "gemini_custom_url": "https://gemini.google.com/app/0a1545681329aa0a?hl=ko",
 
@@ -84,6 +88,10 @@ def migrate_config_v1_to_v2(old_data: Dict[str, Any]) -> Dict[str, Any]:
     return cfg
 
 
+class ConfigConflictError(RuntimeError):
+    """Another process edited the configuration; reload before saving."""
+
+
 class ConfigService:
     def __init__(self, config_path: Optional[str] = None):
         if config_path:
@@ -95,6 +103,7 @@ class ConfigService:
         else:
             self.config_path = RUNTIME_CONFIG_PATH
 
+        self.config_path = os.path.abspath(self.config_path)
         self.data: Dict[str, Any] = self.load()
 
     def _atomic_save(self, data: Dict[str, Any]):
@@ -106,6 +115,8 @@ class ConfigService:
         try:
             with os.fdopen(temp_fd, "w", encoding="utf-8") as f:
                 json.dump(data, f, ensure_ascii=False, indent=2)
+                f.flush()
+                os.fsync(f.fileno())
             os.replace(temp_path, self.config_path)
         except Exception as e:
             if os.path.exists(temp_path):
@@ -117,47 +128,57 @@ class ConfigService:
             raise
 
     def load(self) -> Dict[str, Any]:
-        if not os.path.exists(self.config_path):
-            self._atomic_save(DEFAULT_CONFIG_V2)
+        path = Path(self.config_path)
+        self._original = path.read_bytes() if path.exists() else None
+        if self._original is None:
             return DEFAULT_CONFIG_V2.copy()
-
         try:
-            with open(self.config_path, "r", encoding="utf-8") as f:
-                loaded = json.load(f)
-
+            loaded = json.loads(self._original)
+            if not isinstance(loaded, dict):
+                raise ValueError('config_must_be_object')
             if loaded.get("schema_version", 1) < 2:
                 migrated = migrate_config_v1_to_v2(loaded)
-                self._atomic_save(migrated)
+                # Retain unknown/legacy settings; migration is in memory until explicit save.
+                migrated = dict(loaded, **migrated)
                 return migrated
-
             merged = DEFAULT_CONFIG_V2.copy()
             merged.update(loaded)
             return merged
-        except Exception as e:
-            logger.log(f"[CONFIG] 설정 로드 중 예외, 기본값 적용: {e}", "WARNING")
-            return DEFAULT_CONFIG_V2.copy()
+        except (ValueError, TypeError) as e:
+            raise ValueError('설정 파일을 읽을 수 없습니다. 원본은 변경하지 않았습니다: ' + self.config_path) from e
 
     def save(self, data: Dict[str, Any]):
         merged = DEFAULT_CONFIG_V2.copy()
         merged.update(self.data)
         merged.update(data)
         merged["schema_version"] = 2
-        self._atomic_save(merged)
+        path = Path(self.config_path)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        with open(str(path) + '.lock', 'a') as lock:
+            fcntl.flock(lock, fcntl.LOCK_EX)
+            current = path.read_bytes() if path.exists() else None
+            if current != self._original:
+                raise ConfigConflictError('다른 작업이 설정을 변경했습니다. 앱을 다시 열어 최신 설정을 확인하세요.')
+            if current is not None:
+                backup_dir = path.parent / 'config_backups'
+                backup_dir.mkdir(exist_ok=True)
+                backup = backup_dir / (path.name + '.' + hashlib.sha256(current).hexdigest()[:16] + '.bak')
+                if not backup.exists():
+                    with open(backup, 'xb') as out:
+                        out.write(current)
+                        out.flush()
+                        os.fsync(out.fileno())
+            self._atomic_save(merged)
+            self._original = path.read_bytes()
         self.data = merged
 
     def update_many(self, values: Dict[str, Any]) -> Dict[str, Any]:
         """부분 딕셔너리 안전 병합 및 원자적 저장"""
-        merged = DEFAULT_CONFIG_V2.copy()
-        merged.update(self.data)
-        merged.update(values)
-        merged["schema_version"] = 2
-        self._atomic_save(merged)
-        self.data = merged
+        self.save(values)
         return self.data
 
     def get(self, key: str, default: Any = None) -> Any:
         return self.data.get(key, default)
 
     def set(self, key: str, value: Any):
-        self.data[key] = value
         self.update_many({key: value})

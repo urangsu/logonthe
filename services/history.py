@@ -38,7 +38,7 @@ class HistoryStore:
                         "url": url,
                         "comment": {"status": "submitted", "legacy": True}
                     }
-                self.save()
+                # Read-only migration; retain the original until an actual result is saved.
             elif isinstance(data, dict):
                 self.posts = data.get("posts", {})
         except Exception as e:

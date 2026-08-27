@@ -49,12 +49,17 @@ class FailureReason(str, Enum):
 
 class WorkerCommandType(str, Enum):
     APPLY_CLIPBOARD_COMMENT = "apply_clipboard_comment"
+    HELPER_ACTION = "helper_action"
 
 
 @dataclass
 class WorkerCommand:
     kind: WorkerCommandType
     text: str = ""
+    post_key: str = ""
+    request_id: str = ""
+    navigation_version: int = 0
+    action: str = ""
 
 
 @dataclass

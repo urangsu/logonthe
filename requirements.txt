@@ -2,3 +2,6 @@ playwright>=1.40.0
 customtkinter>=5.2.0
 pillow>=10.0.0
 requests>=2.31.0
+google-auth>=2.38,<3
+google-auth-oauthlib>=1.2,<2
+keyring>=25,<26

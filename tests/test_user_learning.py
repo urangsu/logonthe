@@ -1,6 +1,7 @@
 import os
 import json
 import unittest
+import tempfile
 from unittest.mock import MagicMock, patch
 from app.models import FeedPost, FeedSourceType
 from services.user_learning_service import UserLearningService, USER_LEARNING_FILE
@@ -12,6 +13,8 @@ from services.comments.intents import CommentCandidate, ReactionIntent, FirstPer
 class TestUserLearningAndCorpus(unittest.TestCase):
     def setUp(self):
         # 임시 테스트 경로 설정
+        self.temp_dir = tempfile.TemporaryDirectory()
+        self.addCleanup(self.temp_dir.cleanup)
         self.orig_user_file = USER_LEARNING_FILE
         self.orig_acc_file = ACCUMULATED_COMMENTS_FILE
 
@@ -45,7 +48,7 @@ class TestUserLearningAndCorpus(unittest.TestCase):
 
     def test_user_learning_service_records_edit(self):
         """사용자가 수정한 최종 댓글이 학습용 JSON 파일에 올바르게 축적되는지 검증"""
-        test_file = "/tmp/test_user_learning.json"
+        test_file = os.path.join(self.temp_dir.name, 'learning.json')
         with patch("services.user_learning_service.USER_LEARNING_FILE", test_file):
             if os.path.exists(test_file):
                 os.remove(test_file)

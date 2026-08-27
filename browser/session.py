@@ -9,7 +9,11 @@ from playwright.sync_api import sync_playwright, Playwright, BrowserContext, Pag
 from app.errors import BrowserDisconnectedError
 from src.logger import logger
 
-USER_DATA_DIR = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "data", "browser_profile"))
+# Keep the profile directory used by the pre-V1.1 app. Switching between
+# `user_profile` and `browser_profile` makes Naver appear logged out because
+# Chromium stores cookies per directory. The newer directory is left intact;
+# this runtime consistently reuses the historical login profile.
+USER_DATA_DIR = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "data", "user_profile"))
 LOCK_FILE = os.path.join(USER_DATA_DIR, ".profile_lock")
 
 

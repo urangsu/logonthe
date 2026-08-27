@@ -1,173 +1,68 @@
-import os
+"""Per-run exports; legacy files and same-day reports are never overwritten."""
 import csv
 import json
-import time
-from typing import Dict, Any, List, Tuple
+import os
+from pathlib import Path
+import re
+import shutil
+import tempfile
+from uuid import uuid4
 
-AUDIT_JSON_PATH = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "data", "my_blog_engagement_audit.json"))
+AUDIT_JSON_PATH = str(Path(__file__).resolve().parent.parent / "data" / "my_blog_engagement_audit.json")
+DEFAULT_EXPORT_DIR = Path(__file__).resolve().parent.parent / "data" / "audit_exports"
+
+
+def csv_cell(value):
+    if value is None: return ""
+    if isinstance(value, str) and value.lstrip().startswith(("=", "+", "-", "@", "\t", "\r")):
+        return "'" + value
+    return value
 
 
 class EngagementAuditStore:
-    """
-    내 블로그 전체 이웃 기준 감사 및 무반응 이웃 감사 리포트 저장소 (v8.0)
-    - 1. Master 이웃 감사 CSV: data/buddy_engagement_audit_YYYYMMDD.csv
-    - 2. 무반응 이웃 전용 CSV: data/unresponsive_buddies_YYYYMMDD.csv
-    - 3. 비이웃 반응자 CSV: data/non_buddy_reactors_YYYYMMDD.csv
-    - 4. 종합 감사 JSON: data/my_blog_engagement_audit.json
-    """
+    @classmethod
+    def get_file_paths(cls, directory=None, run_id=None):
+        identity = run_id or str(uuid4())
+        if not re.fullmatch(r"[A-Za-z0-9_-]{1,100}", identity): raise ValueError("invalid export run_id")
+        root = Path(directory or DEFAULT_EXPORT_DIR) / identity
+        return tuple(str(root / name) for name in ("report.json", "master.csv", "unresponsive.csv", "non_buddy.csv"))
 
     @classmethod
-    def get_file_paths(cls) -> Tuple[str, str, str, str]:
-        date_str = time.strftime("%Y%m%d")
-        data_dir = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "data"))
-        os.makedirs(data_dir, exist_ok=True)
-
-        json_path = os.path.join(data_dir, "my_blog_engagement_audit.json")
-        master_csv = os.path.join(data_dir, f"buddy_engagement_audit_{date_str}.csv")
-        unresp_csv = os.path.join(data_dir, f"unresponsive_buddies_{date_str}.csv")
-        non_buddy_csv = os.path.join(data_dir, f"non_buddy_reactors_{date_str}.csv")
-
-        return json_path, master_csv, unresp_csv, non_buddy_csv
-
-    @classmethod
-    def save_v8(cls, report: Dict[str, Any]) -> Tuple[str, str, str, str]:
-        json_path, master_csv, unresp_csv, non_buddy_csv = cls.get_file_paths()
-
-        # 1. 종합 JSON 저장
-        with open(json_path, "w", encoding="utf-8") as f:
-            json.dump(report, f, ensure_ascii=False, indent=2)
-
-        # 공통 Master/Unresponsive 필드 (한글 헤더 및 명확한 참여/무반응 분류)
-        buddy_fieldnames = [
-            "블로그ID",
-            "닉네임",
-            "블로그명",
-            "그룹명",
-            "이웃구분",
-            "반응상태",
-            "참여여부",
-            "이웃추가일",
-            "최근글작성일",
-            "공감한글수",
-            "댓글단글수",
-            "총댓글개수",
-            "반응한글수",
-            "글1_반응",
-            "글2_반응",
-            "글3_반응",
-            "글4_반응",
-            "글5_반응",
-            "신규유예여부",
-            "검사완료여부",
-            "공감만참여",
-            "댓글만참여",
-            "공감댓글모두",
-            "무반응여부"
-        ]
-
-        def format_buddy_row(row: Dict[str, Any]) -> Dict[str, Any]:
-            post_r = row.get("post_reactions", {})
-            r_status = row.get("reaction_status")
-            if not r_status:
-                if row.get("both_like_and_comment"):
-                    r_status = "공감+댓글"
-                elif row.get("commented_only"):
-                    r_status = "댓글만"
-                elif row.get("liked_only"):
-                    r_status = "공감만"
-                elif row.get("is_recent_buddy"):
-                    r_status = "신규유예"
-                else:
-                    r_status = "무반응"
-
-            is_part = "참여" if row.get("engaged_post_count", 0) > 0 or r_status in ("공감+댓글", "댓글만", "공감만") else "미참여"
-
-            return {
-                "블로그ID": row.get("blog_id", ""),
-                "닉네임": row.get("nickname", ""),
-                "블로그명": row.get("blog_title", ""),
-                "그룹명": row.get("group_name", ""),
-                "이웃구분": row.get("buddy_type", "이웃"),
-                "반응상태": r_status,
-                "참여여부": is_part,
-                "이웃추가일": row.get("added_date", ""),
-                "최근글작성일": row.get("last_post_date", ""),
-                "공감한글수": row.get("like_count", 0),
-                "댓글단글수": row.get("comment_count", 0),
-                "총댓글개수": row.get("comment_entry_count", 0),
-                "반응한글수": row.get("engaged_post_count", 0),
-                "글1_반응": post_r.get(1, "-"),
-                "글2_반응": post_r.get(2, "-"),
-                "글3_반응": post_r.get(3, "-"),
-                "글4_반응": post_r.get(4, "-"),
-                "글5_반응": post_r.get(5, "-"),
-                "신규유예여부": "유예대상" if row.get("is_recent_buddy") else "일반",
-                "검사완료여부": "완료" if row.get("scan_complete") else "일부",
-                "공감만참여": "O" if row.get("liked_only") else "X",
-                "댓글만참여": "O" if row.get("commented_only") else "X",
-                "공감댓글모두": "O" if row.get("both_like_and_comment") else "X",
-                "무반응여부": "O" if row.get("no_reaction") else "X"
-            }
-
-        # 2. Master CSV 저장 (전체 이웃)
-        master_list = report.get("master_buddies", [])
-        with open(master_csv, "w", encoding="utf-8-sig", newline="") as f:
-            writer = csv.DictWriter(f, fieldnames=buddy_fieldnames)
-            writer.writeheader()
-            for b in master_list:
-                writer.writerow(format_buddy_row(b))
-
-        # 3. 무반응 이웃 전용 CSV 저장
-        unresp_list = report.get("unresponsive_buddies", [])
-        with open(unresp_csv, "w", encoding="utf-8-sig", newline="") as f:
-            writer = csv.DictWriter(f, fieldnames=buddy_fieldnames)
-            writer.writeheader()
-            for u in unresp_list:
-                writer.writerow(format_buddy_row(u))
-
-        # 4. 비이웃 반응자 CSV 저장
-        non_buddies = report.get("non_buddy_reactors", [])
-        non_buddy_fieldnames = [
-            "블로그ID",
-            "닉네임",
-            "반응상태",
-            "참여여부",
-            "공감한글수",
-            "댓글단글수",
-            "총댓글개수",
-            "반응한글수",
-            "글1_반응",
-            "글2_반응",
-            "글3_반응",
-            "글4_반응",
-            "글5_반응",
-            "프로필URL"
-        ]
-        with open(non_buddy_csv, "w", encoding="utf-8-sig", newline="") as f:
-            writer = csv.DictWriter(f, fieldnames=non_buddy_fieldnames)
-            writer.writeheader()
-            for nb in non_buddies:
-                nb_post_r = nb.get("post_reactions", {})
-                writer.writerow({
-                    "블로그ID": nb.get("blog_id", ""),
-                    "닉네임": nb.get("nickname", ""),
-                    "반응상태": nb.get("reaction_status", "참여"),
-                    "참여여부": "참여",
-                    "공감한글수": nb.get("like_count", 0),
-                    "댓글단글수": nb.get("comment_count", 0),
-                    "총댓글개수": nb.get("comment_entry_count", 0),
-                    "반응한글수": nb.get("engaged_post_count", 0),
-                    "글1_반응": nb_post_r.get(1, "-"),
-                    "글2_반응": nb_post_r.get(2, "-"),
-                    "글3_반응": nb_post_r.get(3, "-"),
-                    "글4_반응": nb_post_r.get(4, "-"),
-                    "글5_반응": nb_post_r.get(5, "-"),
-                    "프로필URL": nb.get("profile_url", "")
-                })
-
-        return json_path, master_csv, unresp_csv, non_buddy_csv
-
-    # 하위 호환 save
-    @classmethod
-    def save(cls, report: Dict[str, Any]):
-        return cls.save_v8(report)
+    def save_v8(cls, report, directory=None):
+        paths = cls.get_file_paths(directory, report.get("run_id"))
+        target = Path(paths[0]).parent
+        target.parent.mkdir(parents=True, exist_ok=True)
+        if target.exists(): raise FileExistsError("immutable audit export already exists")
+        staging = Path(tempfile.mkdtemp(prefix=".audit-export-", dir=target.parent))
+        try:
+            with (staging / "report.json").open("x", encoding="utf-8") as file:
+                json.dump(report, file, ensure_ascii=False, indent=2, allow_nan=False)
+            count = min(20, max(5, report.get("requested_post_count", report.get("recent_post_count", 5)) or 5))
+            mapping = {"블로그ID": "blog_id", "닉네임": "nickname", "블로그명": "blog_title", "그룹명": "group_name", "이웃구분": "buddy_type",
+                "반응상태": "reaction_status", "참여여부": "is_participated", "이웃추가일": "added_date", "최근글작성일": "last_post_date",
+                "새글소식설정": "new_posts_setting", "설정관측시각": "setting_observed_at", "공감한글수": "like_count", "댓글단글수": "comment_count",
+                "총댓글개수": "comment_entry_count", "반응한글수": "engaged_post_count", "관측공감글수하한": "observed_like_count",
+                "관측댓글글수하한": "observed_comment_count", "관측댓글개수하한": "observed_comment_entry_count", "유효글수": "eligible_post_count"}
+            fields = list(mapping) + [f"글{i}_반응" for i in range(1, count + 1)] + ["신규유예여부", "검사완료여부", "공감만참여", "댓글만참여", "공감댓글모두", "무반응여부", "제외사유", "실행ID", "출처", "감사상태"]
+            for name, key in (("master.csv", "master_buddies"), ("unresponsive.csv", "unresponsive_buddies"), ("non_buddy.csv", "non_buddy_reactors")):
+                with (staging / name).open("x", newline="", encoding="utf-8-sig") as file:
+                    writer = csv.DictWriter(file, fieldnames=fields)
+                    writer.writeheader()
+                    for row in report.get(key, []):
+                        formatted = {header: row.get(source) for header, source in mapping.items()}
+                        formatted["반응상태"] = row.get("reaction_status", "확인불가")
+                        formatted["참여여부"] = row.get("is_participated", "확인불가")
+                        reactions = row.get("post_reactions", {})
+                        formatted.update({f"글{i}_반응": reactions.get(str(i), reactions.get(i, "확인불가")) for i in range(1, count + 1)})
+                        def flag(value): return "O" if value is True else "X" if value is False else "확인불가"
+                        formatted.update({"신규유예여부": "유예대상" if row.get("is_recent_buddy") is True else "유예아님" if row.get("is_recent_buddy") is False else "확인불가",
+                            "검사완료여부": flag(row.get("scan_complete")), "공감만참여": flag(row.get("liked_only")), "댓글만참여": flag(row.get("commented_only")),
+                            "공감댓글모두": flag(row.get("both_like_and_comment")), "무반응여부": flag(row.get("no_reaction")), "제외사유": "; ".join(row.get("exclusion_reasons", [])),
+                            "실행ID": report.get("run_id"), "출처": report.get("source_kind", "legacy_unverified"), "감사상태": report.get("audit_state", "partial")})
+                        writer.writerow({header: csv_cell(value) for header, value in formatted.items()})
+            # Same-filesystem rename publishes a whole run; no consumer sees half-written exports.
+            if target.exists(): raise FileExistsError("immutable audit export already exists")
+            os.rename(staging, target)
+        finally:
+            if staging.exists(): shutil.rmtree(staging)
+        return paths
