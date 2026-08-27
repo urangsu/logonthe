@@ -57,3 +57,16 @@ python3 main.py
 ```bash
 python3 -m unittest tests/test_units.py
 ```
+
+## macOS 더블클릭 실행
+
+최초 1회만 의존성과 Playwright 브라우저를 설치한 뒤 프로젝트 폴더의 **`Naver Blog Assistant.command`**를 더블클릭하면 실행됩니다. 실행 때마다 설치하지 않으며, 프로젝트 안에 `.venv/bin/python`이 있으면 그 환경을 우선 사용합니다.
+
+```bash
+cd /Volumes/무제/jusik/naver-blog-bot-v12-recovery
+python3 -m venv .venv
+.venv/bin/python -m pip install -r requirements.txt
+.venv/bin/python -m playwright install chromium
+```
+
+네이버 로그인 쿠키는 `data/user_profile`에 보존됩니다. 프로필이 사용 중이면 기존 브라우저를 강제 종료하지 않고 안내 후 작업을 중단합니다.

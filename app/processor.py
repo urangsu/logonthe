@@ -115,6 +115,13 @@ class PostProcessor:
 
         # 2. 공감(하트) 처리 (Re-ordered Like Pipeline: State -> Popularity Guard -> Transaction)
         if effective_like:
+            # Keep the configured human pacing before the first mutating
+            # action as well as between actions.  This is intentionally
+            # cancellable and never bypasses the state/confidence checks below.
+            if self.pacing:
+                p_res = self.pacing.wait_action()
+                if p_res.interrupted:
+                    raise StopRequestedException("작업 중지 요청됨")
             if self.state_mgr:
                 self.state_mgr.update(new_state=FeedState.CHECKING_LIKE, message="공감 상태 및 조건 확인 중...")
 
@@ -207,6 +214,19 @@ class PostProcessor:
                     context = ContentContextExtractor.extract(detail_page, post, max_chars=self.ai_context_max_chars)
                     post.title = context.title or post.title
                     post.excerpt = context.excerpt
+                    if not post.excerpt.strip():
+                        # Never manufacture a plausible reply from a title
+                        # when the locked/changed page yielded no body.
+                        logger.log("  ⚠️ [COMMENT] 본문을 확인하지 못해 제목만으로 댓글을 만들지 않았습니다. 페이지를 확인하거나 발췌문을 보완해 주세요.", "WARNING")
+                        result.comment_result = CommentProcessResult(
+                            status=CommentSubmitState.FAILED,
+                            error="content_extraction_insufficient"
+                        )
+                        if self.state_mgr:
+                            self.state_mgr.update(current_post_title=post.title or "", current_post_excerpt="")
+                        # Like, if any, remains recorded; this post is
+                        # recoverable and the controller may continue.
+                        return result
                     suffix = DraftService.resolve_suffix(post.source, self.config)
 
                     ai_prompt = ""

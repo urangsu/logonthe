@@ -15,13 +15,14 @@ class EngagementAuditService:
     내 블로그 전체 이웃 기준 감사 및 무반응 이웃 식별 엔진 (v8.0 Master Rebuild)
     - 전체 이웃 전수(N명)를 베이스라인으로 100% 포괄하는 Master Join
     - 최근 실제 게시글 5개 대상 공감글수(0~5), 댓글글수(0~5), 댓글개수 전수 합산
-    - no_reaction = (like_count == 0 and comment_count == 0)
+    - no_reaction = True only for a COMPLETE scan with like/comment both zero;
+      partial scans retain None (unknown)
     - 비이웃 반응자(non_buddy_reactors) 분리
     """
 
     @staticmethod
     def is_grace_period(added_date_str: str, days: int = 2) -> bool:
-        """이웃 추가일이 최근 N일(기본 2일/48시간) 이내인지 판별"""
+        """한국 날짜 기준 이웃 추가일 이후 N일 이내인지 판별."""
         if not added_date_str:
             return False
         try:
@@ -95,6 +96,9 @@ class EngagementAuditService:
                 "buddy_type": b_info.buddy_type,
                 "added_date": b_info.added_date,
                 "last_post_date": b_info.last_post_date or "",
+                "new_posts_setting": getattr(b_info, "new_posts_setting", "unknown"),
+                "setting_observed_at": getattr(b_info, "setting_observed_at", None),
+                "setting_evidence": getattr(b_info, "setting_evidence", None),
                 "like_count": 0,
                 "comment_count": 0,
                 "comment_entry_count": 0,
@@ -102,12 +106,16 @@ class EngagementAuditService:
                 "liked_only": False,
                 "commented_only": False,
                 "both_like_and_comment": False,
-                "no_reaction": True,
+                # A zero count is only a confirmed no-reaction when every
+                # requested post and the buddy baseline were fully scanned.
+                # Until then it remains unknown and must not enter the
+                # unresponsive list.
+                "no_reaction": None,
                 "is_recent_buddy": cls.is_grace_period(b_info.added_date, days=2),
                 "reaction_status": "무반응",
                 "is_participated": "미참여",
                 "post_reactions": {1: "-", 2: "-", 3: "-", 4: "-", 5: "-"},
-                "scan_complete": True
+                "scan_complete": False
             }
 
         # 비이웃 반응자 맵
@@ -219,7 +227,7 @@ class EngagementAuditService:
             row["liked_only"] = (l_cnt > 0 and c_cnt == 0)
             row["commented_only"] = (c_cnt > 0 and l_cnt == 0)
             row["both_like_and_comment"] = (l_cnt > 0 and c_cnt > 0)
-            row["no_reaction"] = (l_cnt == 0 and c_cnt == 0)
+            row["no_reaction"] = True if all_post_scans_complete and l_cnt == 0 and c_cnt == 0 else (False if l_cnt > 0 or c_cnt > 0 else None)
             row["scan_complete"] = all_post_scans_complete
 
             # 명확한 한글 분류 상태값 지정
@@ -232,15 +240,18 @@ class EngagementAuditService:
             elif row["liked_only"]:
                 row["reaction_status"] = "공감만"
                 row["is_participated"] = "참여"
-            elif row["is_recent_buddy"]:
-                row["reaction_status"] = "신규유예"
-                row["is_participated"] = "미참여"
-            else:
+            elif row["no_reaction"] is True:
                 row["reaction_status"] = "무반응"
                 row["is_participated"] = "미참여"
+            elif row["no_reaction"] is None:
+                row["reaction_status"] = "확인 불가"
+                row["is_participated"] = "확인 불가"
+            else:
+                row["reaction_status"] = "확인 불가"
+                row["is_participated"] = "확인 불가"
 
             master_rows.append(row)
-            if row["no_reaction"]:
+            if row["no_reaction"] is True:
                 unresponsive_rows.append(row)
 
         # 비이웃 반응자 상태값 지정
@@ -269,12 +280,15 @@ class EngagementAuditService:
         # [Step 5] 통계 산출
         total_buddies = len(master_rows)
         unresponsive_count = len(unresponsive_rows)
-        reacted_buddies_count = total_buddies - unresponsive_count
+        reacted_buddies_count = sum(1 for r in master_rows if r["engaged_post_count"] > 0)
+        unknown_buddies_count = sum(1 for r in master_rows if r["engaged_post_count"] == 0 and r["no_reaction"] is None)
         both_count = sum(1 for r in master_rows if r["both_like_and_comment"])
         liked_only_count = sum(1 for r in master_rows if r["liked_only"])
         commented_only_count = sum(1 for r in master_rows if r["commented_only"])
         grace_count = sum(1 for r in unresponsive_rows if r["is_recent_buddy"])
-        real_unresponsive_count = unresponsive_count - grace_count
+        # New-buddy status is a reference field only.  It never removes a
+        # confirmed no-reaction row from the audit result.
+        real_unresponsive_count = unresponsive_count
 
         audit_state: Literal["complete", "partial", "failed"] = "complete" if all_post_scans_complete else "partial"
 
@@ -287,6 +301,7 @@ class EngagementAuditService:
             "expected_buddies_count": buddy_result.expected_total,
             "reacted_buddies_count": reacted_buddies_count,
             "unresponsive_buddies_count": unresponsive_count,
+            "unknown_buddies_count": unknown_buddies_count,
             "grace_period_buddies_count": grace_count,
             "real_unresponsive_count": real_unresponsive_count,
             "both_like_and_comment_count": both_count,
@@ -306,7 +321,7 @@ class EngagementAuditService:
         logger.log(f"🎉 [AUDIT] 전체 이웃 {total_buddies}명 기준 무반응 감사 완료! (상태: {audit_state.upper()})")
         logger.log(f"   👥 전체 등록 이웃 (Master): {total_buddies}명")
         logger.log(f"   ❤️ 최근 글에 반응한 이웃: {reacted_buddies_count}명 (공감+댓글 모두: {both_count}명, 공감만: {liked_only_count}명, 댓글만: {commented_only_count}명)")
-        logger.log(f"   🚫 최근 글 무반응 이웃: {unresponsive_count}명 (48시간 신규 유예: {grace_count}명 / 실질 무반응: {real_unresponsive_count}명)")
+        logger.log(f"   🚫 최근 글 무반응 이웃: {unresponsive_count}명 (추가일 기준 참고: {grace_count}명 / 확인된 무반응: {real_unresponsive_count}명)")
         logger.log(f"   🌐 비이웃 참여자: {len(non_buddies_list)}명")
         logger.log(f"   📁 Master 이웃 감사 CSV: {master_csv_path}")
         logger.log(f"   📁 무반응 이웃 전용 CSV: {unresp_csv_path}")

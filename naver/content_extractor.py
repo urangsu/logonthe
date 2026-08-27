@@ -26,15 +26,49 @@ class ContentContextExtractor:
     ]
 
     CONTENT_SELECTORS = [
-        ".se-main-container",
-        ".se-viewer",
-        "#postViewArea",
-        ".post_ct",
-        ".post_view",
-        "div.post_content",
-        "article",
-        "div#viewTypeSelector"
+        ".se-main-container", ".se-viewer", ".se_component_wrap", ".se_component",
+        "#postViewArea", "#postViewArea .se-viewer", ".post_ct", ".post_view",
+        "div.post_content", ".view_content", ".blog2_container", "article", "div#viewTypeSelector"
     ]
+
+    @classmethod
+    def _collect_candidates(cls, page: Page, max_chars: int) -> List[Tuple[int, str]]:
+        candidates: List[Tuple[int, str]] = []
+        try:
+            frames = list(page.frames)
+        except Exception:
+            frames = [page]
+        for frame in frames:
+            for sel in cls.CONTENT_SELECTORS:
+                try:
+                    locs = frame.locator(sel)
+                    for idx in range(min(locs.count(), 8)):
+                        el = locs.nth(idx)
+                        if not el.is_visible():
+                            continue
+                        raw = el.inner_text().strip()
+                        cleaned = cls.clean_text(raw, max_chars=max_chars)
+                        if len(cleaned) < 20:
+                            continue
+                        score = 100 + min(len(cleaned), 1000)
+                        if "댓글" in raw and len(cleaned) < 100:
+                            score -= 500
+                        if any(token in sel for token in ("se-main-container", "se-viewer", "postViewArea", "post_ct", "post_content")):
+                            score += 250
+                        if frame != page.main_frame:
+                            score += 40
+                        candidates.append((score, cleaned))
+                except Exception:
+                    continue
+            try:
+                body = frame.locator("body").first
+                if body.count() and body.is_visible():
+                    cleaned = cls.clean_text(body.inner_text().strip(), max_chars=max_chars)
+                    if len(cleaned) >= 40:
+                        candidates.append((120 + min(len(cleaned), 500), cleaned))
+            except Exception:
+                pass
+        return candidates
 
     @classmethod
     def clean_text(cls, raw_text: str, max_chars: int = 700) -> str:
@@ -66,37 +100,7 @@ class ContentContextExtractor:
         start_t = time.time()
 
         while time.time() - start_t < 3.5:
-            candidates: List[Tuple[int, str]] = []
-
-            for sel in cls.CONTENT_SELECTORS:
-                try:
-                    locs = page.locator(sel)
-                    cnt = locs.count()
-                    if cnt == 0:
-                        continue
-
-                    for idx in range(cnt):
-                        el = locs.nth(idx)
-                        if not el.is_visible():
-                            continue
-
-                        raw = el.inner_text().strip()
-                        cleaned = cls.clean_text(raw, max_chars=max_chars)
-                        length = len(cleaned)
-
-                        if length < 20:
-                            continue
-
-                        # 점수 계산
-                        score = 100 + min(length, 1000)
-                        if "댓글" in raw and length < 100:
-                            score -= 500
-                        if ".se-main-container" in sel or ".se-viewer" in sel:
-                            score += 200
-
-                        candidates.append((score, cleaned))
-                except Exception:
-                    continue
+            candidates = cls._collect_candidates(page, max_chars)
 
             if candidates:
                 candidates.sort(key=lambda x: x[0], reverse=True)

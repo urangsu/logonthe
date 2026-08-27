@@ -33,5 +33,6 @@
   "gemini_browser_mode": "existing_chrome_mac",
   "gemini_web_enabled": true,
   "gemini_mode": "new",
-  "gemini_custom_url": "https://gemini.google.com/app"
+  "gemini_custom_url": "https://gemini.google.com/app",
+  "workflow_mode": "assisted_auto"
 }

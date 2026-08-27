@@ -59,8 +59,22 @@ DEFAULT_CONFIG_V2: Dict[str, Any] = {
     "auto_prompt_learning_enabled": False,
     "auto_style_apply_enabled": False,
     "my_blog_id": "",
-    "engagement_audit_recent_posts": 5
+    "engagement_audit_recent_posts": 5,
+    # V1.2 keeps the main automated workflow as the default.  The manual
+    # helper is an explicit opt-in and never silently replaces the baseline.
+    "workflow_mode": "assisted_auto"
 }
+
+
+def migrate_workflow_mode(data: Dict[str, Any]) -> Dict[str, Any]:
+    """Map the retired assistant_mode flag without changing action settings."""
+    migrated = dict(data)
+    if migrated.get("workflow_mode") not in {"assisted_auto", "manual_helper"}:
+        if "assistant_mode" in migrated:
+            migrated["workflow_mode"] = "manual_helper" if bool(migrated["assistant_mode"]) else "assisted_auto"
+        else:
+            migrated["workflow_mode"] = "assisted_auto"
+    return migrated
 
 
 def migrate_config_v1_to_v2(old_data: Dict[str, Any]) -> Dict[str, Any]:
@@ -80,6 +94,7 @@ def migrate_config_v1_to_v2(old_data: Dict[str, Any]) -> Dict[str, Any]:
     if "fixed_suffix" in old_data and "general_suffix" not in old_data:
         cfg["general_suffix"] = old_data["fixed_suffix"]
 
+    cfg = migrate_workflow_mode(cfg)
     cfg["schema_version"] = 2
     return cfg
 
@@ -132,6 +147,7 @@ class ConfigService:
 
             merged = DEFAULT_CONFIG_V2.copy()
             merged.update(loaded)
+            merged = migrate_workflow_mode(merged)
             return merged
         except Exception as e:
             logger.log(f"[CONFIG] 설정 로드 중 예외, 기본값 적용: {e}", "WARNING")
@@ -141,6 +157,7 @@ class ConfigService:
         merged = DEFAULT_CONFIG_V2.copy()
         merged.update(self.data)
         merged.update(data)
+        merged = migrate_workflow_mode(merged)
         merged["schema_version"] = 2
         self._atomic_save(merged)
         self.data = merged
@@ -150,6 +167,7 @@ class ConfigService:
         merged = DEFAULT_CONFIG_V2.copy()
         merged.update(self.data)
         merged.update(values)
+        merged = migrate_workflow_mode(merged)
         merged["schema_version"] = 2
         self._atomic_save(merged)
         self.data = merged
