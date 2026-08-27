@@ -104,6 +104,9 @@ class EngagementAuditService:
                 "both_like_and_comment": False,
                 "no_reaction": True,
                 "is_recent_buddy": cls.is_grace_period(b_info.added_date, days=2),
+                "reaction_status": "무반응",
+                "is_participated": "미참여",
+                "post_reactions": {1: "-", 2: "-", 3: "-", 4: "-", 5: "-"},
                 "scan_complete": True
             }
 
@@ -161,6 +164,16 @@ class EngagementAuditService:
                 has_comment = r_id in post_commenter_ids
                 cmt_entries = post_commenter_ids[r_id]["comment_entry_count"] if has_comment else 0
 
+                # 포스트별 반응 유형
+                if has_like and has_comment:
+                    r_type = "공감+댓글"
+                elif has_like:
+                    r_type = "공감"
+                elif has_comment:
+                    r_type = "댓글"
+                else:
+                    r_type = "-"
+
                 if r_id in master_buddies_map:
                     mb = master_buddies_map[r_id]
                     if has_like:
@@ -169,6 +182,7 @@ class EngagementAuditService:
                         mb["comment_count"] += 1
                         mb["comment_entry_count"] += cmt_entries
                     mb["engaged_post_count"] += 1
+                    mb["post_reactions"][idx] = r_type
                 else:
                     # 비이웃 반응자 집계
                     if r_id not in non_buddy_map:
@@ -180,7 +194,10 @@ class EngagementAuditService:
                             "like_count": 0,
                             "comment_count": 0,
                             "comment_entry_count": 0,
-                            "engaged_post_count": 0
+                            "engaged_post_count": 0,
+                            "reaction_status": "미분류",
+                            "is_participated": "참여",
+                            "post_reactions": {1: "-", 2: "-", 3: "-", 4: "-", 5: "-"}
                         }
                     nb = non_buddy_map[r_id]
                     if has_like:
@@ -189,6 +206,7 @@ class EngagementAuditService:
                         nb["comment_count"] += 1
                         nb["comment_entry_count"] += cmt_entries
                     nb["engaged_post_count"] += 1
+                    nb["post_reactions"][idx] = r_type
 
         # [Step 4] Master Table Flag 계산 및 무반응자 추출
         master_rows: List[Dict[str, Any]] = []
@@ -204,9 +222,39 @@ class EngagementAuditService:
             row["no_reaction"] = (l_cnt == 0 and c_cnt == 0)
             row["scan_complete"] = all_post_scans_complete
 
+            # 명확한 한글 분류 상태값 지정
+            if row["both_like_and_comment"]:
+                row["reaction_status"] = "공감+댓글"
+                row["is_participated"] = "참여"
+            elif row["commented_only"]:
+                row["reaction_status"] = "댓글만"
+                row["is_participated"] = "참여"
+            elif row["liked_only"]:
+                row["reaction_status"] = "공감만"
+                row["is_participated"] = "참여"
+            elif row["is_recent_buddy"]:
+                row["reaction_status"] = "신규유예"
+                row["is_participated"] = "미참여"
+            else:
+                row["reaction_status"] = "무반응"
+                row["is_participated"] = "미참여"
+
             master_rows.append(row)
             if row["no_reaction"]:
                 unresponsive_rows.append(row)
+
+        # 비이웃 반응자 상태값 지정
+        for nb_id, nb_row in non_buddy_map.items():
+            nl = nb_row["like_count"]
+            nc = nb_row["comment_count"]
+            if nl > 0 and nc > 0:
+                nb_row["reaction_status"] = "공감+댓글"
+            elif nc > 0:
+                nb_row["reaction_status"] = "댓글만"
+            elif nl > 0:
+                nb_row["reaction_status"] = "공감만"
+            else:
+                nb_row["reaction_status"] = "기타"
 
         # 정렬: 
         # Master: 1) engaged_post_count desc, 2) group_name, 3) nickname

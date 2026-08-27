@@ -187,8 +187,11 @@ class TestEngagementAuditRebuildV8(unittest.TestCase):
             self.assertEqual(len(rows), 2)
             self.assertEqual(rows[0]["블로그ID"], "b1")
             self.assertEqual(rows[0]["블로그명"], "타이틀1")
-            self.assertEqual(rows[0]["공감댓글모두"], "Y")
-            self.assertEqual(rows[1]["무반응여부"], "Y")
+            self.assertEqual(rows[0]["반응상태"], "공감+댓글")
+            self.assertEqual(rows[0]["참여여부"], "참여")
+            self.assertEqual(rows[0]["공감댓글모두"], "O")
+            self.assertEqual(rows[1]["참여여부"], "미참여")
+            self.assertEqual(rows[1]["무반응여부"], "O")
 
         # Check Unresponsive CSV row count & Korean headers
         with open(unresp_csv, "r", encoding="utf-8-sig") as f:
@@ -196,7 +199,8 @@ class TestEngagementAuditRebuildV8(unittest.TestCase):
             rows = list(reader)
             self.assertEqual(len(rows), 1)
             self.assertEqual(rows[0]["블로그ID"], "b2")
-            self.assertEqual(rows[0]["신규추가유예"], "Y")
+            self.assertEqual(rows[0]["참여여부"], "미참여")
+            self.assertEqual(rows[0]["신규유예여부"], "유예대상")
 
         # Check Non-buddy CSV row count & Korean headers
         with open(non_buddy_csv, "r", encoding="utf-8-sig") as f:
@@ -204,6 +208,7 @@ class TestEngagementAuditRebuildV8(unittest.TestCase):
             rows = list(reader)
             self.assertEqual(len(rows), 1)
             self.assertEqual(rows[0]["블로그ID"], "stranger_1")
+            self.assertEqual(rows[0]["참여여부"], "참여")
 
 
 if __name__ == "__main__":
