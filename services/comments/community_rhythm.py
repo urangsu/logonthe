@@ -24,6 +24,7 @@ class CommentLengthPolicy:
     """Length limits and scoring band for one comment style preset."""
 
     minimum: int
+    target_max: int
     preferred_min: int
     preferred_max: int
     maximum: int
@@ -49,8 +50,10 @@ class CommentLengthPolicy:
         if length < self.preferred_min:
             span = self.preferred_min - self.minimum
             return 0.0 if span == 0 else (length - self.minimum) / span
-        span = self.maximum - self.preferred_max
-        return 0.0 if span == 0 else (self.maximum - length) / span
+        if length > self.target_max:
+            return 0.0
+        span = self.target_max - self.preferred_max
+        return 0.0 if span == 0 else (self.target_max - length) / span
 
     def band(self, length: int) -> str:
         if length < self.minimum:
@@ -59,15 +62,17 @@ class CommentLengthPolicy:
             return "above_maximum"
         if self.preferred_min <= length <= self.preferred_max:
             return "preferred"
+        if length > self.target_max:
+            return "long"
         return "acceptable"
 
 
 COMMENT_POLICIES: Dict[Union[CommunityRhythmPreset, str], CommentLengthPolicy] = {
     CommunityRhythmPreset.COMMUNITY: CommentLengthPolicy(
-        minimum=15, preferred_min=18, preferred_max=45, maximum=55
+        minimum=15, target_max=55, preferred_min=18, preferred_max=45, maximum=100
     ),
     CommunityRhythmPreset.CALM: CommentLengthPolicy(
-        minimum=20, preferred_min=20, preferred_max=65, maximum=65
+        minimum=20, target_max=65, preferred_min=20, preferred_max=65, maximum=100
     ),
 }
 
@@ -76,7 +81,7 @@ COMMENT_POLICIES: Dict[Union[CommunityRhythmPreset, str], CommentLengthPolicy] =
 # retaining the old validator's safety checks. New final text must use one of
 # the two public community rhythm presets above.
 LEGACY_COMMENT_POLICY = CommentLengthPolicy(
-    minimum=12, preferred_min=12, preferred_max=75, maximum=100
+    minimum=12, target_max=75, preferred_min=12, preferred_max=75, maximum=100
 )
 
 
@@ -127,6 +132,8 @@ PresetLike = Union[CommunityRhythmPreset, str]
 class FinalQualityGate:
     """One policy gate for every final comment text source."""
 
+    HARD_MAX_LENGTH: ClassVar[int] = 100
+    MAX_LENGTH: ClassVar[int] = HARD_MAX_LENGTH
     LEGACY_PRESET: ClassVar[str] = "legacy"
     FINAL_TEXT_SOURCES: ClassVar[Tuple[str, ...]] = (
         "gemini",
@@ -159,19 +166,47 @@ class FinalQualityGate:
     # Sections 11 and 12 of the V13.1 work order: report-like summaries and
     # reusable macro/opening language are not community comments.
     AI_SUMMARY_MACRO_PHRASES: ClassVar[Tuple[str, ...]] = (
+        "전반적으로",
         "전체적으로",
         "무엇보다",
+        "특히",
+        "라는 점",
+        "라는 부분",
+        "다는 점",
+        "다는 부분",
         "특히 인상",
+        "인상적인",
+        "인상적",
+        "알찬",
         "알찬 정보",
+        "유익한",
         "유익한 정보",
+        "유용한 정보",
         "좋은 정보",
+        "구성이",
+        "구성도",
+        "조화가",
         "정리가 잘 되어",
         "한눈에",
         "구성이 돋보",
+        "돋보",
+        "매력적인",
         "매력적이네요",
+        "눈길을 끄",
         "눈길을 끄네요",
+        "정성 가득",
+        "깔끔하게 정리",
+        "잘 정리",
+        "참고하기 좋",
+        "좋은 포스팅",
+        "포스팅 잘 봤어요",
+        "오늘도 좋은 하루",
+        "제 블로그에도",
+        "소통해요",
+        "서이추",
+        "답방",
+        "놀러 와주세요",
         "완성도가",
-        "유익한 정보",
         "잘 보고 갑니다",
         "작성자님",
         "도움이 되었습니다",
@@ -205,6 +240,8 @@ class FinalQualityGate:
         "주문해봤",
         "다녀왔어요",
         "방문했어요",
+        "다녀왔",
+        "방문했",
         "더라구요",
         "더군요",
     )
@@ -223,7 +260,6 @@ class FinalQualityGate:
         "ㅂㅅ",
         "븅신",
         "개새끼",
-        "새끼",
         "지랄",
         "꺼져",
         "닥쳐",
@@ -231,6 +267,7 @@ class FinalQualityGate:
         "존나",
         "ㅈㄴ",
         "개같",
+        "개쩐다",
         "미친놈",
         "미친년",
         "등신",
@@ -245,8 +282,16 @@ class FinalQualityGate:
         ":-)",
         ":D",
         ":-D",
+        ":P",
+        ":p",
+        ":-P",
+        ":-p",
         ";)",
         ";-)",
+        ";P",
+        ";p",
+        ";-P",
+        ";-p",
         "^^",
         "^_^",
         "ㅎㅎ",
@@ -256,8 +301,11 @@ class FinalQualityGate:
     )
 
     _LAUGHTER_RE: ClassVar[re.Pattern[str]] = re.compile(r"[ㅋㅎㅠㅜ]{1,}")
-    _EMOJI_RE: ClassVar[re.Pattern[str]] = re.compile(
-        r"[\U0001F1E6-\U0001FAFF\u2300-\u27BF\u2B50\uFE0F]"
+    _FAKE_EXPERIENCE_RE: ClassVar[re.Pattern[str]] = re.compile(
+        r"(?:저도|저는|제가|저희|우리)\s*"
+        r"(?:어제|지난번|지난|전에|예전에|직접|이미|한번)?\s*"
+        r"(?:가봤|먹어봤|써봤|구매했|구매해봤|이용해봤|주문해봤|"
+        r"다녀왔|방문했|사용해봤)"
     )
 
     # Descriptive aliases make the policy easy to consume from UI and tests
@@ -333,12 +381,25 @@ class FinalQualityGate:
         for phrase in cls.FORMAL_SUBSTRINGS:
             if phrase in normalized:
                 return result(False, "formal_register", f"formal register is forbidden: {phrase}", matched=phrase)
-        for phrase in cls.AI_SUMMARY_MACRO_PHRASES:
-            if phrase in normalized:
-                return result(False, "banned_macro", f"summary or macro phrase is forbidden: {phrase}", matched=phrase)
+        # PositiveSafetyValidator still owns its historic macro vocabulary;
+        # its compatibility profile must not reject existing grounded text
+        # merely because a newly added V13.1 root is present. Final text uses
+        # the strict public profile above.
+        if not legacy:
+            for phrase in cls.AI_SUMMARY_MACRO_PHRASES:
+                if phrase in normalized:
+                    return result(False, "banned_macro", f"summary or macro phrase is forbidden: {phrase}", matched=phrase)
         for phrase in cls.FAKE_EXPERIENCE_PHRASES:
             if phrase in normalized:
                 return result(False, "fake_experience", f"unverified past experience is forbidden: {phrase}", matched=phrase)
+        fake_experience = cls._FAKE_EXPERIENCE_RE.search(normalized)
+        if fake_experience:
+            return result(
+                False,
+                "fake_experience",
+                f"unverified past experience is forbidden: {fake_experience.group()}",
+                matched=fake_experience.group(),
+            )
         for phrase in cls.ABSOLUTE_OR_PRESSURE_PHRASES:
             if phrase in normalized:
                 return result(False, "absolute_or_pressure", f"absolute or pressure wording is forbidden: {phrase}", matched=phrase)
@@ -351,9 +412,9 @@ class FinalQualityGate:
         laughter = cls._LAUGHTER_RE.search(normalized)
         if laughter:
             return result(False, "laughter_or_emoticon", f"laughter marker is forbidden: {laughter.group()}", matched=laughter.group())
-        emoji = cls._EMOJI_RE.search(normalized)
-        if emoji:
-            return result(False, "emoji", f"emoji is forbidden: {emoji.group()}", matched=emoji.group())
+        for symbol in normalized:
+            if unicodedata.category(symbol) == "So":
+                return result(False, "emoji", f"emoji or symbol is forbidden: {symbol}", matched=symbol)
 
         if length < policy.minimum:
             return result(False, "length_below_minimum", f"comment is shorter than {policy.minimum} characters", band="below_minimum", score=0.0)

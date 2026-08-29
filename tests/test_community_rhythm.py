@@ -12,8 +12,9 @@ class TestCommunityRhythmPolicy(unittest.TestCase):
         community = COMMENT_POLICIES[CommunityRhythmPreset.COMMUNITY]
         calm = COMMENT_POLICIES[CommunityRhythmPreset.CALM]
 
-        self.assertEqual((community.minimum, community.preferred_min, community.preferred_max, community.maximum), (15, 18, 45, 55))
-        self.assertEqual((calm.minimum, calm.preferred_min, calm.preferred_max, calm.maximum), (20, 20, 65, 65))
+        self.assertEqual(len(FinalQualityGate.AI_SUMMARY_MACRO_PHRASES), len(set(FinalQualityGate.AI_SUMMARY_MACRO_PHRASES)))
+        self.assertEqual((community.minimum, community.target_max, community.preferred_min, community.preferred_max, community.maximum), (15, 55, 18, 45, 100))
+        self.assertEqual((calm.minimum, calm.target_max, calm.preferred_min, calm.preferred_max, calm.maximum), (20, 65, 20, 65, 100))
         self.assertEqual(FinalQualityGate.policy_for("community"), community)
         self.assertEqual(FinalQualityGate.policy_for("calm"), calm)
 
@@ -48,17 +49,26 @@ class TestCommunityRhythmPolicy(unittest.TestCase):
         self.assertTrue(accepted.valid)
         self.assertEqual(accepted.quality_band, "preferred")
 
+        long_but_allowed = FinalQualityGate.validate("가" * 56)
+        self.assertTrue(long_but_allowed.valid)
+        self.assertEqual(long_but_allowed.quality_band, "long")
+        self.assertLess(long_but_allowed.length_score, 1.0)
+
         too_long = FinalQualityGate.validate("가" * 101)
         self.assertFalse(too_long.valid)
         self.assertEqual(too_long.code, "length_exceeded")
         self.assertEqual(too_long.length, 101)
+
+        calm_long_but_allowed = FinalQualityGate.validate("가" * 66, preset="calm")
+        self.assertTrue(calm_long_but_allowed.valid)
+        self.assertEqual(calm_long_but_allowed.quality_band, "long")
 
     def test_calm_preset_uses_its_own_minimum(self):
         short = FinalQualityGate.validate("분위기가 참 좋아요", preset="calm")
         self.assertFalse(short.valid)
         self.assertEqual(short.code, "length_below_minimum")
 
-        accepted = FinalQualityGate.validate("차분한 공간 구성이 편안해서 오래 머물고 싶어져요", preset="calm")
+        accepted = FinalQualityGate.validate("차분한 공간 분위기가 편안해서 오래 머물고 싶어져요", preset="calm")
         self.assertTrue(accepted.valid)
 
     def test_rejects_formal_and_summary_macro_phrases(self):
@@ -88,6 +98,32 @@ class TestCommunityRhythmPolicy(unittest.TestCase):
             "사진 보니까 더 궁금해져요",
             "글 보니까 더 궁금해져요",
             "포스팅 보니까 더 궁금해져요",
+            "전반적으로 분위기가 참 좋아요",
+            "특히 공간 분위기가 참 좋아요",
+            "따뜻하다는 점이 참 좋아요 그 느낌이",
+            "이런 내용이라는 부분이 참 좋아요",
+            "인상적인 공간이라 마음에 들어요",
+            "알찬 구성이 참 좋아요",
+            "유익한 정보가 많아 좋아요",
+            "유용한 정보가 많아 좋아요",
+            "구성이 참 좋아 보여요",
+            "구성도 참 좋아 보여요",
+            "조화가 참 좋아 보여요 정말 자연스러워요",
+            "돋보이는 공간이라 마음에 들어요",
+            "매력적인 분위기가 참 좋아요",
+            "눈길을 끄는 공간이라 좋아요",
+            "정성 가득 담긴 구성이 좋아요",
+            "깔끔하게 정리되어 보기 좋아요",
+            "잘 정리된 내용이라 보기 좋아요",
+            "참고하기 좋은 내용이라 좋아요",
+            "좋은 포스팅이라 마음에 들어요",
+            "포스팅 잘 봤어요 참 좋아요",
+            "오늘도 좋은 하루 보내세요",
+            "제 블로그에도 놀러 와주세요",
+            "소통해요 좋은 하루 보내세요",
+            "서이추 좋은 하루 보내세요",
+            "답방 좋은 하루 보내세요",
+            "놀러 와주세요 좋은 하루 보내세요",
         )
         for phrase in phrases:
             with self.subTest(phrase=phrase):
@@ -100,15 +136,20 @@ class TestCommunityRhythmPolicy(unittest.TestCase):
             "좋은 분위기네요 ㅎㅎ": "laughter_or_emoticon",
             "좋은 분위기네요 ㅋㅋ": "laughter_or_emoticon",
             "좋은 분위기네요 :)": "laughter_or_emoticon",
+            "좋은 분위기네요 :P": "laughter_or_emoticon",
+            "좋은 분위기네요 :-P": "laughter_or_emoticon",
             "좋은 분위기네요 😊": "emoji",
+            "좋은 분위기네요 ㊗": "emoji",
             "저도 가봤는데 정말 좋았어요": "fake_experience",
             "저도 먹어봤는데 맛있어요": "fake_experience",
             "저도 써봤는데 편해요": "fake_experience",
+            "저도 어제 다녀왔는데 정말 좋았어요": "fake_experience",
             "꼭 한번 방문해보세요 좋은 곳이에요": "absolute_or_pressure",
             "반드시 들러야 하는 곳이에요 정말 좋아요": "absolute_or_pressure",
             "무조건 만족할 곳이에요 정말 좋아요": "absolute_or_pressure",
             "이거 존나 좋아요 진짜": "rude_slang",
             "이거 병신같아요 정말": "rude_slang",
+            "이거 개쩐다 정말": "rude_slang",
         }
         for text, code in cases.items():
             with self.subTest(text=text):
