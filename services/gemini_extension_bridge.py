@@ -9,6 +9,7 @@ from dataclasses import asdict, dataclass
 from enum import Enum
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from typing import Dict, Optional
+from src.logger import logger
 
 
 class GeminiResultStatus(str, Enum):
@@ -122,6 +123,7 @@ class GeminiExtensionBridge:
             self._command_state = "pending"
             self._command_claimed_by = ""
             self._results.pop(command.request_id, None)
+            logger.log(f"[GEMINI][PUBLISH] rid={command.request_id} post={command.post_key} nav={command.navigation_version}")
             self._condition.notify_all()
 
     def current_command(self) -> Optional[GeminiCommand]:
@@ -142,6 +144,7 @@ class GeminiExtensionBridge:
                 return False
             self._command_state = "claimed"
             self._command_claimed_by = claimant or uuid.uuid4().hex
+            logger.log(f"[GEMINI][CLAIM] rid={request_id} claimant={self._command_claimed_by}")
             return True
 
     def submit_result(self, result: GeminiResult) -> None:
@@ -159,6 +162,7 @@ class GeminiExtensionBridge:
             self._command_state = "completed" if result.status == GeminiResultStatus.COMPLETED else "failed"
             self._command = None
             self._command_claimed_by = ""
+            logger.log(f"[GEMINI][RESULT] rid={result.request_id} post={result.post_key} nav={result.navigation_version} status={result.status.value}")
             self._condition.notify_all()
 
     def wait_for_result(self, command: GeminiCommand, timeout: float, stop_event=None) -> Optional[GeminiResult]:

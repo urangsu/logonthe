@@ -300,6 +300,27 @@ class MobileDOMResolver:
                 return loc
         return page.locator("button.u_cbox_btn_upload").first
 
+    @staticmethod
+    def get_comment_submit_context(page: Page, preferred_frame=None):
+        frames = [preferred_frame] if preferred_frame else list(page.frames)
+        selectors = [
+            "button[data-action='comment#upload']",
+            "button.u_cbox_btn_upload",
+            "button:has-text('등록')",
+            "input[type='submit'].u_cbox_btn_upload",
+        ]
+        for frame in frames:
+            if frame is None:
+                continue
+            for selector in selectors:
+                try:
+                    loc = frame.locator(selector).first
+                    if loc.count() > 0 and loc.is_visible():
+                        return {"frame": frame, "button": loc, "selector": selector, "frame_name": frame.name, "frame_url": frame.url}
+                except Exception:
+                    continue
+        return None
+
 
 # 하위 호환성 별칭 (Aliases)
 MobileDOMResolver.get_comment_open_button = MobileDOMResolver.get_comment_button

@@ -38,7 +38,9 @@ class CommentInteractionService:
         """
         ensure_page_alive(page)
 
-        page.evaluate("""
+        context = MobileDOMResolver.get_comment_editor_context(page)
+        frame = context["frame"] if context else page.main_frame
+        frame.evaluate("""
             () => {
                 window.__NAVER_FEED_ACTION__ = null;
                 window.__NAVER_COMMENT_SUBMITTED_FLAG__ = false;
@@ -271,7 +273,9 @@ class CommentInteractionService:
 
             # 2. 브라우저 이벤트 상태 확인
             try:
-                action_data = page.evaluate("""
+                editor_context = MobileDOMResolver.get_comment_editor_context(page)
+                action_frame = editor_context["frame"] if editor_context else page.main_frame
+                action_data = action_frame.evaluate("""
                     () => {
                         const act = window.__NAVER_FEED_ACTION__;
                         window.__NAVER_FEED_ACTION__ = null;
@@ -291,7 +295,9 @@ class CommentInteractionService:
     def read_final_text(cls, page: Page) -> str:
         """마우스 클릭 시 보존된 텍스트 또는 현재 에디터 텍스트 추출"""
         try:
-            saved_text = page.evaluate("() => window.__NAVER_COMMENT_FINAL_TEXT__ || ''")
+            context = MobileDOMResolver.get_comment_editor_context(page)
+            frame = context["frame"] if context else page.main_frame
+            saved_text = frame.evaluate("() => window.__NAVER_COMMENT_FINAL_TEXT__ || ''")
             if saved_text and saved_text.strip():
                 return saved_text.strip()
         except Exception:
@@ -317,13 +323,24 @@ class CommentInteractionService:
             logger.log(f"  ❌ [COMMENT] 등록 직전 품질 게이트 실패로 제출을 중단합니다: [{gate_res.code}] {gate_res.reason} (매칭: {gate_res.matched})", "ERROR")
             return CommentSubmitState.FAILED
 
-        btn = MobileDOMResolver.get_comment_submit_button(page)
-        if btn and btn.count() > 0:
+        editor_context = MobileDOMResolver.get_comment_editor_context(page)
+        submit_context = MobileDOMResolver.get_comment_submit_context(page, editor_context["frame"] if editor_context else None)
+        if not submit_context:
+            logger.log("  ❌ [COMMENT] 등록 버튼을 찾지 못했습니다.", "ERROR")
+            return CommentSubmitState.FAILED
+        btn = submit_context["button"]
+        try:
+            if btn.is_disabled():
+                logger.log("  ❌ [COMMENT] 등록 버튼이 비활성 상태입니다.", "ERROR")
+                return CommentSubmitState.FAILED
             try:
                 btn.scroll_into_view_if_needed(timeout=1000)
                 btn.click(timeout=1000)
-            except Exception:
-                pass
+            except Exception as exc:
+                logger.log(f"  ❌ [COMMENT] 등록 버튼 클릭 실패: {exc}", "ERROR")
+                return CommentSubmitState.FAILED
+        except Exception:
+            return CommentSubmitState.FAILED
 
         interruptible_wait(stop_event, 1.2)
 

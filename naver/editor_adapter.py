@@ -71,13 +71,16 @@ class CommentEditorAdapter:
             read_t = cls.get_text(page)
             # 줄바꿈 정규화 비교
             if read_t.replace("\r", "").strip() == clean_t.replace("\r", "").strip():
-                return True
-
-            # 3. Fallback: locator fill
-            # No write path is successful without exact normalized read-back.
-            read_t = cls.get_text(page)
-            if read_t.replace("\r", "").strip() == clean_t.replace("\r", "").strip():
                 logger.log(f"[NAVER][EDITOR_READBACK_OK] chars={len(read_t)}")
+                submit_context = MobileDOMResolver.get_comment_submit_context(page, context["frame"])
+                if not submit_context:
+                    logger.log("[NAVER][COMMENT_SUBMIT_NOT_FOUND]", "ERROR")
+                    return False
+                disabled = submit_context["button"].is_disabled()
+                if disabled:
+                    logger.log("[NAVER][EDITOR_FRAMEWORK_STATE_NOT_UPDATED] submitEnabled=false", "ERROR")
+                    return False
+                logger.log("[NAVER][EDITOR_INTERNAL_READY] submitEnabled=true")
                 return True
             logger.log(f"[NAVER][EDITOR_READBACK_MISMATCH] expectedChars={len(clean_t)} actualChars={len(read_t)}", "ERROR")
             return False

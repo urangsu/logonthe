@@ -302,12 +302,18 @@ class PostProcessor:
                                         created_at=time.time(),
                                     )
                                     self.gemini_extension_bridge.publish(command)
+                                    logger.log(
+                                        f"[GEMINI][PUBLISH] rid={request_id} post={post.key} nav={navigation_version}"
+                                    )
                                     extension_result = self.gemini_extension_bridge.wait_for_result(
                                         command,
                                         timeout=float(self.config.get("gemini_response_timeout", 55.0)),
                                         stop_event=self.stop_event,
                                     )
                                     if extension_result and extension_result.status == GeminiResultStatus.COMPLETED:
+                                        logger.log(
+                                            f"[GEMINI][CORRELATED] rid={request_id} post={post.key} nav={navigation_version}"
+                                        )
                                         gemini_answer = DraftService.clean_ai_response(
                                             extension_result.text,
                                             expected_request_id=request_id,
@@ -411,6 +417,7 @@ class PostProcessor:
                     from services.comments.community_rhythm import FinalQualityGate
 
                     if gemini_answer:
+                        logger.log(f"[GEMINI_GENERATION_SUCCESS] rid={request_id} post={post.key} nav={navigation_version}")
                         cand_composed = DraftService.compose_body_and_suffix(gemini_answer, suffix)
                         gate_res = FinalQualityGate.validate_final_text(cand_composed, preset=preset, source="gemini")
                         if gate_res.valid:
@@ -450,6 +457,7 @@ class PostProcessor:
                         logger.log("  ❌ [COMMENT] 에디터 초안 주입 및 Read-back 검증 실패", "ERROR")
                         result.comment_result = CommentProcessResult(status=CommentSubmitState.FAILED, error="editor_set_text_failed")
                     else:
+                        logger.log(f"[COMMENT][DRAFT_READY] source={draft_source_label} chars={len(draft_text)}")
                         # 비밀댓글 설정
                         if self.secret_comment:
                             secret_chk = MobileDOMResolver.get_secret_comment_checkbox(detail_page)

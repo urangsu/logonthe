@@ -9,6 +9,10 @@ const CONTENT_BUILD = '13.2.1';
 let lastRequestId = null;
 let busy = false;
 
+function normalizeText(value) {
+  return String(value || '').replace(/\r\n?/g, '\n').trim();
+}
+
 function visible(element) {
   if (!element) return false;
   const rect = element.getBoundingClientRect();
@@ -67,10 +71,10 @@ function setEditorText(target, text) {
   target.dispatchEvent(new InputEvent('input', { bubbles: true, inputType: 'insertText', data: text }));
   target.dispatchEvent(new Event('keyup', { bubbles: true }));
   target.dispatchEvent(new Event('change', { bubbles: true }));
-  return (target.innerText || target.value || '').includes(text.slice(0, 30));
+  return normalizeText(target.innerText || target.value) === normalizeText(text);
 }
 
-function clickSend() {
+function findSendControl() {
   // Gemini renders the send control as a role=button element in some builds,
   // so querying native <button> only causes false send_button_not_found errors.
   const buttons = [...document.querySelectorAll('button, [role="button"]')].filter(visible);
@@ -83,10 +87,7 @@ function clickSend() {
     ].filter(Boolean).join(' ');
     return /보내기|전송|메시지 보내기|send message|send/i.test(label);
   });
-  if (!button) return 'send_button_not_found';
-  if (button.disabled || button.getAttribute('aria-disabled') === 'true') return 'send_button_disabled';
-  button.click();
-  return 'sent';
+  return button || null;
 }
 
 function responseNodes() {
@@ -134,14 +135,24 @@ async function execute(command) {
     if (!target) return await postResult(command, pageStatus(), '', 'editor_not_found');
     const beforeCount = responseNodes().length;
     if (!setEditorText(target, command.prompt)) return await postResult(command, 'dom_unsupported', '', 'prompt_readback_failed');
-    const sendStatus = clickSend();
-    if (sendStatus !== 'sent') return await postResult(command, 'dom_unsupported', '', sendStatus);
+    const sendReadyDeadline = Date.now() + 3000;
+    let sendControl = null;
+    while (Date.now() < sendReadyDeadline) {
+      sendControl = findSendControl();
+      if (sendControl && !sendControl.disabled && sendControl.getAttribute('aria-disabled') !== 'true') break;
+      await new Promise(resolve => setTimeout(resolve, 120));
+    }
+    if (!sendControl) return await postResult(command, 'dom_unsupported', '', 'send_button_not_found');
+    if (sendControl.disabled || sendControl.getAttribute('aria-disabled') === 'true') {
+      return await postResult(command, 'dom_unsupported', '', 'send_button_disabled');
+    }
+    sendControl.click();
 
     // A click is not proof that Gemini accepted the prompt. Wait briefly for
     // the editor to clear or a generation control/new response to appear.
-    const sendDeadline = Date.now() + 3000;
+    const sendConfirmDeadline = Date.now() + 3000;
     let sendConfirmed = false;
-    while (Date.now() < sendDeadline) {
+    while (Date.now() < sendConfirmDeadline) {
       const editorNow = editor();
       const editorValue = editorNow ? (editorNow.innerText || editorNow.value || '').trim() : '';
       if (!editorValue || generationActive() || responseNodes().length > beforeCount) {
