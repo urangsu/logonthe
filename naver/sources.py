@@ -90,13 +90,14 @@ class NeighborFeedSource:
 
 
 class RecommendationFeedSource:
-    """모바일 탐색 추천 피드 (Recommendation.naver) 탐색 소스"""
+    """모바일 탐색 추천 피드 (Recommendation.naver) 탐색 소스 - 푸드/라이프 카테고리 필터 자동 클릭"""
     URL = "https://m.blog.naver.com/Recommendation.naver"
 
-    def __init__(self, page: Page, max_items: int = 20, stop_event: Optional[threading.Event] = None):
+    def __init__(self, page: Page, max_items: int = 20, stop_event: Optional[threading.Event] = None, preferred_category: str = "푸드"):
         self.page = page
         self.max_items = max_items
         self.stop_event = stop_event
+        self.preferred_category = preferred_category
         self.seen_keys: Set[str] = set()
         self._exhausted = False
 
@@ -105,6 +106,27 @@ class RecommendationFeedSource:
         try:
             self.page.goto(self.URL, wait_until="domcontentloaded", timeout=20000)
             interruptible_wait(self.stop_event, 1.5)
+
+            # 탐색 탭 상단의 카테고리 필터 중 '[🍔 푸드]' 버튼 자동 클릭
+            clicked_cat = self.page.evaluate("""(targetCategory) => {
+                const shown = el => !!el && !!el.getClientRects().length && getComputedStyle(el).visibility !== 'hidden';
+                const candidates = Array.from(document.querySelectorAll('a, button, [role=tab], li, span, div')).filter(shown);
+                const target = candidates.find(el => {
+                    const text = el.textContent.trim();
+                    return new RegExp(targetCategory).test(text) && !/전체/.test(text) && text.length <= 15;
+                });
+                if (target) {
+                    target.click();
+                    return target.textContent.trim();
+                }
+                return null;
+            }""", self.preferred_category)
+
+            if clicked_cat:
+                logger.log(f"✅ [SOURCE] 탐색 탭에서 '[{clicked_cat}]' 필터 버튼 클릭 완료")
+                interruptible_wait(self.stop_event, 1.5)
+            else:
+                logger.log(f"ℹ️ [SOURCE] 탐색 탭 카테고리 버튼('{self.preferred_category}') 자동 클릭 건너뜀")
         except Exception as e:
             logger.log(f"[SOURCE] 추천 페이지 로드 안내: {e}", "WARNING")
 
@@ -112,6 +134,8 @@ class RecommendationFeedSource:
         discovered = []
         cards = MobileDOMResolver.get_feed_cards(self.page)
         card_count = cards.count()
+
+        from naver.discovery.topic_filter import DiscoveryTopicFilter
 
         for idx in range(card_count):
             if self.stop_event and self.stop_event.is_set():
@@ -129,6 +153,11 @@ class RecommendationFeedSource:
 
                 title = MobileDOMResolver.get_card_title(card)
                 author = MobileDOMResolver.get_card_author(card)
+
+                # IT/카메라/스펙 주제 제외
+                allowed, reason = DiscoveryTopicFilter.is_allowed(title or "")
+                if not allowed:
+                    continue
 
                 post = extract_canonical_post(raw_href, FeedSourceType.RECOMMENDATION, title=title, author=author)
                 if post and post.key not in self.seen_keys:

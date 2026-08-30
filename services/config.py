@@ -11,7 +11,9 @@ ROOT_CONFIG_PATH = os.path.join(WORKSPACE_DIR, "config.json")
 
 DEFAULT_CONFIG_V2: Dict[str, Any] = {
     "schema_version": 2,
-    "feed_source": FeedSourceType.NEIGHBOR.value,
+    "feed_source": FeedSourceType.TARGETED_SEARCH.value,
+    "topic_filter_enabled": True,
+    "discovery_categories": ["FOOD", "CAFE", "PARENTING", "LIVING", "TRAVEL", "LIFESTYLE"],
     "max_feed_items": 20,
     "like_enabled": True,
     "comment_enabled": True,
