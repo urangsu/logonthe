@@ -248,6 +248,28 @@ class MobileDOMResolver:
         return page.locator("#naverComment__write_textarea, div.u_cbox_text[contenteditable='true']").first
 
     @staticmethod
+    def get_comment_editor_context(page: Page):
+        """Resolve the editor in the main document or a child frame."""
+        if not page:
+            return None
+        selectors = [
+            "#naverComment__write_textarea",
+            "div.u_cbox_text[contenteditable='true']",
+            "div.u_cbox_write_box div[contenteditable='true']",
+            "div.u_cbox_inbox textarea.u_cbox_text",
+            "textarea.u_cbox_text",
+        ]
+        for frame in page.frames:
+            for selector in selectors:
+                try:
+                    loc = frame.locator(selector).first
+                    if loc.count() > 0 and loc.is_visible():
+                        return {"frame": frame, "editor": loc, "selector": selector, "frame_name": frame.name, "frame_url": frame.url}
+                except Exception:
+                    continue
+        return None
+
+    @staticmethod
     def get_secret_comment_checkbox(page: Page) -> Optional[Locator]:
         if not page:
             return None

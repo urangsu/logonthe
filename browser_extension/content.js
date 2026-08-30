@@ -5,6 +5,7 @@ const EDITOR_SELECTORS = [
   'textarea'
 ];
 const RESPONSE_SELECTORS = 'model-response';
+const CONTENT_BUILD = '13.2.1';
 let lastRequestId = null;
 let busy = false;
 
@@ -40,7 +41,10 @@ function bridgeFetch(path, method = 'GET', body = null) {
 }
 
 async function heartbeat() {
-  await bridgeFetch('/v1/heartbeat', 'POST', { status: pageStatus(), title: document.title, url: location.href });
+  await bridgeFetch('/v1/heartbeat', 'POST', {
+    status: pageStatus(), title: document.title, url: location.href,
+    extensionVersion: chrome.runtime.getManifest().version, contentBuild: CONTENT_BUILD
+  });
 }
 
 function setEditorText(target, text) {
@@ -133,6 +137,21 @@ async function execute(command) {
     const sendStatus = clickSend();
     if (sendStatus !== 'sent') return await postResult(command, 'dom_unsupported', '', sendStatus);
 
+    // A click is not proof that Gemini accepted the prompt. Wait briefly for
+    // the editor to clear or a generation control/new response to appear.
+    const sendDeadline = Date.now() + 3000;
+    let sendConfirmed = false;
+    while (Date.now() < sendDeadline) {
+      const editorNow = editor();
+      const editorValue = editorNow ? (editorNow.innerText || editorNow.value || '').trim() : '';
+      if (!editorValue || generationActive() || responseNodes().length > beforeCount) {
+        sendConfirmed = true;
+        break;
+      }
+      await new Promise(resolve => setTimeout(resolve, 150));
+    }
+    if (!sendConfirmed) return await postResult(command, 'failed', '', 'send_click_unconfirmed');
+
     const deadline = Date.now() + 50000;
     let previous = '';
     let stableSince = 0;
@@ -140,18 +159,22 @@ async function execute(command) {
       const status = pageStatus();
       if (status === 'captcha' || status === 'auth_required') return await postResult(command, status, '', status);
       const count = responseNodes().length;
-      const current = count > beforeCount ? latestResponseText() : '';
+      const newNodes = count > beforeCount ? responseNodes().slice(beforeCount) : [];
+      const current = newNodes.length ? latestResponseText() : '';
       if (current && current !== previous) {
         previous = current;
         stableSince = Date.now();
       } else if (current && stableSince && Date.now() - stableSince >= 1800 && !generationActive()) {
         const marker = `[[CMT:${command.requestId}]]`;
-        // Gemini may render the marker in a nested response container. Search
-        // every response node before declaring the request uncorrelated.
-        if (!responseTexts().some(text => text.includes(marker))) {
-          return await postResult(command, 'failed', '', 'request_marker_missing');
+        const correlated = newNodes.find(node => {
+          const content = node.querySelector('message-content, div.markdown, div.model-response-text, .response-body-inner') || node;
+          return (content.innerText || '').includes(marker);
+        });
+        if (!correlated) {
+          return await postResult(command, 'failed', '', 'request_marker_missing_in_new_node');
         }
-        return await postResult(command, 'completed', current, '');
+        const correlatedContent = correlated.querySelector('message-content, div.markdown, div.model-response-text, .response-body-inner') || correlated;
+        return await postResult(command, 'completed', (correlatedContent.innerText || '').trim(), '');
       }
       await new Promise(resolve => setTimeout(resolve, 350));
     }
@@ -170,6 +193,8 @@ async function tick() {
     const data = await bridgeFetch('/v1/command');
     const command = data.command;
     if (!command || command.requestId === lastRequestId) return;
+    const claim = await bridgeFetch('/v1/claim', 'POST', { requestId: command.requestId, claimant: CONTENT_BUILD });
+    if (!claim.claimed) return;
     lastRequestId = command.requestId;
     await execute(command);
   } catch (_) {}

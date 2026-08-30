@@ -20,6 +20,22 @@ class GeminiExtensionBridgeTests(unittest.TestCase):
         bridge.record_heartbeat("ready", "Gemini", "https://gemini.google.com/app")
         self.assertTrue(bridge.preflight().ready)
 
+    def test_extension_version_mismatch_blocks_preflight(self):
+        bridge = GeminiExtensionBridge(expected_extension_version="13.2.1")
+        bridge.record_heartbeat("ready", "Gemini", "https://gemini.google.com/app", "13.2.0", "13.2.0")
+        self.assertFalse(bridge.preflight().ready)
+        self.assertEqual(bridge.preflight().status, "extension_version_mismatch")
+
+    def test_claimed_and_completed_command_is_not_replayed(self):
+        bridge = GeminiExtensionBridge()
+        command = GeminiCommand.create("post:claim", 1, "prompt")
+        bridge.publish(command)
+        self.assertTrue(bridge.claim_command(command.request_id, "tab-a"))
+        self.assertFalse(bridge.claim_command(command.request_id, "tab-b"))
+        self.assertIsNone(bridge.current_command())
+        bridge.submit_result(GeminiResult(command.request_id, command.post_key, command.navigation_version, GeminiResultStatus.COMPLETED, "ok"))
+        self.assertIsNone(bridge.current_command())
+
     def test_stale_result_cannot_complete_new_request(self):
         bridge = GeminiExtensionBridge(token="test-token")
         command = GeminiCommand.create("post:1", 3, "prompt")

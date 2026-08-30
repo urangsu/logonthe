@@ -11,7 +11,8 @@ class CommentEditorAdapter:
 
     @classmethod
     def get_editor(cls, page: Page) -> Optional[Locator]:
-        return MobileDOMResolver.get_comment_editor(page)
+        context = MobileDOMResolver.get_comment_editor_context(page)
+        return context["editor"] if context else None
 
     @classmethod
     def is_visible(cls, page: Page) -> bool:
@@ -26,30 +27,22 @@ class CommentEditorAdapter:
     @classmethod
     def focus(cls, page: Page) -> bool:
         try:
-            return page.evaluate("""
-                () => {
-                    const editor = document.querySelector('#naverComment__write_textarea, div.u_cbox_text[contenteditable="true"], textarea.u_cbox_text');
-                    if (!editor) return false;
-                    editor.focus();
-                    return true;
-                }
-            """)
+            context = MobileDOMResolver.get_comment_editor_context(page)
+            if not context:
+                return False
+            context["editor"].focus()
+            logger.log(f"[NAVER][COMMENT_EDITOR_FOUND] frame={context['frame_name'] or 'main'} selector={context['selector']} frameUrl={context['frame_url']}")
+            return True
         except Exception:
             return False
 
     @classmethod
     def get_text(cls, page: Page) -> str:
         try:
-            return page.evaluate("""
-                () => {
-                    const editor = document.querySelector('#naverComment__write_textarea, div.u_cbox_text[contenteditable="true"], textarea.u_cbox_text');
-                    if (!editor) return '';
-                    if (editor.tagName.toLowerCase() === 'textarea') {
-                        return (editor.value || '').trim();
-                    }
-                    return (editor.innerText || editor.textContent || '').trim();
-                }
-            """) or ""
+            context = MobileDOMResolver.get_comment_editor_context(page)
+            if not context:
+                return ""
+            return (context["editor"].input_value() if context["editor"].evaluate("e => e.tagName.toLowerCase() === 'textarea'") else context["editor"].inner_text()).strip()
         except Exception:
             return ""
 
@@ -65,23 +58,14 @@ class CommentEditorAdapter:
 
         try:
             # 1. JS evaluate로 안전하게 주입
-            page.evaluate("""
-                (t) => {
-                    const editor = document.querySelector('#naverComment__write_textarea, div.u_cbox_text[contenteditable="true"], textarea.u_cbox_text');
-                    if (!editor) return false;
-
-                    editor.focus();
-                    if (editor.tagName.toLowerCase() === 'textarea') {
-                        editor.value = t;
-                    } else {
-                        editor.innerText = t;
-                    }
-
-                    editor.dispatchEvent(new Event('input', { bubbles: true }));
-                    editor.dispatchEvent(new Event('change', { bubbles: true }));
-                    return true;
-                }
-            """, clean_t)
+            context = MobileDOMResolver.get_comment_editor_context(page)
+            if not context:
+                logger.log("[NAVER][COMMENT_EDITOR_NOT_FOUND]", "WARNING")
+                return False
+            editor = context["editor"]
+            logger.log(f"[NAVER][COMMENT_EDITOR_FOUND] frame={context['frame_name'] or 'main'} selector={context['selector']} frameUrl={context['frame_url']}")
+            editor.click(timeout=1000)
+            editor.fill(clean_t)
 
             # 2. Read-back verification (주입된 내용과 일치하는지 검증)
             read_t = cls.get_text(page)
@@ -90,13 +74,12 @@ class CommentEditorAdapter:
                 return True
 
             # 3. Fallback: locator fill
-            editor = cls.get_editor(page)
-            if editor and editor.count() > 0:
-                editor.click(timeout=1000)
-                editor.fill(clean_t)
-                editor.focus()
+            # No write path is successful without exact normalized read-back.
+            read_t = cls.get_text(page)
+            if read_t.replace("\r", "").strip() == clean_t.replace("\r", "").strip():
+                logger.log(f"[NAVER][EDITOR_READBACK_OK] chars={len(read_t)}")
                 return True
-
+            logger.log(f"[NAVER][EDITOR_READBACK_MISMATCH] expectedChars={len(clean_t)} actualChars={len(read_t)}", "ERROR")
             return False
         except Exception as e:
             logger.log(f"[EDITOR] 텍스트 설정 중 예외: {e}", "WARNING")

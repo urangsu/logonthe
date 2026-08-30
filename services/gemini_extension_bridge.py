@@ -71,46 +71,78 @@ class GeminiPreflight:
     title: str = ""
     url: str = ""
     message: str = ""
+    extension_version: str = ""
+    content_build: str = ""
 
 
 class GeminiExtensionBridge:
     HEARTBEAT_TTL = 3.0
 
-    def __init__(self, token: Optional[str] = None):
+    COMMAND_TTL = 90.0
+
+    def __init__(self, token: Optional[str] = None, expected_extension_version: Optional[str] = None):
         # Kept for compatibility with preview callers; loopback binding is the
         # only access control in the simplified connection flow.
         self._condition = threading.Condition()
         self._command: Optional[GeminiCommand] = None
+        self._command_state = "idle"
+        self._command_claimed_by = ""
         self._results: Dict[str, GeminiResult] = {}
         self._heartbeat_at = 0.0
         self._heartbeat_status = "disconnected"
         self._heartbeat_title = ""
         self._heartbeat_url = ""
+        self._extension_version = ""
+        self._content_build = ""
+        self._expected_extension_version = expected_extension_version
 
-    def record_heartbeat(self, status: str, title: str = "", url: str = "") -> None:
+    def record_heartbeat(self, status: str, title: str = "", url: str = "", extension_version: str = "", content_build: str = "") -> None:
         with self._condition:
             self._heartbeat_at = time.time()
             self._heartbeat_status = status
             self._heartbeat_title = title
             self._heartbeat_url = url
+            self._extension_version = extension_version
+            self._content_build = content_build
             self._condition.notify_all()
 
     def preflight(self) -> GeminiPreflight:
         fresh = time.time() - self._heartbeat_at <= self.HEARTBEAT_TTL
-        ready = fresh and self._heartbeat_status == GeminiResultStatus.READY.value
+        version_ok = not self._expected_extension_version or self._extension_version == self._expected_extension_version
+        ready = fresh and self._heartbeat_status == GeminiResultStatus.READY.value and version_ok
         status = self._heartbeat_status if fresh else "disconnected"
+        if fresh and not version_ok:
+            status = "extension_version_mismatch"
         message = "Gemini extension ready" if ready else f"Gemini extension not ready: {status}"
-        return GeminiPreflight(ready, status, self._heartbeat_title, self._heartbeat_url, message)
+        return GeminiPreflight(ready, status, self._heartbeat_title, self._heartbeat_url, message, self._extension_version, self._content_build)
 
     def publish(self, command: GeminiCommand) -> None:
         with self._condition:
             self._command = command
+            self._command_state = "pending"
+            self._command_claimed_by = ""
             self._results.pop(command.request_id, None)
             self._condition.notify_all()
 
     def current_command(self) -> Optional[GeminiCommand]:
         with self._condition:
-            return self._command
+            if not self._command:
+                return None
+            if time.time() - self._command.created_at > self.COMMAND_TTL:
+                self._command_state = "expired"
+                self._command = None
+                return None
+            return self._command if self._command_state == "pending" else None
+
+    def claim_command(self, request_id: str, claimant: str = "") -> bool:
+        with self._condition:
+            if not self._command or self._command_state != "pending":
+                return False
+            if self._command.request_id != request_id:
+                return False
+            self._command_state = "claimed"
+            self._command_claimed_by = claimant or uuid.uuid4().hex
+            return True
 
     def submit_result(self, result: GeminiResult) -> None:
         with self._condition:
@@ -124,6 +156,9 @@ class GeminiExtensionBridge:
             ):
                 return
             self._results[result.request_id] = result
+            self._command_state = "completed" if result.status == GeminiResultStatus.COMPLETED else "failed"
+            self._command = None
+            self._command_claimed_by = ""
             self._condition.notify_all()
 
     def wait_for_result(self, command: GeminiCommand, timeout: float, stop_event=None) -> Optional[GeminiResult]:
@@ -189,8 +224,10 @@ class GeminiBridgeHTTPServer:
             def do_POST(self):
                 payload = self._payload()
                 if self.path == "/v1/heartbeat":
-                    bridge.record_heartbeat(str(payload.get("status", "failed")), str(payload.get("title", "")), str(payload.get("url", "")))
+                    bridge.record_heartbeat(str(payload.get("status", "failed")), str(payload.get("title", "")), str(payload.get("url", "")), str(payload.get("extensionVersion", "")), str(payload.get("contentBuild", "")))
                     return self._json(200, {"ok": True})
+                if self.path == "/v1/claim":
+                    return self._json(200, {"claimed": bridge.claim_command(str(payload.get("requestId", "")), str(payload.get("claimant", "")))})
                 if self.path == "/v1/result":
                     bridge.submit_result(GeminiResult.from_json(payload))
                     return self._json(200, {"ok": True})
