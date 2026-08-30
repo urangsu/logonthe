@@ -29,10 +29,12 @@ class GeminiCommand:
     navigation_version: int
     prompt: str
     created_at: float
+    deadline_at: float
 
     @classmethod
     def create(cls, post_key: str, navigation_version: int, prompt: str, request_id: Optional[str] = None):
-        return cls(request_id or uuid.uuid4().hex, post_key, navigation_version, prompt, time.time())
+        now = time.time()
+        return cls(request_id or uuid.uuid4().hex, post_key, navigation_version, prompt, now, now + 70.0)
 
     def to_json(self) -> Dict[str, object]:
         return {
@@ -41,6 +43,7 @@ class GeminiCommand:
             "navigationVersion": self.navigation_version,
             "prompt": self.prompt,
             "createdAt": self.created_at,
+            "deadlineAt": self.deadline_at,
         }
 
 
@@ -74,6 +77,8 @@ class GeminiPreflight:
     message: str = ""
     extension_version: str = ""
     content_build: str = ""
+    protocol_version: int = 0
+    bridge_schema_version: int = 0
 
 
 class GeminiExtensionBridge:
@@ -81,7 +86,7 @@ class GeminiExtensionBridge:
 
     COMMAND_TTL = 90.0
 
-    def __init__(self, token: Optional[str] = None, expected_extension_version: Optional[str] = None):
+    def __init__(self, token: Optional[str] = None, expected_extension_version: Optional[str] = None, expected_build_id: str = "ea9b41a"):
         # Kept for compatibility with preview callers; loopback binding is the
         # only access control in the simplified connection flow.
         self._condition = threading.Condition()
@@ -95,9 +100,12 @@ class GeminiExtensionBridge:
         self._heartbeat_url = ""
         self._extension_version = ""
         self._content_build = ""
+        self._protocol_version = 0
+        self._bridge_schema_version = 0
         self._expected_extension_version = expected_extension_version
+        self._expected_build_id = expected_build_id
 
-    def record_heartbeat(self, status: str, title: str = "", url: str = "", extension_version: str = "", content_build: str = "") -> None:
+    def record_heartbeat(self, status: str, title: str = "", url: str = "", extension_version: str = "", content_build: str = "", protocol_version: int = 0, bridge_schema_version: int = 0) -> None:
         with self._condition:
             self._heartbeat_at = time.time()
             self._heartbeat_status = status
@@ -105,17 +113,22 @@ class GeminiExtensionBridge:
             self._heartbeat_url = url
             self._extension_version = extension_version
             self._content_build = content_build
+            self._protocol_version = int(protocol_version or 0)
+            self._bridge_schema_version = int(bridge_schema_version or 0)
             self._condition.notify_all()
 
     def preflight(self) -> GeminiPreflight:
         fresh = time.time() - self._heartbeat_at <= self.HEARTBEAT_TTL
         version_ok = not self._expected_extension_version or self._extension_version == self._expected_extension_version
-        ready = fresh and self._heartbeat_status == GeminiResultStatus.READY.value and version_ok
+        identity_ok = self._content_build == self._expected_build_id and self._protocol_version == 3 and self._bridge_schema_version == 2
+        ready = fresh and self._heartbeat_status == GeminiResultStatus.READY.value and version_ok and identity_ok
         status = self._heartbeat_status if fresh else "disconnected"
         if fresh and not version_ok:
             status = "extension_version_mismatch"
+        elif fresh and not identity_ok:
+            status = "extension_identity_mismatch"
         message = "Gemini extension ready" if ready else f"Gemini extension not ready: {status}"
-        return GeminiPreflight(ready, status, self._heartbeat_title, self._heartbeat_url, message, self._extension_version, self._content_build)
+        return GeminiPreflight(ready, status, self._heartbeat_title, self._heartbeat_url, message, self._extension_version, self._content_build, self._protocol_version, self._bridge_schema_version)
 
     def publish(self, command: GeminiCommand) -> None:
         with self._condition:
@@ -151,26 +164,32 @@ class GeminiExtensionBridge:
             )
             return True
 
-    def submit_result(self, result: GeminiResult) -> None:
+    def submit_result(self, result: GeminiResult) -> tuple[bool, str]:
         with self._condition:
             command = self._command
             if not command:
-                return
-            if (
-                result.request_id != command.request_id
-                or result.post_key != command.post_key
-                or result.navigation_version != command.navigation_version
-            ):
-                return
+                return False, "no_active_command"
+            if time.time() > command.deadline_at:
+                self._command = None
+                self._command_state = "expired"
+                return False, "late_result"
+            if result.request_id != command.request_id:
+                return False, "request_id_mismatch"
+            if result.post_key != command.post_key:
+                return False, "post_key_mismatch"
+            if result.navigation_version != command.navigation_version:
+                return False, "navigation_version_mismatch"
             self._results[result.request_id] = result
             self._command_state = "completed" if result.status == GeminiResultStatus.COMPLETED else "failed"
             self._command = None
             self._command_claimed_by = ""
             logger.log(f"[GEMINI][RESULT] rid={result.request_id} post={result.post_key} nav={result.navigation_version} status={result.status.value}")
             self._condition.notify_all()
+            return True, "accepted"
 
     def wait_for_result(self, command: GeminiCommand, timeout: float, stop_event=None) -> Optional[GeminiResult]:
-        deadline = time.monotonic() + timeout
+        deadline_at = command.deadline_at or (time.time() + timeout)
+        deadline = min(time.monotonic() + timeout, time.monotonic() + max(0.0, deadline_at - time.time()))
         with self._condition:
             while True:
                 result = self._results.get(command.request_id)
@@ -232,13 +251,13 @@ class GeminiBridgeHTTPServer:
             def do_POST(self):
                 payload = self._payload()
                 if self.path == "/v1/heartbeat":
-                    bridge.record_heartbeat(str(payload.get("status", "failed")), str(payload.get("title", "")), str(payload.get("url", "")), str(payload.get("extensionVersion", "")), str(payload.get("contentBuild", "")))
+                    bridge.record_heartbeat(str(payload.get("status", "failed")), str(payload.get("title", "")), str(payload.get("url", "")), str(payload.get("extensionVersion", "")), str(payload.get("buildId", payload.get("contentBuild", ""))), int(payload.get("protocolVersion", 0) or 0), int(payload.get("bridgeSchemaVersion", 0) or 0))
                     return self._json(200, {"ok": True})
                 if self.path == "/v1/claim":
                     return self._json(200, {"claimed": bridge.claim_command(str(payload.get("requestId", "")), str(payload.get("claimant", "")))})
                 if self.path == "/v1/result":
-                    bridge.submit_result(GeminiResult.from_json(payload))
-                    return self._json(200, {"ok": True})
+                    accepted, reason = bridge.submit_result(GeminiResult.from_json(payload))
+                    return self._json(200, {"ok": True, "accepted": accepted, "reason": reason})
                 return self._json(404, {"error": "not_found"})
 
         self._server = _LoopbackHTTPServer((self.host, self.port), Handler)

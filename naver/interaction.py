@@ -95,8 +95,13 @@ class CommentInteractionService:
                                      (rawBtn.tagName === 'BUTTON' && (rawBtn.textContent || '').trim() === '등록');
 
                     if (isSubmit) {
-                        e.preventDefault();
-                        e.stopPropagation();
+                        window.__NAVER_COMMENT_SUBMISSION_BASELINE__ = Array.from(
+                            document.querySelectorAll("li.u_cbox_comment, li[class*='cbox_comment']")
+                        ).filter(item => /(?:^|[,{\\s])mine\\s*:\\s*true(?:[,}\\s]|$)/i.test(item.getAttribute('data-info') || '') ||
+                                         (item.className || '').split(/\\s+/).includes('u_cbox_type_mine')).map(item => ({
+                            info: item.getAttribute('data-info') || '',
+                            text: (item.querySelector('.u_cbox_contents, .u_cbox_text_mention, p.text')?.innerText || '').trim()
+                        }));
                         const editor = document.querySelector('#naverComment__write_textarea, div.u_cbox_text[contenteditable="true"], textarea.u_cbox_text');
                         window.__NAVER_COMMENT_FINAL_TEXT__ = editor ? (editor.innerText || editor.value || '').trim() : '';
                         window.__NAVER_COMMENT_SUBMITTED_FLAG__ = true;
@@ -212,7 +217,9 @@ class CommentInteractionService:
                 return CommentProcessResult(status=CommentSubmitState.FAILED, error=reason)
 
         # 2. 서버 사이드 중복 댓글 스캔 (실제 네이버 서버의 내 댓글 존재 여부)
-        presence = ServerCommentDuplicateGuard.scan_page_for_my_comment(page, stop_event=stop_event)
+        editor_context = MobileDOMResolver.get_comment_editor_context(page)
+        presence_frame = editor_context["frame"] if editor_context else page
+        presence = ServerCommentDuplicateGuard.scan_page_for_my_comment(presence_frame, stop_event=stop_event)
         if presence.state == CommentPresenceState.PRESENT:
             logger.log("  🛑 [COMMENT] 서버 댓글 목록에 이미 내 댓글이 존재합니다. 작성을 건너뜁니다 (기록 동기화).")
             return CommentProcessResult(
@@ -284,8 +291,10 @@ class CommentInteractionService:
                         return act;
                     }
                 """)
-                if action_data in ("SUBMIT", "SUBMIT_MANUAL"):
+                if action_data == "SUBMIT":
                     return UserAction.SUBMIT
+                elif action_data == "SUBMIT_MANUAL":
+                    return UserAction.NATIVE_SUBMIT
                 elif action_data in ("SKIP", "CLOSED"):
                     return UserAction.SKIP
             except Exception:
@@ -312,7 +321,8 @@ class CommentInteractionService:
         page: Page,
         final_text: str,
         stop_event: Optional[threading.Event] = None,
-        preset: str = "community"
+        preset: str = "community",
+        click: bool = True,
     ) -> CommentSubmitState:
         """
         댓글 등록 버튼 클릭 및 Fail-closed 검증 (에디터 클리어 및 서버 목록 내 댓글 등장 확인)
@@ -331,16 +341,23 @@ class CommentInteractionService:
             logger.log("  ❌ [COMMENT] 등록 버튼을 찾지 못했습니다.", "ERROR")
             return CommentSubmitState.FAILED
         btn = submit_context["button"]
+        # Capture server truth before the click so an older own comment cannot
+        # be mistaken for the comment submitted in this action.
+        comment_frame = submit_context.get("frame") or (editor_context.get("frame") if editor_context else page.main_frame)
+        baseline = ServerCommentDuplicateGuard.capture_submission_baseline(comment_frame)
         try:
             if btn.is_disabled():
                 logger.log("  ❌ [COMMENT] 등록 버튼이 비활성 상태입니다.", "ERROR")
                 return CommentSubmitState.FAILED
-            try:
-                btn.scroll_into_view_if_needed(timeout=1000)
-                btn.click(timeout=1000)
-            except Exception as exc:
-                logger.log(f"  ❌ [COMMENT] 등록 버튼 클릭 실패: {exc}", "ERROR")
-                return CommentSubmitState.FAILED
+            if click:
+                try:
+                    btn.scroll_into_view_if_needed(timeout=1000)
+                    btn.click(timeout=1000)
+                except Exception as exc:
+                    logger.log(f"  ❌ [COMMENT] 등록 버튼 클릭 실패: {exc}", "ERROR")
+                    return CommentSubmitState.FAILED
+            else:
+                logger.log("  ℹ️ [COMMENT][SUBMIT_NATIVE_CLICK] 네이버 기본 등록 동작을 검증합니다")
         except Exception:
             return CommentSubmitState.FAILED
 
@@ -350,7 +367,10 @@ class CommentInteractionService:
             for delay in (0.5, 1.0, 2.0):
                 interruptible_wait(stop_event, delay)
                 presence = ServerCommentDuplicateGuard.scan_page_for_my_comment(
-                    page, stop_event=stop_event
+                    comment_frame,
+                    stop_event=stop_event,
+                    baseline=baseline,
+                    expected_text=final_text,
                 )
                 if presence.state == CommentPresenceState.PRESENT:
                     logger.log("  ✅ [COMMENT][SERVER_VERIFIED] 본인 댓글이 서버 목록에 확인되었습니다")

@@ -27,6 +27,7 @@ class CommentSubmitState(str, Enum):
 
 class UserAction(str, Enum):
     SUBMIT = "submit"
+    NATIVE_SUBMIT = "native_submit"
     SKIP = "skip"
     STOP = "stop"
 

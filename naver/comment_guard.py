@@ -1,5 +1,7 @@
 import re
 import threading
+import hashlib
+import time
 from enum import Enum
 from dataclasses import dataclass, field
 from typing import Optional, List, Dict, Any
@@ -27,6 +29,13 @@ class CommentPresenceResult:
     list_complete: bool = True
 
 
+@dataclass(frozen=True)
+class CommentSubmissionBaseline:
+    mine_comment_nos: set[str]
+    mine_text_hashes: set[str]
+    captured_at: float
+
+
 class ServerCommentDuplicateGuard:
     """
     서버 사이드 중복 댓글 방지 가드 (Server-Side Duplicate Comment Guard)
@@ -38,12 +47,46 @@ class ServerCommentDuplicateGuard:
 
     MINE_REGEX = re.compile(r'(?:^|[,{\s])mine\s*:\s*true(?:[,}\s]|$)', re.IGNORECASE)
 
+    @staticmethod
+    def _text_hash(value: str) -> str:
+        normalized = re.sub(r"\s+", " ", (value or "").strip())
+        return hashlib.sha256(normalized.encode("utf-8")).hexdigest()
+
+    @classmethod
+    def capture_submission_baseline(cls, page: Page) -> CommentSubmissionBaseline:
+        """Capture own comment identifiers/text before a submit click."""
+        try:
+            rows = page.evaluate("() => window.__NAVER_COMMENT_SUBMISSION_BASELINE__ || null")
+            if rows is None:
+                rows = page.evaluate("""
+                () => Array.from(document.querySelectorAll("li.u_cbox_comment, li[class*='cbox_comment']"))
+                  .filter(item => /(?:^|[,{\\s])mine\\s*:\\s*true(?:[,}\\s]|$)/i.test(item.getAttribute('data-info') || '') ||
+                                  (item.className || '').split(/\\s+/).includes('u_cbox_type_mine'))
+                  .map(item => ({
+                    info: item.getAttribute('data-info') || '',
+                    text: (item.querySelector('.u_cbox_contents, .u_cbox_text_mention, p.text')?.innerText || '').trim()
+                  }))
+                """)
+        except Exception:
+            rows = []
+        numbers = set()
+        hashes = set()
+        for row in rows or []:
+            match = re.search(r"commentNo\s*:\s*['\"]?([0-9]+)", row.get("info", ""), re.I)
+            if match:
+                numbers.add(match.group(1))
+            if row.get("text"):
+                hashes.add(cls._text_hash(row["text"]))
+        return CommentSubmissionBaseline(numbers, hashes, time.time())
+
     @classmethod
     def scan_page_for_my_comment(
         cls,
         page: Page,
         max_scroll_attempts: int = 3,
-        stop_event: Optional[threading.Event] = None
+        stop_event: Optional[threading.Event] = None,
+        baseline: Optional[CommentSubmissionBaseline] = None,
+        expected_text: Optional[str] = None,
     ) -> CommentPresenceResult:
         if not page:
             return CommentPresenceResult(state=CommentPresenceState.UNKNOWN, confidence=LikeConfidence.UNKNOWN, evidence=["page_none"])
@@ -110,7 +153,6 @@ class ServerCommentDuplicateGuard:
 
                                 if (isMineDataInfo) evidence.push("data_info_mine_true");
                                 if (isMineClass) evidence.push("class_u_cbox_type_mine");
-                                break;
                             }
                         }
 
@@ -128,6 +170,18 @@ class ServerCommentDuplicateGuard:
                         };
                     }
                 """)
+
+                # 제출 후에는 기존 mine 댓글이 아니라 새 댓글 + 정확한 본문이어야 한다.
+                candidate_no = scan_res.get("foundCommentNo")
+                candidate_hash = cls._text_hash(scan_res.get("foundText", ""))
+                if baseline is not None:
+                    is_new = (candidate_no and candidate_no not in baseline.mine_comment_nos) or (
+                        candidate_hash and candidate_hash not in baseline.mine_text_hashes
+                    )
+                    text_matches = not expected_text or re.sub(r"\s+", " ", scan_res.get("foundText", "").strip()) == re.sub(r"\s+", " ", expected_text.strip())
+                    scan_res["baseline_match"] = bool(scan_res.get("foundMine") and not is_new)
+                    if not (scan_res.get("foundMine") and is_new and text_matches):
+                        scan_res["foundMine"] = False
 
                 # Strong Signal 발견 시 즉시 PRESENT 반환
                 if scan_res.get("foundMine"):
@@ -148,6 +202,15 @@ class ServerCommentDuplicateGuard:
 
                 # 더 이상 로드할 댓글이 없거나, 이미 전체 댓글 수 이상 로드된 경우
                 if not has_more or (total_count is not None and loaded_count >= total_count):
+                    if baseline is not None and scan_res.get("baseline_match"):
+                        return CommentPresenceResult(
+                            state=CommentPresenceState.UNKNOWN,
+                            confidence=LikeConfidence.MEDIUM,
+                            evidence=["existing_mine_comment_only"],
+                            loaded_comment_count=loaded_count,
+                            total_comment_count=total_count,
+                            list_complete=True,
+                        )
                     return CommentPresenceResult(
                         state=CommentPresenceState.ABSENT,
                         confidence=LikeConfidence.HIGH,

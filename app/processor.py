@@ -230,7 +230,9 @@ class PostProcessor:
                 from services.user_learning_service import UserLearningService
 
                 # 3-2. 서버 사이드 중복 댓글 스캔 (Gemini 호출 전 반드시 선행)
-                presence = ServerCommentDuplicateGuard.scan_page_for_my_comment(detail_page, stop_event=self.stop_event)
+                comment_context = MobileDOMResolver.get_comment_editor_context(detail_page)
+                presence_frame = comment_context["frame"] if comment_context else detail_page
+                presence = ServerCommentDuplicateGuard.scan_page_for_my_comment(presence_frame, stop_event=self.stop_event)
                 if presence.state == CommentPresenceState.PRESENT:
                     logger.log("  🛑 [COMMENT] 서버 댓글 목록에 이미 내 댓글이 존재합니다! (AI 호출/입력 0, 동기화 완료)")
                     result.comment_result = CommentProcessResult(
@@ -294,12 +296,14 @@ class PostProcessor:
                                 failure = "invalid_response"
                                 preflight = self.gemini_extension_bridge.preflight() if self.gemini_extension_bridge else None
                                 if preflight and preflight.ready:
+                                    command_created_at = time.time()
                                     command = GeminiCommand(
                                         request_id=request_id,
                                         post_key=post.key,
                                         navigation_version=navigation_version,
                                         prompt=ai_prompt,
-                                        created_at=time.time(),
+                                        created_at=command_created_at,
+                                        deadline_at=command_created_at + 70.0,
                                     )
                                     self.gemini_extension_bridge.publish(command)
                                     extension_result = self.gemini_extension_bridge.wait_for_result(
@@ -498,7 +502,7 @@ class PostProcessor:
                             )
                             if self.state_mgr:
                                 self.state_mgr.update(new_state=FeedState.SKIPPING, inc_skip=True)
-                        elif action == UserAction.SUBMIT:
+                        elif action in (UserAction.SUBMIT, UserAction.NATIVE_SUBMIT):
                             logger.log(f"[COMMENT][SUBMIT_REQUESTED] post={post.key}")
                             final_text = CommentInteractionService.read_final_text(detail_page)
                             submitted_cand = final_text or draft_text
@@ -529,7 +533,11 @@ class PostProcessor:
                                 self.state_mgr.update(new_state=FeedState.SUBMITTING, message="댓글 등록 및 검증 중...")
 
                             submit_status = CommentInteractionService.submit_and_verify(
-                                detail_page, cmt_res.submitted_text, self.stop_event, preset=preset
+                                detail_page,
+                                cmt_res.submitted_text,
+                                self.stop_event,
+                                preset=preset,
+                                click=(action == UserAction.SUBMIT),
                             )
                             cmt_res.status = submit_status
 

@@ -17,7 +17,7 @@ class GeminiExtensionBridgeTests(unittest.TestCase):
     def test_preflight_requires_fresh_ready_heartbeat(self):
         bridge = GeminiExtensionBridge(token="test-token")
         self.assertFalse(bridge.preflight().ready)
-        bridge.record_heartbeat("ready", "Gemini", "https://gemini.google.com/app")
+        bridge.record_heartbeat("ready", "Gemini", "https://gemini.google.com/app", "13.2.2", "ea9b41a", 3, 2)
         self.assertTrue(bridge.preflight().ready)
 
     def test_extension_version_mismatch_blocks_preflight(self):

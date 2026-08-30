@@ -6,6 +6,8 @@ const EDITOR_SELECTORS = [
 ];
 const RESPONSE_SELECTORS = 'model-response';
 const CONTENT_BUILD = '13.2.2';
+const PROTOCOL_VERSION = 3;
+const BRIDGE_SCHEMA_VERSION = 2;
 let lastRequestId = null;
 let busy = false;
 
@@ -47,7 +49,8 @@ function bridgeFetch(path, method = 'GET', body = null) {
 async function heartbeat() {
   await bridgeFetch('/v1/heartbeat', 'POST', {
     status: pageStatus(), title: document.title, url: location.href,
-    extensionVersion: chrome.runtime.getManifest().version, contentBuild: CONTENT_BUILD
+    extensionVersion: chrome.runtime.getManifest().version, contentBuild: CONTENT_BUILD,
+    buildId: 'ea9b41a', protocolVersion: PROTOCOL_VERSION, bridgeSchemaVersion: BRIDGE_SCHEMA_VERSION
   });
 }
 
@@ -131,18 +134,26 @@ async function postResult(command, status, text = '', error = '') {
 async function execute(command) {
   busy = true;
   try {
+    const deadlineAt = Number(command.deadlineAt || (Date.now() + 70000));
+    const remaining = () => Math.max(0, deadlineAt - Date.now());
+    const waitUntil = async (maxMs, predicate, interval = 120) => {
+      const end = Math.min(deadlineAt, Date.now() + maxMs);
+      while (Date.now() < end && remaining() > 0) {
+        if (predicate()) return true;
+        await new Promise(resolve => setTimeout(resolve, Math.min(interval, Math.max(1, end - Date.now()))));
+      }
+      return Boolean(predicate());
+    };
     const target = editor();
     if (!target) return await postResult(command, pageStatus(), '', 'editor_not_found');
     const beforeCount = responseNodes().length;
     if (!setEditorText(target, command.prompt)) return await postResult(command, 'dom_unsupported', '', 'prompt_readback_failed');
-    const sendReadyDeadline = Date.now() + 3000;
     let sendControl = null;
-    while (Date.now() < sendReadyDeadline) {
+    const sendReady = await waitUntil(3000, () => {
       sendControl = findSendControl();
-      if (sendControl && !sendControl.disabled && sendControl.getAttribute('aria-disabled') !== 'true') break;
-      await new Promise(resolve => setTimeout(resolve, 120));
-    }
-    if (!sendControl) return await postResult(command, 'dom_unsupported', '', 'send_button_not_found');
+      return Boolean(sendControl);
+    });
+    if (!sendReady || !sendControl) return await postResult(command, 'dom_unsupported', '', remaining() ? 'send_button_not_found' : 'command_deadline_exceeded');
     if (sendControl.disabled || sendControl.getAttribute('aria-disabled') === 'true') {
       return await postResult(command, 'dom_unsupported', '', 'send_button_disabled');
     }
@@ -150,23 +161,16 @@ async function execute(command) {
 
     // A click is not proof that Gemini accepted the prompt. Wait briefly for
     // the editor to clear or a generation control/new response to appear.
-    const sendConfirmDeadline = Date.now() + 3000;
-    let sendConfirmed = false;
-    while (Date.now() < sendConfirmDeadline) {
+    const sendConfirmed = await waitUntil(3000, () => {
       const editorNow = editor();
       const editorValue = editorNow ? (editorNow.innerText || editorNow.value || '').trim() : '';
-      if (!editorValue || generationActive() || responseNodes().length > beforeCount) {
-        sendConfirmed = true;
-        break;
-      }
-      await new Promise(resolve => setTimeout(resolve, 150));
-    }
-    if (!sendConfirmed) return await postResult(command, 'failed', '', 'send_click_unconfirmed');
+      return !editorValue || generationActive() || responseNodes().length > beforeCount;
+    }, 150);
+    if (!sendConfirmed) return await postResult(command, 'failed', '', remaining() ? 'send_click_unconfirmed' : 'command_deadline_exceeded');
 
-    const deadline = Date.now() + 50000;
     let previous = '';
     let stableSince = 0;
-    while (Date.now() < deadline) {
+    while (remaining() > 0) {
       const status = pageStatus();
       if (status === 'captcha' || status === 'auth_required') return await postResult(command, status, '', status);
       const count = responseNodes().length;
@@ -189,7 +193,7 @@ async function execute(command) {
       }
       await new Promise(resolve => setTimeout(resolve, 350));
     }
-    await postResult(command, 'timeout', '', 'response_timeout');
+    await postResult(command, 'timeout', '', 'command_deadline_exceeded');
   } catch (error) {
     await postResult(command, 'failed', '', String(error.message || error)).catch(() => {});
   } finally {
