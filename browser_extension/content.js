@@ -4,7 +4,7 @@ const EDITOR_SELECTORS = [
   'div[role="textbox"][contenteditable="true"]',
   'textarea'
 ];
-const RESPONSE_SELECTORS = 'model-response, div.response-container';
+const RESPONSE_SELECTORS = 'model-response';
 let lastRequestId = null;
 let busy = false;
 
@@ -73,12 +73,26 @@ function clickSend() {
   return true;
 }
 
+function responseNodes() {
+  const primary = [...document.querySelectorAll('model-response')];
+  return primary.length ? primary : [...document.querySelectorAll('div.response-container')];
+}
+
 function latestResponseText() {
-  const nodes = [...document.querySelectorAll(RESPONSE_SELECTORS)];
+  const nodes = responseNodes();
   const latest = nodes[nodes.length - 1];
   if (!latest) return '';
   const content = latest.querySelector('message-content, div.markdown, div.model-response-text, .response-body-inner') || latest;
   return (content.innerText || '').trim();
+}
+
+function responseTexts() {
+  return responseNodes()
+    .map(node => {
+      const content = node.querySelector('message-content, div.markdown, div.model-response-text, .response-body-inner') || node;
+      return (content.innerText || '').trim();
+    })
+    .filter(Boolean);
 }
 
 function generationActive() {
@@ -102,7 +116,7 @@ async function execute(command) {
   try {
     const target = editor();
     if (!target) return await postResult(command, pageStatus(), '', 'editor_not_found');
-    const beforeCount = document.querySelectorAll(RESPONSE_SELECTORS).length;
+    const beforeCount = responseNodes().length;
     if (!setEditorText(target, command.prompt)) return await postResult(command, 'dom_unsupported', '', 'prompt_readback_failed');
     if (!clickSend()) return await postResult(command, 'dom_unsupported', '', 'send_button_not_found');
 
@@ -112,14 +126,18 @@ async function execute(command) {
     while (Date.now() < deadline) {
       const status = pageStatus();
       if (status === 'captcha' || status === 'auth_required') return await postResult(command, status, '', status);
-      const count = document.querySelectorAll(RESPONSE_SELECTORS).length;
+      const count = responseNodes().length;
       const current = count > beforeCount ? latestResponseText() : '';
       if (current && current !== previous) {
         previous = current;
         stableSince = Date.now();
       } else if (current && stableSince && Date.now() - stableSince >= 1800 && !generationActive()) {
         const marker = `[[CMT:${command.requestId}]]`;
-        if (!current.includes(marker)) return await postResult(command, 'failed', '', 'request_marker_missing');
+        // Gemini may render the marker in a nested response container. Search
+        // every response node before declaring the request uncorrelated.
+        if (!responseTexts().some(text => text.includes(marker))) {
+          return await postResult(command, 'failed', '', 'request_marker_missing');
+        }
         return await postResult(command, 'completed', current, '');
       }
       await new Promise(resolve => setTimeout(resolve, 350));
