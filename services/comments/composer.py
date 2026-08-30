@@ -333,9 +333,16 @@ class LocalComposerV41:
                 best_cand = cand
                 break
 
-        # Fallback to top scored candidate if all were blocked by soft repetition
+        # Fallback to top scored candidate that minimizes repetition
         if not best_cand and valid_candidates:
-            best_cand = valid_candidates[0]
+            if cls._recent_history:
+                last_op = cls._recent_history[-1][1]
+                for cand in valid_candidates:
+                    if cand.opener_family != last_op:
+                        best_cand = cand
+                        break
+            if not best_cand:
+                best_cand = valid_candidates[0]
 
         if best_cand:
             norm_b = unicodedata.normalize("NFC", best_cand.body)
@@ -344,6 +351,11 @@ class LocalComposerV41:
             )
 
         return best_cand, confidence
+
+    @classmethod
+    def reset_history(cls):
+        """Reset anti-repetition session history."""
+        cls._recent_history.clear()
 
 
 # Backward-compatible alias for existing callers

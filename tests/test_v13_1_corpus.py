@@ -74,6 +74,7 @@ TEST_CORPUS_50 = [
 
 class TestV131CorpusAndQA(unittest.TestCase):
     def setUp(self):
+        LocalComposerV41.reset_history()
         self.composer = LocalComposerV41(seed=42)
 
     def test_50_corpus_all_generate_valid_community_comments(self):

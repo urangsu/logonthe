@@ -71,8 +71,10 @@ class DraftService:
         if (text.startswith('"') and text.endswith('"')) or (text.startswith("'") and text.endswith("'")):
             text = text[1:-1].strip()
 
-        # 6. 공백 정돈
+        # 6. 공백 정돈 및 말미 마침표 자동 정돈
         text = re.sub(r'[ \t]+', ' ', text).strip()
+        if text.endswith(".") or text.endswith("。"):
+            text = text.rstrip(".。").strip()
 
         # 7. 검증 게이트: UI 헤더 단독이거나 너무 짧은 경우 무효화
         invalid_literals = {
