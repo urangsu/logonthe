@@ -71,29 +71,10 @@ class DraftService:
         if (text.startswith('"') and text.endswith('"')) or (text.startswith("'") and text.endswith("'")):
             text = text[1:-1].strip()
 
-        # 6. '꼭', '반드시', '대박', '강추', '취저' 등 매크로/유행어 및 AI 요약 서두 자동 소거
-        text = re.sub(r'^(?:전체적으로|무엇보다도|무엇보다|특히)\s*[,:]*\s*', '', text)
-        text = re.sub(r'\b(?:꼭|반드시|무조건|대박|취저|취향저격|강추)\s+', '', text)
-        text = re.sub(r'\s+(?:꼭|반드시|무조건|대박|취저|취향저격|강추)\s+', ' ', text)
-        text = re.sub(r'꼭\s*(가보고|가봐야|먹어|방문|써보고|가야|참고|봐야|사야|뽑아)', r'\1', text)
+        # 6. 공백 정돈
+        text = re.sub(r'[ \t]+', ' ', text).strip()
 
-        # 7. 모든 이모지 및 웃는 텍스트 이모티콘/문자 자동 소거
-        text = re.sub(r'[\U00010000-\U0010ffff]', '', text)  # 4-byte Unicode emojis
-        text = re.sub(r'[\u2600-\u27bf]', '', text)          # Miscellaneous symbols
-        text = re.sub(r'[❤️💖💕✨😊😄😃😆☺️😋👍👏🎉]+', '', text)
-        text = re.sub(r'[ㅎㅋ]{1,}', '', text)               # ㅎㅎ, ㅋㅋ
-        text = re.sub(r'[\^]{2,}', '', text)                 # ^^
-        text = re.sub(r'[:;][\)-DpP]+', '', text)            # :), :D, ;)
-        text = re.sub(r'[ㅠㅜ]{1,}', '', text)               # ㅠㅠ, ㅜㅜ
-
-        # 문장 부호 및 공백 정돈
-        text = re.sub(r'\s+([.!?])', r'\1', text)
-        text = re.sub(r'[!]{2,}', '!', text)
-        text = re.sub(r'[?]{2,}', '?', text)
-        text = re.sub(r'[.]{2,}', '.', text)
-        text = re.sub(r'\s+', ' ', text).strip()
-
-        # 8. 검증 게이트: UI 헤더 단독이거나 너무 짧은 경우 무효화
+        # 7. 검증 게이트: UI 헤더 단독이거나 너무 짧은 경우 무효화
         invalid_literals = {
             "gemini의 응답", "gemini's response", "gemini", "응답", "답변",
             "model-response", "response"
@@ -105,14 +86,14 @@ class DraftService:
 
     @classmethod
     def resolve_suffix(cls, source: FeedSourceType, config) -> str:
-        """피드 소스 종류(이웃/추천/직접)에 따른 전용 꼬리말 반환"""
+        """피드 소스 종류(이웃/추천/직접)에 따른 전용 꼬리말 반환 (V13.1 기본값은 빈 문자열)"""
         if source == FeedSourceType.RECOMMENDATION:
-            if config.get("recommendation_suffix_enabled", True):
-                return config.get("recommendation_suffix", "시간 되실 때 제 블로그에도 편하게 한 번 놀러 와주세요 :)").strip()
+            if config.get("recommendation_suffix_enabled", False):
+                return config.get("recommendation_suffix", "").strip()
             return ""
 
         # 이웃 새글 및 직접 입력 피드
-        return config.get("general_suffix", config.get("fixed_suffix", "오늘도 좋은 하루 보내세요 :)")).strip()
+        return config.get("general_suffix", config.get("fixed_suffix", "")).strip()
 
     @classmethod
     def compose_body_and_suffix(cls, body: str, suffix: str = "") -> str:

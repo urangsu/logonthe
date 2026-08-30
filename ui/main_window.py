@@ -261,8 +261,16 @@ class MainWindow(ctk.CTk):
         ctk.CTkLabel(tmpl_frame, text="댓글 기본 문구 (Spintax {A|B} 지원):", font=ctk.CTkFont(weight="bold")).pack(anchor="w", padx=8, pady=(2, 0))
         self.tmpl_textbox = ctk.CTkTextbox(tmpl_frame, height=32, font=ctk.CTkFont(size=12))
         self.tmpl_textbox.pack(fill="x", padx=8, pady=2)
-        self.tmpl_textbox.insert("1.0", self.config_service.get("comment_template", "{사진 분위기가 너무 좋네요|정말 좋아 보여요|보기만 해도 기분 좋아지는 글이네요} :)"))
+        self.tmpl_textbox.insert("1.0", self.config_service.get("comment_template", "{비쥬얼이 참 좋네요|너무 좋아 보여요|보기만 해도 기분 좋아지는 글이네요}~"))
         add_mac_clipboard_support(self.tmpl_textbox, self)
+
+        # 댓글 말투 설정 (20대 커뮤니티형 / 조금 더 얌전하게)
+        style_box = ctk.CTkFrame(tmpl_frame, fg_color="transparent")
+        style_box.pack(fill="x", padx=8, pady=2)
+        ctk.CTkLabel(style_box, text="댓글 말투:", font=ctk.CTkFont(size=12, weight="bold")).pack(side="left", padx=(2, 8))
+        self.comment_style_preset_var = ctk.StringVar(value=self.config_service.get("comment_style_preset", "community"))
+        ctk.CTkRadioButton(style_box, text="20대 커뮤니티형", variable=self.comment_style_preset_var, value="community", font=ctk.CTkFont(size=12)).pack(side="left", padx=8)
+        ctk.CTkRadioButton(style_box, text="조금 더 얌전하게", variable=self.comment_style_preset_var, value="calm", font=ctk.CTkFont(size=12)).pack(side="left", padx=8)
 
         # 꼬리말 설정 (일반 꼬리말 + 추천 전용 꼬리말)
         suffix_box = ctk.CTkFrame(tmpl_frame, fg_color="transparent")
@@ -271,14 +279,14 @@ class MainWindow(ctk.CTk):
         ctk.CTkLabel(suffix_box, text="일반 꼬리말 (이웃/직접):", font=ctk.CTkFont(size=12, weight="bold")).grid(row=0, column=0, sticky="w", padx=2, pady=2)
         self.general_suffix_entry = ctk.CTkEntry(suffix_box, font=ctk.CTkFont(size=12), width=340)
         self.general_suffix_entry.grid(row=0, column=1, sticky="w", padx=4, pady=2)
-        self.general_suffix_entry.insert(0, self.config_service.get("general_suffix", self.config_service.get("fixed_suffix", "오늘도 좋은 하루 보내세요 :)")))
+        self.general_suffix_entry.insert(0, self.config_service.get("general_suffix", self.config_service.get("fixed_suffix", "")))
         add_mac_clipboard_support(self.general_suffix_entry, self)
 
-        self.recom_suffix_chk_var = ctk.BooleanVar(value=self.config_service.get("recommendation_suffix_enabled", True))
+        self.recom_suffix_chk_var = ctk.BooleanVar(value=self.config_service.get("recommendation_suffix_enabled", False))
         ctk.CTkCheckBox(suffix_box, text="추천 피드 전용 꼬리말:", variable=self.recom_suffix_chk_var, font=ctk.CTkFont(size=12, weight="bold")).grid(row=1, column=0, sticky="w", padx=2, pady=2)
         self.recom_suffix_entry = ctk.CTkEntry(suffix_box, font=ctk.CTkFont(size=12), width=340)
         self.recom_suffix_entry.grid(row=1, column=1, sticky="w", padx=4, pady=2)
-        self.recom_suffix_entry.insert(0, self.config_service.get("recommendation_suffix", "시간 되실 때 제 블로그에도 편하게 한 번 놀러 와주세요 :)"))
+        self.recom_suffix_entry.insert(0, self.config_service.get("recommendation_suffix", ""))
         add_mac_clipboard_support(self.recom_suffix_entry, self)
 
         # 5. Pacing Settings Frame
@@ -504,11 +512,22 @@ class MainWindow(ctk.CTk):
 
         praise_b = (mode == "praise")
         short_b = (mode == "short")
+        preset = self.comment_style_preset_var.get() if hasattr(self, "comment_style_preset_var") else "community"
 
-        res = ContextualDraftEngine.generate(title, excerpt, praise_boost=praise_b, short_boost=short_b)
+        res = ContextualDraftEngine.generate(title, excerpt, praise_boost=praise_b, short_boost=short_b, preset=preset)
+        if not res or not res.body:
+            messagebox.showwarning("생성 불가", "본문에서 구체적인 앵커를 찾지 못해 변형 댓글을 생성하지 못했습니다.")
+            return
+
         source_type = FeedSourceType(self.source_var.get())
         suffix = DraftService.resolve_suffix(source_type, self.config_service)
         final_comment = DraftService.compose_body_and_suffix(res.body, suffix)
+
+        from services.comments.community_rhythm import FinalQualityGate
+        gate_res = FinalQualityGate.validate_final_text(final_comment, preset=preset, source="local")
+        if not gate_res.valid:
+            messagebox.showwarning("품질 게이트 실패", f"생성된 댓글이 품질 기준을 통과하지 못했습니다:\n\n- 사유: {gate_res.reason}\n- 위반: {gate_res.matched or gate_res.code}")
+            return
 
         self.clipboard_clear()
         self.clipboard_append(final_comment)
@@ -571,6 +590,14 @@ class MainWindow(ctk.CTk):
 
         if not text:
             messagebox.showwarning("경고", "클립보드에 댓글 텍스트가 없습니다. Gemini에서 생성된 댓글을 먼저 복사해 주세요.")
+            return
+
+        preset = self.comment_style_preset_var.get() if hasattr(self, "comment_style_preset_var") else "community"
+        from services.comments.community_rhythm import FinalQualityGate
+        gate_res = FinalQualityGate.validate_final_text(text, preset=preset, source="clipboard")
+        if not gate_res.valid:
+            logger.log(f"⚠️ [AI] 클립보드 댓글이 품질 게이트를 통과하지 못했습니다: [{gate_res.code}] {gate_res.reason} (매칭: {gate_res.matched})", "WARNING")
+            messagebox.showwarning("품질 게이트 실패", f"클립보드 댓글이 품질 기준을 통과하지 못했습니다.\n\n- 사유: {gate_res.reason}\n- 위반 항목: {gate_res.matched or gate_res.code}")
             return
 
         self.command_bridge.send_apply_clipboard_comment(text)
@@ -686,7 +713,6 @@ class MainWindow(ctk.CTk):
                     rep = res["report"]
                     master_csv = res.get("master_csv_path", "")
                     unresp_csv = res.get("unresponsive_csv_path", "")
-                    non_buddy_csv = res.get("non_buddy_csv_path", "")
                     audit_st = rep.get("audit_state", "complete").upper()
 
                     msg = (
@@ -696,8 +722,7 @@ class MainWindow(ctk.CTk):
                         f"• ❤️ 최근 글 반응 이웃: {rep.get('reacted_buddies_count', 0)}명\n"
                         f"   (공감+댓글: {rep.get('both_like_and_comment_count', 0)}명, 공감만: {rep.get('liked_only_count', 0)}명, 댓글만: {rep.get('commented_only_count', 0)}명)\n"
                         f"• 🚫 최근 글 무반응 이웃: {rep.get('unresponsive_buddies_count', 0)}명\n"
-                        f"   (48시간 신규 유예: {rep.get('grace_period_buddies_count', 0)}명 / 실질 무반응: {rep.get('real_unresponsive_count', 0)}명)\n"
-                        f"• 🌐 비이웃 참여자: {rep.get('non_buddy_reactors_count', 0)}명\n\n"
+                        f"   (추가일 기준 참고: {rep.get('grace_period_buddies_count', 0)}명 / 확인된 무반응: {rep.get('real_unresponsive_count', 0)}명)\n\n"
                         f"무반응 이웃 CSV:\n{unresp_csv}\n\n"
                         f"무반응 이웃 CSV 파일을 바로 여시겠습니까?"
                     )
@@ -783,6 +808,7 @@ class MainWindow(ctk.CTk):
             "fixed_suffix": self.general_suffix_entry.get().strip(),
             "recommendation_suffix_enabled": self.recom_suffix_chk_var.get(),
             "recommendation_suffix": self.recom_suffix_entry.get().strip(),
+            "comment_style_preset": self.comment_style_preset_var.get(),
             "secret_comment": self.secret_comment_var.get(),
             "direct_urls": direct_urls,
 

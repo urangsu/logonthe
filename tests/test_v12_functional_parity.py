@@ -52,14 +52,14 @@ class V12FunctionalParityTests(unittest.TestCase):
             self.assertTrue(cfg.get("comment_enabled"))
 
     def test_partial_audit_does_not_confirm_zero_reaction(self):
-        # This fixture exercises the V12 rule directly at the report boundary:
+        # This fixture exercises the V12/V13 rule directly at the report boundary:
         # a partial scan must retain unknown, not classify a buddy as silent.
         from services.buddy_list_collector import BuddyInfo, BuddyCollectionResult
         with patch("services.buddy_list_collector.BuddyListCollector.collect_all_buddies") as collect, \
              patch("services.my_blog_recent_posts.MyBlogRecentPostService.fetch_recent_posts", return_value=[{"log_no": "1", "url": "u", "title": "t"}]), \
              patch("services.reaction_participant_collector.ReactionParticipantCollector.collect", return_value=([], "partial", None)), \
              patch("services.comment_participant_collector.CommentParticipantCollector.collect", return_value=([], "complete", 0)), \
-             patch("services.engagement_audit_store.EngagementAuditStore.save_v8", return_value=("j", "m", "u", "n")):
+             patch("services.engagement_audit_store.EngagementAuditStore.save_v13", return_value=("j", "m", "u")):
             collect.return_value = BuddyCollectionResult(
                 {"b": BuddyInfo("b", "N", "", "", "이웃", None, "26.08.01.")},
                 "complete", 1, 1, 1, ["p"])
@@ -68,15 +68,14 @@ class V12FunctionalParityTests(unittest.TestCase):
             self.assertIsNone(row["no_reaction"])
             self.assertEqual(result["report"]["unresponsive_buddies"], [])
 
-    def test_csv_output_is_atomic_formula_safe_and_has_latest_alias(self):
+    def test_csv_output_is_atomic_formula_safe(self):
         report = {"master_buddies": [{"blog_id": "=HYPERLINK(\"x\")", "nickname": "N", "no_reaction": None}],
-                  "unresponsive_buddies": [], "non_buddy_reactors": []}
-        with tempfile.TemporaryDirectory() as tmp, patch.object(EngagementAuditStore, "get_file_paths", return_value=(f"{tmp}/r.json", f"{tmp}/m.csv", f"{tmp}/u.csv", f"{tmp}/n.csv")):
-            _, master, _, _ = EngagementAuditStore.save_v8(report)
+                  "unresponsive_buddies": []}
+        with tempfile.TemporaryDirectory() as tmp, patch.object(EngagementAuditStore, "get_file_paths", return_value=(f"{tmp}/r.json", f"{tmp}/m.csv", f"{tmp}/u.csv")):
+            _, master, _ = EngagementAuditStore.save_v13(report)
             with open(master, encoding="utf-8-sig", newline="") as handle:
                 row = next(csv.DictReader(handle))
             self.assertEqual(row["블로그ID"], "'=HYPERLINK(\"x\")")
-            self.assertTrue(__import__("os").path.exists(f"{tmp}/buddy_engagement_audit_latest.csv"))
             self.assertFalse(any(name.endswith(".tmp") for name in __import__("os").listdir(tmp)))
 
     def test_buddy_dom_scopes_rows_and_ignores_navigation_links(self):

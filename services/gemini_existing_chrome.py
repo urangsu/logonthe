@@ -114,6 +114,7 @@ class ExistingChromeGeminiBridge:
         cls,
         prompt: str,
         stop_event: Optional[threading.Event] = None,
+        preset: str = "community",
         request_id: Optional[str] = None
     ) -> Optional[str]:
         """
@@ -287,18 +288,11 @@ class ExistingChromeGeminiBridge:
             logger.log("⚠️ [GEMINI/EXTERNAL] 유효한 신규 답변 내용을 읽어오지 못했습니다. (로컬 엔진으로 전환)", "WARNING")
             return None
 
-        # 8. PositiveSafetyValidator 안전성 검증
-        cand = CommentCandidate(
-            body=final_answer,
-            category="AI_GENERATED",
-            reaction_intent=ReactionIntent.DETAIL_PRAISE,
-            first_person_intent=FirstPersonIntent.NONE,
-            subject="",
-            template_id="gemini_external_v5"
-        )
-        valid, reason = PositiveSafetyValidator.validate_candidate(cand)
-        if not valid:
-            logger.log(f"⚠️ [GEMINI/EXTERNAL] AI 생성 댓글이 안전성 검증을 통과하지 못했습니다 ({reason}). 로컬 엔진으로 전환합니다.", "WARNING")
+        # 8. FinalQualityGate 검증
+        from services.comments.community_rhythm import FinalQualityGate, CommunityRhythmPreset
+        gate_res = FinalQualityGate.validate_final_text(final_answer, preset=preset, source="gemini")
+        if not gate_res.valid:
+            logger.log(f"⚠️ [GEMINI/EXTERNAL] AI 생성 댓글이 품질 게이트를 통과하지 못했습니다 ([{gate_res.code}] {gate_res.reason} / 매칭: {gate_res.matched}). 로컬 엔진으로 전환합니다.", "WARNING")
             return None
 
         # 클립보드에 최종 답변 복사 및 검증

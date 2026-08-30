@@ -227,11 +227,12 @@ class PostProcessor:
                         # Like, if any, remains recorded; this post is
                         # recoverable and the controller may continue.
                         return result
+                    preset = self.config.get("comment_style_preset", "community")
                     suffix = DraftService.resolve_suffix(post.source, self.config)
 
                     ai_prompt = ""
                     if self.ai_clipboard_enabled or self.gemini_web_enabled:
-                        ai_prompt = AIPromptBuilder.build(post.title, post.excerpt, style=self.ai_prompt_style)
+                        ai_prompt = AIPromptBuilder.build(post.title, post.excerpt, style=self.ai_prompt_style, preset=preset)
 
                     if self.state_mgr:
                         self.state_mgr.update(
@@ -255,7 +256,8 @@ class PostProcessor:
                             try:
                                 gemini_answer = ExistingChromeGeminiBridge.generate_comment(
                                     prompt=ai_prompt,
-                                    stop_event=self.stop_event
+                                    stop_event=self.stop_event,
+                                    preset=preset
                                 )
                             except Exception as e:
                                 logger.log(f"[GEMINI/EXTERNAL] 연동 실패: {e}", "WARNING")
@@ -266,7 +268,8 @@ class PostProcessor:
                                     page=self.gemini_page,
                                     prompt=ai_prompt,
                                     gemini_url=self.gemini_url,
-                                    stop_event=self.stop_event
+                                    stop_event=self.stop_event,
+                                    preset=preset
                                 )
                             except Exception as e:
                                 logger.log(f"[GEMINI/MANAGED] 생성 실패: {e}", "WARNING")
@@ -276,22 +279,41 @@ class PostProcessor:
                         except Exception:
                             pass
 
+                    from services.comments.community_rhythm import FinalQualityGate
+
                     if gemini_answer:
-                        draft_text = DraftService.compose_body_and_suffix(gemini_answer, suffix)
-                        draft_source_label = "Gemini 생성"
-                    else:
-                        # [Tier 2] 로컬 인간형 엔진
-                        local_res = ContextualDraftEngine.generate(post.title or "", post.excerpt or "")
-                        if local_res and local_res.body:
-                            draft_text = DraftService.compose_body_and_suffix(local_res.body, suffix)
-                            detected_category = local_res.category
-                            intent_tag = f"/{local_res.intent.value}" if local_res.intent.value != "none" else ""
-                            draft_source_label = f"로컬 분석({local_res.category}{intent_tag})"
-                            logger.log(f"💡 [DRAFT] 로컬 맞춤형 초안 생성 ({local_res.category}{intent_tag} / '{local_res.subject}'): \"{local_res.body}\"")
+                        cand_composed = DraftService.compose_body_and_suffix(gemini_answer, suffix)
+                        gate_res = FinalQualityGate.validate_final_text(cand_composed, preset=preset, source="gemini")
+                        if gate_res.valid:
+                            draft_text = cand_composed
+                            draft_source_label = "Gemini 생성"
                         else:
-                            # [Tier 3] Spintax Fallback
-                            draft_text = DraftService.generate(self.comment_template, suffix)
-                            draft_source_label = "기본 템플릿"
+                            logger.log(f"⚠️ [GEMINI] 생성된 텍스트가 품질 게이트를 통과하지 못했습니다 ([{gate_res.code}] {gate_res.reason} / 매칭: {gate_res.matched}). 로컬 엔진으로 전환합니다.", "WARNING")
+
+                    if not draft_text:
+                        # [Tier 2] 로컬 V4.1 인간형 엔진
+                        local_res = ContextualDraftEngine.generate(post.title or "", post.excerpt or "", preset=preset)
+                        if local_res and local_res.body:
+                            cand_composed = DraftService.compose_body_and_suffix(local_res.body, suffix)
+                            gate_res = FinalQualityGate.validate_final_text(cand_composed, preset=preset, source="local")
+                            if gate_res.valid:
+                                draft_text = cand_composed
+                                detected_category = local_res.category
+                                draft_source_label = f"로컬 분석({local_res.category})"
+                                logger.log(f"💡 [DRAFT] 로컬 맞춤형 초안 생성 ({local_res.category} / '{local_res.anchor}'): \"{local_res.body}\"")
+
+                    # Section 29: No generic fallback when all candidates fail
+                    if not draft_text:
+                        logger.log("  ⚠️ [COMMENT] 유효한 앵커 기반 댓글 초안을 생성하지 못했습니다. (작성 스킵)", "WARNING")
+                        result.comment_result = CommentProcessResult(status=CommentSubmitState.FAILED, error="no_valid_draft_candidate")
+                        return result
+
+                    # 에디터 주입 전 Gate 재검증
+                    pre_inject_gate = FinalQualityGate.validate_final_text(draft_text, preset=preset, source="editor_injection")
+                    if not pre_inject_gate.valid:
+                        logger.log(f"  ❌ [COMMENT] 에디터 주입 전 품질 게이트 실패: [{pre_inject_gate.code}] {pre_inject_gate.reason}", "ERROR")
+                        result.comment_result = CommentProcessResult(status=CommentSubmitState.FAILED, error=pre_inject_gate.code)
+                        return result
 
                     # 에디터에 주입 및 Read-back 검증
                     set_ok = CommentEditorAdapter.set_text(detail_page, draft_text)
@@ -319,7 +341,7 @@ class PostProcessor:
                             self.state_mgr.update(new_state=FeedState.WAITING_USER, message=msg)
 
                         action = CommentInteractionService.wait_for_user_action(
-                            detail_page, self.stop_event, command_bridge=self.command_bridge
+                            detail_page, self.stop_event, command_bridge=self.command_bridge, preset=preset
                         )
 
                         if action == UserAction.STOP:
@@ -331,13 +353,24 @@ class PostProcessor:
                                 self.state_mgr.update(new_state=FeedState.SKIPPING, inc_skip=True)
                         elif action == UserAction.SUBMIT:
                             final_text = CommentInteractionService.read_final_text(detail_page)
-                            cmt_res.submitted_text = final_text or draft_text
+                            submitted_cand = final_text or draft_text
+
+                            # 등록 직전 최종 read-back 텍스트 Gate 검증
+                            final_gate = FinalQualityGate.validate_final_text(submitted_cand, preset=preset, source="user_submission")
+                            if not final_gate.valid:
+                                logger.log(f"  ❌ [COMMENT] 등록 직전 댓글 품질 게이트 통과 실패: [{final_gate.code}] {final_gate.reason} (매칭: {final_gate.matched}) - 등록 취소", "ERROR")
+                                cmt_res.status = CommentSubmitState.FAILED
+                                cmt_res.error = final_gate.code
+                                result.comment_result = cmt_res
+                                return result
+
+                            cmt_res.submitted_text = submitted_cand
 
                             if self.state_mgr:
                                 self.state_mgr.update(new_state=FeedState.SUBMITTING, message="댓글 등록 및 검증 중...")
 
                             submit_status = CommentInteractionService.submit_and_verify(
-                                detail_page, cmt_res.submitted_text, self.stop_event
+                                detail_page, cmt_res.submitted_text, self.stop_event, preset=preset
                             )
                             cmt_res.status = submit_status
 

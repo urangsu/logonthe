@@ -6,36 +6,21 @@ from unittest.mock import MagicMock, patch
 from services.buddy_list_collector import BuddyListCollector, BuddyInfo, BuddyCollectionResult
 from services.engagement_audit_service import EngagementAuditService
 from services.engagement_audit_store import EngagementAuditStore
-from services.comments.validators import PositiveSafetyValidator
-from services.comments.intents import CommentCandidate, ReactionIntent, FirstPersonIntent
+from services.comments.community_rhythm import FinalQualityGate, CommunityRhythmPreset
 
 
-class TestEngagementAuditRebuildV8(unittest.TestCase):
+class TestEngagementAuditV13(unittest.TestCase):
     def test_comment_length_limit_100_chars(self):
-        """댓글 100자 이하 허용, 101자 이상 거부 (v7/v8 정책)"""
-        cand_ok = CommentCandidate(
-            body="남해 독일마을 플래터 구성이 알차고 맛있어 보여요! 나중에 가보고 싶네요.",
-            category="FOOD",
-            reaction_intent=ReactionIntent.DETAIL_PRAISE,
-            first_person_intent=FirstPersonIntent.NONE,
-            subject="음식",
-            template_id="v8_test"
-        )
-        valid, _ = PositiveSafetyValidator.validate_candidate(cand_ok)
-        self.assertTrue(valid)
+        """댓글 100자 이하 허용, 101자 이상 거부 (V13.1 정책)"""
+        cand_ok = "남해 독일마을 플래터 구성 알차고 비쥬얼 좋네요~ 나중에 가보고 싶어요~"
+        res = FinalQualityGate.validate_final_text(cand_ok, preset="community", source="test")
+        self.assertTrue(res.valid)
 
-        cand_over = CommentCandidate(
-            body="탐론 70-300mm 망원 렌즈 가성비 구성이 정말 알차 보이네요! 펜탁스 바디에 마운트한 사진 보니까 색감도 너무 예쁘게 잘 나오는 것 같아요. 다음에 출사 갈 때 저도 다뤄보고 싶네요. 사진 결과물이 아주 만족스러워 보입니다.",
-            category="IT_GADGET",
-            reaction_intent=ReactionIntent.DETAIL_PRAISE,
-            first_person_intent=FirstPersonIntent.NONE,
-            subject="탐론",
-            template_id="v8_test"
-        )
-        self.assertGreater(len(cand_over.body), 100)
-        valid_over, reason = PositiveSafetyValidator.validate_candidate(cand_over)
-        self.assertFalse(valid_over)
-        self.assertIn("length_out_of_bounds", reason)
+        cand_over = "탐론 70-300mm 망원 렌즈 가성비 구성이 정말 알차 보이네요 펜탁스 바디에 마운트한 사진 보니까 색감도 너무 예쁘게 잘 나오는 것 같아요 다음에 출사 갈 때 저도 다뤄보고 싶네요 사진 결과물이 아주 만족스러워 보여요~"
+        self.assertGreater(len(cand_over), 100)
+        res_over = FinalQualityGate.validate_final_text(cand_over, preset="community", source="test")
+        self.assertFalse(res_over.valid)
+        self.assertEqual(res_over.code, "length_exceeded")
 
     def test_buddy_expected_194_collected_50_is_partial(self):
         """기대 이웃 수 194명 대비 50명만 수집되었을 때 COMPLETE가 아닌 PARTIAL 판정 검증"""
@@ -57,7 +42,7 @@ class TestEngagementAuditRebuildV8(unittest.TestCase):
         self.assertEqual(res.expected_total, 194)
 
     def test_master_csv_rows_equal_total_buddies_and_zero_zero_unresponsive(self):
-        """Master CSV 행 수가 전체 이웃 수(194)와 정확히 일치하고 like/comment가 0인 이웃만 무반응으로 분류되는지 검증"""
+        """Master CSV 행 수가 전체 이웃 수와 정확히 일치하고 like/comment가 0인 이웃만 무반응으로 분류되는지 검증"""
         page_mock = MagicMock()
 
         # 3명의 이웃과 1명의 비이웃 반응자
@@ -85,7 +70,7 @@ class TestEngagementAuditRebuildV8(unittest.TestCase):
                 {"log_no": "102", "url": "https://m.blog.naver.com/me/102", "title": "글2"}
             ]
 
-            # Post 1: buddy_both liked & commented, non_buddy_1 commented
+            # Post 1: buddy_both liked & commented, stranger_1 commented (ignored in v13.1)
             # Post 2: buddy_both liked, buddy_like_only liked
             mock_likers.side_effect = [
                 ([{"blog_id": "buddy_both", "nickname": "양방향"}], "complete", 1),
@@ -129,56 +114,45 @@ class TestEngagementAuditRebuildV8(unittest.TestCase):
             self.assertEqual(len(rep["unresponsive_buddies"]), 1)
             self.assertEqual(rep["unresponsive_buddies"][0]["blog_id"], "buddy_unresp")
 
-            # Non-buddy reactors separated
-            self.assertEqual(len(rep["non_buddy_reactors"]), 1)
-            self.assertEqual(rep["non_buddy_reactors"][0]["blog_id"], "stranger_1")
-
-    def test_store_creates_3_csv_files_with_correct_headers(self):
-        """Master CSV, Unresponsive CSV, Non-buddy CSV가 정확한 헤더와 행으로 생성되는지 검증"""
+    def test_store_creates_csv_files_with_correct_v13_headers(self):
+        """Master CSV, Unresponsive CSV가 V13.1 최소 필수 한글 헤더와 행으로 생성되는지 검증"""
         test_report = {
-            "generated_at": "2026-08-26 22:00:00",
+            "generated_at": "2026-08-30 16:00:00",
             "blog_id": "test_blog",
             "audit_state": "complete",
             "recent_post_count": 2,
             "master_buddies": [
                 {
-                    "blog_id": "b1", "nickname": "이웃1", "blog_title": "타이틀1", "group_name": "그룹A",
-                    "buddy_type": "서로이웃", "added_date": "26.08.20.", "last_post_date": "26.08.26.",
+                    "blog_id": "b1", "nickname": "이웃1", "group_name": "그룹A",
+                    "buddy_type": "서로이웃", "added_date": "26.08.20.", "news_feed_state": "ON",
                     "like_count": 2, "comment_count": 1, "comment_entry_count": 1, "engaged_post_count": 2,
-                    "liked_only": False, "commented_only": False, "both_like_and_comment": True, "no_reaction": False,
-                    "is_recent_buddy": False, "scan_complete": True
+                    "observation_scope": "최근 2개 글", "checked_at": "2026-08-30 16:00:00",
+                    "reaction_category": "반응 확인"
                 },
                 {
-                    "blog_id": "b2", "nickname": "이웃2", "blog_title": "타이틀2", "group_name": "그룹B",
-                    "buddy_type": "이웃", "added_date": "26.08.25.", "last_post_date": "26.08.20.",
+                    "blog_id": "b2", "nickname": "이웃2", "group_name": "그룹B",
+                    "buddy_type": "이웃", "added_date": "26.08.25.", "news_feed_state": "ON",
                     "like_count": 0, "comment_count": 0, "comment_entry_count": 0, "engaged_post_count": 0,
-                    "liked_only": False, "commented_only": False, "both_like_and_comment": False, "no_reaction": True,
-                    "is_recent_buddy": True, "scan_complete": True
+                    "observation_scope": "최근 2개 글", "checked_at": "2026-08-30 16:00:00",
+                    "reaction_category": "무반응"
                 }
             ],
             "unresponsive_buddies": [
                 {
-                    "blog_id": "b2", "nickname": "이웃2", "blog_title": "타이틀2", "group_name": "그룹B",
-                    "buddy_type": "이웃", "added_date": "26.08.25.", "last_post_date": "26.08.20.",
+                    "blog_id": "b2", "nickname": "이웃2", "group_name": "그룹B",
+                    "buddy_type": "이웃", "added_date": "26.08.25.", "news_feed_state": "ON",
                     "like_count": 0, "comment_count": 0, "comment_entry_count": 0, "engaged_post_count": 0,
-                    "liked_only": False, "commented_only": False, "both_like_and_comment": False, "no_reaction": True,
-                    "is_recent_buddy": True, "scan_complete": True
-                }
-            ],
-            "non_buddy_reactors": [
-                {
-                    "blog_id": "stranger_1", "nickname": "외부인", "profile_url": "https://m.blog.naver.com/stranger_1",
-                    "like_count": 1, "comment_count": 1, "comment_entry_count": 1, "engaged_post_count": 1
+                    "observation_scope": "최근 2개 글", "checked_at": "2026-08-30 16:00:00",
+                    "reaction_category": "무반응"
                 }
             ]
         }
 
-        json_p, master_csv, unresp_csv, non_buddy_csv = EngagementAuditStore.save_v8(test_report)
+        json_p, master_csv, unresp_csv = EngagementAuditStore.save_v13(test_report)
 
         self.assertTrue(os.path.exists(json_p))
         self.assertTrue(os.path.exists(master_csv))
         self.assertTrue(os.path.exists(unresp_csv))
-        self.assertTrue(os.path.exists(non_buddy_csv))
 
         # Check Master CSV row count & Korean headers
         with open(master_csv, "r", encoding="utf-8-sig") as f:
@@ -186,12 +160,22 @@ class TestEngagementAuditRebuildV8(unittest.TestCase):
             rows = list(reader)
             self.assertEqual(len(rows), 2)
             self.assertEqual(rows[0]["블로그ID"], "b1")
-            self.assertEqual(rows[0]["블로그명"], "타이틀1")
-            self.assertEqual(rows[0]["반응상태"], "공감+댓글")
-            self.assertEqual(rows[0]["참여여부"], "참여")
-            self.assertEqual(rows[0]["공감댓글모두"], "O")
-            self.assertEqual(rows[1]["참여여부"], "미참여")
-            self.assertEqual(rows[1]["무반응여부"], "O")
+            self.assertEqual(rows[0]["닉네임"], "이웃1")
+            self.assertEqual(rows[0]["블로그링크"], "https://m.blog.naver.com/b1")
+            self.assertEqual(rows[0]["이웃구분"], "서로이웃")
+            self.assertEqual(rows[0]["그룹"], "그룹A")
+            self.assertEqual(rows[0]["추가일"], "26.08.20.")
+            self.assertEqual(rows[0]["내 새글보기"], "ON")
+            self.assertEqual(rows[0]["공감한 글 수"], "2")
+            self.assertEqual(rows[0]["댓글 단 글 수"], "1")
+            self.assertEqual(rows[0]["총댓글 수"], "1")
+            self.assertEqual(rows[0]["반응한 글 수"], "2")
+            self.assertEqual(rows[0]["관찰 범위"], "최근 2개 글")
+            self.assertEqual(rows[0]["확인 시각"], "2026-08-30 16:00:00")
+            self.assertEqual(rows[0]["반응 구분"], "반응 확인")
+
+            self.assertEqual(rows[1]["블로그ID"], "b2")
+            self.assertEqual(rows[1]["반응 구분"], "무반응")
 
         # Check Unresponsive CSV row count & Korean headers
         with open(unresp_csv, "r", encoding="utf-8-sig") as f:
@@ -199,16 +183,7 @@ class TestEngagementAuditRebuildV8(unittest.TestCase):
             rows = list(reader)
             self.assertEqual(len(rows), 1)
             self.assertEqual(rows[0]["블로그ID"], "b2")
-            self.assertEqual(rows[0]["참여여부"], "미참여")
-            self.assertEqual(rows[0]["신규유예여부"], "유예대상")
-
-        # Check Non-buddy CSV row count & Korean headers
-        with open(non_buddy_csv, "r", encoding="utf-8-sig") as f:
-            reader = csv.DictReader(f)
-            rows = list(reader)
-            self.assertEqual(len(rows), 1)
-            self.assertEqual(rows[0]["블로그ID"], "stranger_1")
-            self.assertEqual(rows[0]["참여여부"], "참여")
+            self.assertEqual(rows[0]["반응 구분"], "무반응")
 
 
 if __name__ == "__main__":
