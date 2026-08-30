@@ -63,12 +63,73 @@ const idFrom = href => {
     return id && /^[A-Za-z0-9_-]{1,50}$/.test(id) && !/^(postlist|postview|buddylistmanage|sympathyhistorylist|main|home)$/i.test(id) ? id.toLowerCase() : null;
   } catch (_) { return null; }
 };
-const headers = table => { const row = table.querySelector('thead tr') || table.querySelector('tr:has(th)'); return row ? Array.from(row.querySelectorAll(':scope > th,:scope > td')).map(cell => { const clone=cell.cloneNode(true); clone.querySelectorAll('select,option').forEach(x=>x.remove()); return {text:clone.textContent.replace(/\s+/g,''), hasSelect:!!cell.querySelector('select')}; }) : []; };
-const tables = Array.from(document.querySelectorAll('table')).filter(table => { const h=headers(table); const name=h.findIndex(x => !x.hasSelect && /^(이웃|이웃블로그|이웃이름|블로그명|닉네임)$/.test(x.text)); return shown(table) && name >= 0 && h.some(x=>/추가일|등록일/.test(x.text)) && (table.querySelector("input[name='buddySeq'],input[name='buddyBlogNo']") || /등록된 이웃이 없습니다|이웃이 없습니다/.test(table.textContent)); });
+const headers = table => {
+  const row = table.querySelector('thead tr') || table.querySelector('tr:has(th)');
+  return row ? Array.from(row.querySelectorAll(':scope > th,:scope > td')).map((cell, idx) => {
+    const rawText = cell.textContent.replace(/\s+/g,'');
+    const select = cell.querySelector('select');
+    const selectName = select ? (select.getAttribute('name') || select.id || '') : '';
+    const isGroup = /그룹/.test(rawText) || /group/i.test(selectName) || /group/i.test(cell.className || '');
+    const clone = cell.cloneNode(true);
+    clone.querySelectorAll('select,option').forEach(x=>x.remove());
+    return {idx, text:clone.textContent.replace(/\s+/g,''), rawText, hasSelect:!!select, isGroup};
+  }) : [];
+};
+const tables = Array.from(document.querySelectorAll('table')).filter(table => {
+  const h = headers(table);
+  const name = h.findIndex(x => !x.hasSelect && /^(이웃|이웃블로그|이웃이름|블로그명|닉네임)$/.test(x.text));
+  return shown(table) && name >= 0 && h.some(x=>/추가일|등록일/.test(x.text)) && (table.querySelector("input[name='buddySeq'],input[name='buddyBlogNo']") || /등록된 이웃이 없습니다|이웃이 없습니다/.test(table.textContent));
+});
 if (tables.length !== 1) return {scopeVerified:false,items:[],terminal:false};
-const table=tables[0], h=headers(table), index=re=>h.findIndex(x=>re.test(x.text)); const group=index(/^그룹/), name=index(/^(이웃|이웃블로그|이웃이름|블로그명|닉네임)$/), type=index(/^(이웃)?구분$/), add=index(/추가일|등록일/), last=index(/최근.*(글|작성)|마지막.*글/), setting=index(/새글소식|새글알림|새글보기/);
-const items=[], rows=Array.from(table.querySelectorAll('tbody > tr')).filter(r=>r.querySelector("input[name='buddySeq'],input[name='buddyBlogNo']")); let unresolved=0;
-for (const row of rows) { const cells=Array.from(row.querySelectorAll(':scope > td')); const cell=i=>i>=0?cells[i]:null; const links=Array.from((cell(name)||row).querySelectorAll('a[href]')).map(a=>({a,id:idFrom(a.href)})).filter(x=>x.id); const ids=[...new Set(links.map(x=>x.id))]; if(ids.length!==1){unresolved++;continue;} const raw=(cell(name)?.textContent||links[0].a.textContent||'').trim(); const dates=cells.map(c=>c.textContent.trim()).filter(t=>/\d{2}[.\-]\d{2}[.\-]\d{2}/.test(t)); const checkbox=cell(setting)?.querySelector('input[type=checkbox]'); items.push({blog_id:ids[0],nickname:(raw.split('|')[0]||ids[0]).trim(),blog_title:raw.includes('|')?raw.split('|').slice(1).join('|').trim():'',group_name:cell(group)?.textContent.trim()||'',buddy_type:/서로이웃/.test(cell(type)?.textContent||'')?'서로이웃':/이웃/.test(cell(type)?.textContent||'')?'이웃':'unknown',added_date:cell(add)?.textContent.trim()||dates[0]||'',last_post_date:cell(last)?.textContent.trim()||dates[1]||'',new_posts_setting:'unknown',setting_semantics_verified:false,setting_evidence:checkbox?'native_checkbox:'+String(checkbox.checked):null}); }
+const table=tables[0], h=headers(table);
+const index = re => h.findIndex(x => re.test(x.text) || re.test(x.rawText));
+let group = h.findIndex(x => x.isGroup || /^그룹/.test(x.text) || /^그룹/.test(x.rawText));
+const name = h.findIndex(x => !x.hasSelect && /^(이웃|이웃블로그|이웃이름|블로그명|닉네임)$/.test(x.text));
+const type = index(/^(이웃)?구분$/);
+const add = index(/추가일|등록일/);
+const last = index(/최근.*(글|작성)|마지막.*글/);
+const setting = index(/새글소식|새글알림|새글보기/);
+
+const items=[], rows=Array.from(table.querySelectorAll('tbody > tr')).filter(r=>r.querySelector("input[name='buddySeq'],input[name='buddyBlogNo']"));
+let unresolved=0;
+for (const row of rows) {
+  const cells=Array.from(row.querySelectorAll(':scope > td'));
+  const cell=i=>(i>=0 && i<cells.length)?cells[i]:null;
+  const links=Array.from((cell(name)||row).querySelectorAll('a[href]')).map(a=>({a,id:idFrom(a.href)})).filter(x=>x.id);
+  const ids=[...new Set(links.map(x=>x.id))];
+  if(ids.length!==1){unresolved++;continue;}
+  const raw=(cell(name)?.textContent||links[0].a.textContent||'').trim();
+  const dates=cells.map(c=>c.textContent.trim()).filter(t=>/\d{2}[.\-]\d{2}[.\-]\d{2}/.test(t));
+  const checkbox=cell(setting)?.querySelector('input[type=checkbox]');
+
+  let groupName = (cell(group)?.textContent||'').trim();
+  if (!groupName || groupName === '그룹') {
+    for (let cIdx = 0; cIdx < cells.length; cIdx++) {
+      if (cIdx === name || cIdx === type || cIdx === add || cIdx === last || cIdx === setting) continue;
+      const c = cells[cIdx];
+      if (c.querySelector("input[name='buddySeq'],input[name='buddyBlogNo']")) continue;
+      if (c.querySelector("input[type=checkbox]")) continue;
+      const t = c.textContent.trim();
+      if (!t || /\d{2}[.\-]\d{2}[.\-]\d{2}/.test(t) || /^(이웃|서로이웃)$/.test(t)) continue;
+      groupName = t;
+      break;
+    }
+  }
+  if (!groupName) groupName = '기본그룹';
+
+  items.push({
+    blog_id: ids[0],
+    nickname: (raw.split('|')[0]||ids[0]).trim(),
+    blog_title: raw.includes('|') ? raw.split('|').slice(1).join('|').trim() : '',
+    group_name: groupName,
+    buddy_type: /서로이웃/.test(cell(type)?.textContent||'') ? '서로이웃' : (/이웃/.test(cell(type)?.textContent||'') ? '이웃' : 'unknown'),
+    added_date: cell(add)?.textContent.trim() || dates[0] || '',
+    last_post_date: cell(last)?.textContent.trim() || dates[1] || '',
+    new_posts_setting: 'unknown',
+    setting_semantics_verified: false,
+    setting_evidence: checkbox ? 'native_checkbox:' + String(checkbox.checked) : null
+  });
+}
 const scope=table.parentElement; const total=scope?.querySelector('.total,.buddy_count'); const m=total?.textContent.replace(/,/g,'').match(/\d+/); const expected=m?Number(m[0]):null;
 let pager=null, ancestor=table.parentElement; for(let depth=0;ancestor&&depth<3&& !['BODY','HTML'].includes(ancestor.tagName);depth++,ancestor=ancestor.parentElement){const ps=Array.from(ancestor.querySelectorAll('.paginate,.pagination,.paging')).filter(shown); if(ps.length===1){pager=ps[0];break;} if(ps.length>1){pager=null;break;}}
 const links=pager?Array.from(pager.querySelectorAll('a')).filter(shown):[]; const label=a=>[a.textContent,a.getAttribute('aria-label'),a.getAttribute('title'),a.querySelector('img')?.alt].filter(Boolean).join(' ').trim(); const disabled=a=>a.getAttribute('aria-disabled')==='true'||a.classList.contains('disabled'); const current=Number((pager?.querySelector('[aria-current=page],strong,em')?.textContent||'').trim())||null; const nums=links.filter(a=>/^\d+$/.test(a.textContent.trim())&&!disabled(a)).map(a=>Number(a.textContent.trim())).filter(n=>!current||n>current).sort((a,b)=>a-b); const next=nums[0]||null; const nextLink=next?links.find(a=>Number(a.textContent.trim())===next):links.find(a=>!disabled(a)&&(a.rel==='next'||/다음|next|^>+$/i.test(label(a)))); const terminal=!nextLink&&links.filter(a=>!disabled(a)&&/다음|next|^>+$/i.test(label(a))).length===0;

@@ -232,14 +232,15 @@ class EngagementAuditService:
             "unresponsive_buddies": unresponsive_rows,
         }
 
-        # [Step 6] CSV 및 JSON 원자적 저장 (V13.1: non_buddy 제외)
-        json_path, master_csv, unresp_csv = EngagementAuditStore.save_v13(report)
+        # [Step 6] 엑셀(다중 시트), CSV 및 JSON 원자적 저장
+        json_path, excel_path, master_csv, unresp_csv = EngagementAuditStore.save_v13(report)
 
         logger.log(f"==================================================")
         logger.log(f"🎉 [AUDIT] 전체 이웃 {total_buddies}명 기준 무반응 감사 완료! (상태: {audit_state.upper()})")
         logger.log(f"   👥 전체 등록 이웃 (Master): {total_buddies}명")
         logger.log(f"   ❤️ 최근 글에 반응한 이웃: {reacted_buddies_count}명 (공감+댓글 모두: {both_count}명, 공감만: {liked_only_count}명, 댓글만: {commented_only_count}명)")
         logger.log(f"   🚫 최근 글 무반응 이웃: {unresponsive_count}명 (추가일 기준 참고: {grace_count}명 / 확인된 무반응: {real_unresponsive_count}명)")
+        logger.log(f"   📊 종합 엑셀 파일 (전체/반응자랭킹/무반응자): {excel_path}")
         logger.log(f"   📁 Master 이웃 감사 CSV: {master_csv}")
         logger.log(f"   📁 무반응 이웃 전용 CSV: {unresp_csv}")
 
@@ -248,6 +249,7 @@ class EngagementAuditService:
             "audit_state": audit_state,
             "report": report,
             "json_path": json_path,
+            "excel_path": excel_path,
             "master_csv_path": master_csv,
             "unresponsive_csv_path": unresp_csv
         }

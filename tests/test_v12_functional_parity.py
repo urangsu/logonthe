@@ -59,7 +59,7 @@ class V12FunctionalParityTests(unittest.TestCase):
              patch("services.my_blog_recent_posts.MyBlogRecentPostService.fetch_recent_posts", return_value=[{"log_no": "1", "url": "u", "title": "t"}]), \
              patch("services.reaction_participant_collector.ReactionParticipantCollector.collect", return_value=([], "partial", None)), \
              patch("services.comment_participant_collector.CommentParticipantCollector.collect", return_value=([], "complete", 0)), \
-             patch("services.engagement_audit_store.EngagementAuditStore.save_v13", return_value=("j", "m", "u")):
+             patch("services.engagement_audit_store.EngagementAuditStore.save_v13", return_value=("j", "x", "m", "u")):
             collect.return_value = BuddyCollectionResult(
                 {"b": BuddyInfo("b", "N", "", "", "이웃", None, "26.08.01.")},
                 "complete", 1, 1, 1, ["p"])
@@ -71,8 +71,8 @@ class V12FunctionalParityTests(unittest.TestCase):
     def test_csv_output_is_atomic_formula_safe(self):
         report = {"master_buddies": [{"blog_id": "=HYPERLINK(\"x\")", "nickname": "N", "no_reaction": None}],
                   "unresponsive_buddies": []}
-        with tempfile.TemporaryDirectory() as tmp, patch.object(EngagementAuditStore, "get_file_paths", return_value=(f"{tmp}/r.json", f"{tmp}/m.csv", f"{tmp}/u.csv")):
-            _, master, _ = EngagementAuditStore.save_v13(report)
+        with tempfile.TemporaryDirectory() as tmp, patch.object(EngagementAuditStore, "get_file_paths", return_value=(f"{tmp}/r.json", f"{tmp}/x.xlsx", f"{tmp}/m.csv", f"{tmp}/u.csv")):
+            _, _, master, _ = EngagementAuditStore.save_v13(report)
             with open(master, encoding="utf-8-sig", newline="") as handle:
                 row = next(csv.DictReader(handle))
             self.assertEqual(row["블로그ID"], "'=HYPERLINK(\"x\")")

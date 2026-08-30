@@ -148,9 +148,10 @@ class TestEngagementAuditV13(unittest.TestCase):
             ]
         }
 
-        json_p, master_csv, unresp_csv = EngagementAuditStore.save_v13(test_report)
+        json_p, excel_p, master_csv, unresp_csv = EngagementAuditStore.save_v13(test_report)
 
         self.assertTrue(os.path.exists(json_p))
+        self.assertTrue(os.path.exists(excel_p))
         self.assertTrue(os.path.exists(master_csv))
         self.assertTrue(os.path.exists(unresp_csv))
 
@@ -183,7 +184,7 @@ class TestEngagementAuditV13(unittest.TestCase):
             rows = list(reader)
             self.assertEqual(len(rows), 1)
             self.assertEqual(rows[0]["블로그ID"], "b2")
-            self.assertEqual(rows[0]["반응 구분"], "무반응")
+            self.assertEqual(rows[0]["그룹"], "그룹B")
 
 
 if __name__ == "__main__":

@@ -711,6 +711,7 @@ class MainWindow(ctk.CTk):
 
                 if res.get("success"):
                     rep = res["report"]
+                    excel_path = res.get("excel_path", "")
                     master_csv = res.get("master_csv_path", "")
                     unresp_csv = res.get("unresponsive_csv_path", "")
                     audit_st = rep.get("audit_state", "complete").upper()
@@ -718,20 +719,21 @@ class MainWindow(ctk.CTk):
                     msg = (
                         f"🎉 [내 블로그 이웃 전수 및 무반응 감사 완료 (상태: {audit_st})]\n\n"
                         f"• 분석 대상 최근 글: {rep['recent_post_count']}개\n"
-                        f"• 👥 전체 등록 이웃 (Master): {rep.get('total_buddies_count', 0)}명\n"
+                        f"• 👥 전체 등록 이웃: {rep.get('total_buddies_count', 0)}명\n"
                         f"• ❤️ 최근 글 반응 이웃: {rep.get('reacted_buddies_count', 0)}명\n"
                         f"   (공감+댓글: {rep.get('both_like_and_comment_count', 0)}명, 공감만: {rep.get('liked_only_count', 0)}명, 댓글만: {rep.get('commented_only_count', 0)}명)\n"
                         f"• 🚫 최근 글 무반응 이웃: {rep.get('unresponsive_buddies_count', 0)}명\n"
-                        f"   (추가일 기준 참고: {rep.get('grace_period_buddies_count', 0)}명 / 확인된 무반응: {rep.get('real_unresponsive_count', 0)}명)\n\n"
-                        f"무반응 이웃 CSV:\n{unresp_csv}\n\n"
-                        f"무반응 이웃 CSV 파일을 바로 여시겠습니까?"
+                        f"   (신규 48시간 유예: {rep.get('grace_period_buddies_count', 0)}명 / 정리 대상 무반응: {rep.get('real_unresponsive_count', 0)}명)\n\n"
+                        f"📊 종합 엑셀 파일 (시트: 전체이웃, 반응자 랭킹, 무반응자 관리):\n{excel_path}\n\n"
+                        f"지금 종합 엑셀(또는 CSV) 파일을 바로 여시겠습니까?"
                     )
 
                     def show_dialog():
                         ans = messagebox.askyesno("감사 완료", msg)
                         if ans:
                             try:
-                                subprocess.run(["open", unresp_csv or master_csv])
+                                target_to_open = excel_path if (excel_path and os.path.exists(excel_path)) else (unresp_csv or master_csv)
+                                subprocess.run(["open", target_to_open])
                             except Exception:
                                 pass
 
