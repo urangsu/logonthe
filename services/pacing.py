@@ -9,6 +9,9 @@ from src.logger import logger
 
 class PacingKind(str, Enum):
     ACTION = "action"
+    PAGE_SETTLE = "page_settle"
+    PRE_LIKE = "pre_like"
+    POST_LIKE = "post_like"
     NEXT_POST = "next_post"
     PAUSE = "pause"
 
@@ -56,6 +59,25 @@ class PacingService:
         seconds = round(random.uniform(low, high), 2)
         interrupted = interruptible_wait(self.stop_event, seconds, pause_event=self.pause_event)
         return PacingResult(PacingKind.ACTION, seconds, interrupted)
+
+    def _wait_named(self, kind: PacingKind, min_key: str, max_key: str, default_min: float, default_max: float) -> PacingResult:
+        if not self.config.get("pacing_enabled", True):
+            return PacingResult(kind, 0.0)
+        low, high = self._range(min_key, max_key, default_min, default_max)
+        if high <= 0:
+            return PacingResult(kind, 0.0)
+        seconds = round(random.uniform(low, high), 2)
+        interrupted = interruptible_wait(self.stop_event, seconds, pause_event=self.pause_event)
+        return PacingResult(kind, seconds, interrupted)
+
+    def wait_page_settle(self) -> PacingResult:
+        return self._wait_named(PacingKind.PAGE_SETTLE, "page_settle_min", "page_settle_max", 1.0, 2.0)
+
+    def wait_pre_like(self) -> PacingResult:
+        return self._wait_named(PacingKind.PRE_LIKE, "pre_like_delay_min", "pre_like_delay_max", 5.0, 10.0)
+
+    def wait_post_like(self) -> PacingResult:
+        return self._wait_named(PacingKind.POST_LIKE, "post_like_delay_min", "post_like_delay_max", 2.0, 5.0)
 
     def wait_next_post(self) -> PacingResult:
         """한 글 처리가 완료된 후 다음 글로 이동하기 전 대기"""

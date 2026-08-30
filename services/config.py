@@ -1,6 +1,7 @@
 import os
 import json
 import tempfile
+import shutil
 from typing import Dict, Any, Optional
 from app.models import FeedSourceType
 from src.logger import logger
@@ -10,7 +11,7 @@ RUNTIME_CONFIG_PATH = os.path.join(WORKSPACE_DIR, "data", "config.json")
 ROOT_CONFIG_PATH = os.path.join(WORKSPACE_DIR, "config.json")
 
 DEFAULT_CONFIG_V2: Dict[str, Any] = {
-    "schema_version": 2,
+    "schema_version": 3,
     "feed_source": FeedSourceType.TARGETED_SEARCH.value,
     "topic_filter_enabled": True,
     "discovery_categories": ["FOOD", "CAFE", "PARENTING", "LIVING", "TRAVEL", "LIFESTYLE"],
@@ -31,6 +32,12 @@ DEFAULT_CONFIG_V2: Dict[str, Any] = {
     "pacing_enabled": True,
     "action_delay_min": 1.0,
     "action_delay_max": 2.5,
+    "page_settle_min": 1.0,
+    "page_settle_max": 2.0,
+    "pre_like_delay_min": 5.0,
+    "pre_like_delay_max": 10.0,
+    "post_like_delay_min": 2.0,
+    "post_like_delay_max": 5.0,
     "next_post_delay_min": 2.0,
     "next_post_delay_max": 5.0,
     "random_pause_enabled": True,
@@ -51,9 +58,13 @@ DEFAULT_CONFIG_V2: Dict[str, Any] = {
     "ai_prompt_style": "warm_short",
     "append_fixed_suffix_to_ai": False,
 
-    # Gemini Browser Mode: "existing_chrome_mac" 또는 "managed_playwright"
-    "gemini_browser_mode": "existing_chrome_mac",
+    # Gemini Browser Mode: 기본은 일반 Chrome 확장 브리지,
+    # Apple Events/Playwright 방식은 고급 진단용으로만 유지한다.
+    "gemini_browser_mode": "extension_existing_chrome",
     "gemini_web_enabled": True,
+    "gemini_bridge_port": 43127,
+    "gemini_response_timeout": 55.0,
+    "allow_local_draft_on_gemini_failure": False,
     "gemini_mode": "new",
     "gemini_custom_url": "https://gemini.google.com/app/0a1545681329aa0a?hl=ko",
 
@@ -99,6 +110,9 @@ def migrate_config_v1_to_v2(old_data: Dict[str, Any]) -> Dict[str, Any]:
 
     cfg = migrate_workflow_mode(cfg)
     cfg["schema_version"] = 2
+    # Keep this historical converter truthful. ConfigService.load immediately
+    # applies the separate v2 -> v3 migration to the extension bridge.
+    cfg["gemini_browser_mode"] = "existing_chrome_mac"
     return cfg
 
 
@@ -143,10 +157,23 @@ class ConfigService:
             with open(self.config_path, "r", encoding="utf-8") as f:
                 loaded = json.load(f)
 
+            original_version = int(loaded.get("schema_version", 1) or 1)
+            if original_version < 3:
+                backup_path = self.config_path + f".v{original_version}.bak"
+                if not os.path.exists(backup_path):
+                    shutil.copy2(self.config_path, backup_path)
+
             if loaded.get("schema_version", 1) < 2:
                 migrated = migrate_config_v1_to_v2(loaded)
                 self._atomic_save(migrated)
-                return migrated
+                loaded = migrated
+
+            if loaded.get("schema_version", 1) < 3:
+                loaded = dict(loaded)
+                loaded["schema_version"] = 3
+                loaded["gemini_browser_mode"] = "extension_existing_chrome"
+                loaded.setdefault("allow_local_draft_on_gemini_failure", False)
+                self._atomic_save(loaded)
 
             merged = DEFAULT_CONFIG_V2.copy()
             merged.update(loaded)
@@ -161,7 +188,7 @@ class ConfigService:
         merged.update(self.data)
         merged.update(data)
         merged = migrate_workflow_mode(merged)
-        merged["schema_version"] = 2
+        merged["schema_version"] = 3
         self._atomic_save(merged)
         self.data = merged
 
@@ -171,7 +198,7 @@ class ConfigService:
         merged.update(self.data)
         merged.update(values)
         merged = migrate_workflow_mode(merged)
-        merged["schema_version"] = 2
+        merged["schema_version"] = 3
         self._atomic_save(merged)
         self.data = merged
         return self.data

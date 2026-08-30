@@ -9,6 +9,9 @@ venv/
 ENV/
 
 # Chrome / User Profile (Sensitive Login Sessions & Cookies)
+config.json
+config.json.v*.bak
+data/config.json.v*.bak
 data/user_profile/
 data/cdp_profile/
 data/browser_profile/
@@ -18,12 +21,15 @@ data/*.log
 # Generated Audit Outputs & Local Corpus (v8.0)
 data/my_blog_engagement_audit.*
 data/buddy_engagement_audit_*.csv
+data/buddy_engagement_audit_*.xlsx
+data/buddy_engagement_summary_*.csv
 data/unresponsive_buddies_*.csv
 data/non_buddy_reactors_*.csv
 data/user_learning_corpus.json
 data/accumulated_visited_comments.json
 data/naver_comment_corpus.json
 data/real_comment_corpus.json
+data/community_reaction_corpus_*.json
 data/dom_db.json
 
 # OS specific

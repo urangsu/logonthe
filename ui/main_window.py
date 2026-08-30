@@ -17,6 +17,7 @@ from services.draft import DraftService
 from services.contextual_draft import ContextualDraftEngine
 from services.clipboard_bridge import ClipboardCommandBridge
 from services.gemini_existing_chrome import ExistingChromeGeminiBridge
+from services.gemini_extension_bridge import GeminiExtensionBridge, GeminiBridgeHTTPServer
 from browser.session import ProfileLockManager, BrowserSession, USER_DATA_DIR
 from src.logger import logger
 
@@ -79,6 +80,15 @@ class MainWindow(ctk.CTk):
         self.minsize(940, 860)
 
         self.config_service = ConfigService()
+        self.gemini_extension_bridge = GeminiExtensionBridge()
+        self.gemini_bridge_server = GeminiBridgeHTTPServer(
+            self.gemini_extension_bridge,
+            port=int(self.config_service.get("gemini_bridge_port", 43127)),
+        )
+        try:
+            self.gemini_bridge_server.start()
+        except OSError as exc:
+            logger.log(f"[GEMINI/EXTENSION] 로컬 브리지 시작 실패: {exc}", "ERROR")
         self.history_store = HistoryStore()
         self.state_mgr = StateManager()
         self.command_bridge = ClipboardCommandBridge()
@@ -87,6 +97,7 @@ class MainWindow(ctk.CTk):
         self.worker_thread: Optional[threading.Thread] = None
 
         self._build_ui()
+        self.protocol("WM_DELETE_WINDOW", self._on_close)
 
         # State 및 Logger 리스너 등록
         self.state_mgr.register_listener(lambda s: self.after(0, self._update_ui_state, s))
@@ -339,6 +350,19 @@ class MainWindow(ctk.CTk):
         self.pause_max_entry.insert(0, str(self.config_service.get("random_pause_max", 20.0)))
         ctk.CTkLabel(p_body, text="초)").pack(side="left", padx=1)
 
+        p_detail = ctk.CTkFrame(pacing_frame, fg_color="transparent")
+        p_detail.pack(fill="x", padx=8, pady=(0, 2))
+        def add_range(parent, label, min_attr, max_attr, min_key, max_key, dmin, dmax):
+            ctk.CTkLabel(parent, text=label).pack(side="left", padx=(2, 2))
+            mn = ctk.CTkEntry(parent, width=42); mn.pack(side="left", padx=1); mn.insert(0, str(self.config_service.get(min_key, dmin)))
+            ctk.CTkLabel(parent, text="~").pack(side="left", padx=1)
+            mx = ctk.CTkEntry(parent, width=42); mx.pack(side="left", padx=1); mx.insert(0, str(self.config_service.get(max_key, dmax)))
+            ctk.CTkLabel(parent, text="초").pack(side="left", padx=(1, 10))
+            setattr(self, min_attr, mn); setattr(self, max_attr, mx)
+        add_range(p_detail, "페이지 안정화:", "settle_min_entry", "settle_max_entry", "page_settle_min", "page_settle_max", 1.0, 2.0)
+        add_range(p_detail, "본문 확인→공감:", "pre_like_min_entry", "pre_like_max_entry", "pre_like_delay_min", "pre_like_delay_max", 5.0, 10.0)
+        add_range(p_detail, "공감→댓글:", "post_like_min_entry", "post_like_max_entry", "post_like_delay_min", "post_like_delay_max", 2.0, 5.0)
+
         # 6. Gemini & Human-Like Composer Assistant Card
         ai_card = ctk.CTkFrame(self, border_width=1, border_color="#334155")
         ai_card.pack(fill="x", padx=15, pady=2)
@@ -348,7 +372,7 @@ class MainWindow(ctk.CTk):
 
         self.gemini_web_enabled_var = ctk.BooleanVar(value=self.config_service.get("gemini_web_enabled", True))
         ctk.CTkCheckBox(
-            ai_head, text="🤖 Gemini 연동 (미연동 시 Human-Like v3.1 긍정 칭찬 엔진 자동 동작)",
+            ai_head, text="Gemini 연동 (실패 시 즉시 일시정지)",
             variable=self.gemini_web_enabled_var, font=ctk.CTkFont(weight="bold"), text_color="#38BDF8"
         ).pack(side="left", padx=2)
 
@@ -356,20 +380,20 @@ class MainWindow(ctk.CTk):
         ai_mode_frame.pack(fill="x", padx=10, pady=1)
 
         ctk.CTkLabel(ai_mode_frame, text="Gemini 브라우저:").pack(side="left", padx=4)
-        self.gemini_browser_mode_var = ctk.StringVar(value=self.config_service.get("gemini_browser_mode", "existing_chrome_mac"))
+        self.gemini_browser_mode_var = ctk.StringVar(value=self.config_service.get("gemini_browser_mode", "extension_existing_chrome"))
 
         ctk.CTkRadioButton(
-            ai_mode_frame, text="현재 켜져 있는 일반 Chrome 탭 (권장)",
+            ai_mode_frame, text="일반 Chrome 확장 연결 (권장)",
+            variable=self.gemini_browser_mode_var, value="extension_existing_chrome"
+        ).pack(side="left", padx=6)
+
+        ctk.CTkRadioButton(
+            ai_mode_frame, text="고급: Apple Events",
             variable=self.gemini_browser_mode_var, value="existing_chrome_mac"
         ).pack(side="left", padx=6)
 
-        ctk.CTkRadioButton(
-            ai_mode_frame, text="프로그램 전용 브라우저",
-            variable=self.gemini_browser_mode_var, value="managed_playwright"
-        ).pack(side="left", padx=6)
-
         ctk.CTkButton(
-            ai_mode_frame, text="🔍 기존 Chrome Gemini 탭 연결 테스트", height=24,
+            ai_mode_frame, text="확장 연결 테스트", height=24,
             fg_color="#334155", hover_color="#475569", command=self._test_chrome_connection
         ).pack(side="left", padx=8)
 
@@ -409,6 +433,25 @@ class MainWindow(ctk.CTk):
             command=self._apply_clipboard_comment
         )
         self.btn_apply_clipboard.pack(side="left", padx=2)
+
+        self.btn_gemini_retry = ctk.CTkButton(
+            ai_btn_bar, text="같은 글 재시도", height=26, width=95,
+            fg_color="#2563EB", hover_color="#1D4ED8",
+            command=self._retry_gemini, state="disabled"
+        )
+        self.btn_gemini_retry.pack(side="left", padx=2)
+        self.btn_gemini_local = ctk.CTkButton(
+            ai_btn_bar, text="로컬 초안 1회", height=26, width=95,
+            fg_color="#475569", hover_color="#334155",
+            command=self._use_local_once, state="disabled"
+        )
+        self.btn_gemini_local.pack(side="left", padx=2)
+        self.btn_gemini_skip = ctk.CTkButton(
+            ai_btn_bar, text="현재 글 건너뛰기", height=26, width=105,
+            fg_color="#7C2D12", hover_color="#9A3412",
+            command=self._skip_gemini_post, state="disabled"
+        )
+        self.btn_gemini_skip.pack(side="left", padx=2)
 
         # 실시간 댓글 리팩토링 버튼
         ctk.CTkButton(
@@ -475,7 +518,7 @@ class MainWindow(ctk.CTk):
         ).pack(side="left", padx=3)
 
         ctk.CTkButton(
-            btn_frame, text="👥 내 반응자 수집", width=125, height=38,
+            btn_frame, text="이웃별 누적 반응 CSV", width=145, height=38,
             fg_color="#7C3AED", hover_color="#6D28D9",
             font=ctk.CTkFont(size=13, weight="bold"),
             command=self._run_engagement_audit
@@ -537,16 +580,15 @@ class MainWindow(ctk.CTk):
         logger.log(f"🔄 [REFINE] 댓글 변형 적용 ({mode}): \"{res.body}\"")
 
     def _test_chrome_connection(self):
-        diag = ExistingChromeGeminiBridge.test_connection()
-        if diag.get("connected", False):
-            js_info = "활성화됨 (100% 자동 답변 추출 가능)" if diag.get("js_enabled") else "비활성화 (Chrome [보기] > [개발자] > [Apple Events의 자바스크립트 허용] 체크 권장)"
-            msg = f"✅ Google Chrome Gemini 탭 연결 성공!\n\n- 제목: {diag.get('title')}\n- URL: {diag.get('url')}\n- JS 자동 제어: {js_info}"
-            messagebox.showinfo("Gemini 탭 연결 성공", msg)
-            logger.log(f"✅ [GEMINI/TEST] 연결 성공: {diag.get('title')} ({diag.get('url')})")
+        diag = self.gemini_extension_bridge.preflight()
+        if diag.ready:
+            msg = f"일반 Chrome Gemini 확장 연결 성공\n\n제목: {diag.title}\nURL: {diag.url}"
+            messagebox.showinfo("Gemini 연결 성공", msg)
+            logger.log(f"[GEMINI/EXTENSION] 연결 성공: {diag.title} ({diag.url})")
         else:
-            msg = f"❌ Gemini 탭 연결 실패:\n{diag.get('message')}\n\nGoogle Chrome에서 https://gemini.google.com 탭이 열려 있는지 확인해 주세요."
-            messagebox.showwarning("Gemini 탭 연결 실패", msg)
-            logger.log(f"❌ [GEMINI/TEST] 연결 실패: {diag.get('message')}", "WARNING")
+            msg = f"Gemini 확장 연결 실패: {diag.status}\n\n확장을 설치하고 토큰을 저장한 뒤 로그인된 Gemini 탭을 새로고침하세요."
+            messagebox.showwarning("Gemini 연결 실패", msg)
+            logger.log(f"[GEMINI/EXTENSION] 연결 실패: {diag.message}", "WARNING")
 
     def _on_source_change(self):
         val = self.source_var.get()
@@ -569,6 +611,21 @@ class MainWindow(ctk.CTk):
             self.ai_post_title_lbl.configure(text=f"현재 글: {state.current_post_title[:45]}")
         if state.current_post_excerpt:
             self.ai_post_excerpt_lbl.configure(text=f"본문 요약: {state.current_post_excerpt[:70]}...")
+        gemini_failed_pause = state.current_state == FeedState.PAUSED and "Gemini 실패" in (state.message or "")
+        button_state = "normal" if gemini_failed_pause else "disabled"
+        for button_name in ("btn_gemini_retry", "btn_gemini_local", "btn_gemini_skip"):
+            button = getattr(self, button_name, None)
+            if button:
+                button.configure(state=button_state)
+
+    def _retry_gemini(self):
+        self.command_bridge.send_gemini_retry()
+
+    def _use_local_once(self):
+        self.command_bridge.send_gemini_use_local_once()
+
+    def _skip_gemini_post(self):
+        self.command_bridge.send_gemini_skip_post()
 
     def _copy_ai_prompt(self):
         prompt = self.state_mgr.get_snapshot().current_ai_prompt
@@ -674,7 +731,7 @@ class MainWindow(ctk.CTk):
         threading.Thread(target=task, daemon=True).start()
 
     def _run_engagement_audit(self):
-        """내 블로그 최근 글(기본 5개)의 공감/댓글 반응자 통합 수집 및 CSV/JSON 저장 (One-shot)"""
+        """내 블로그 최근 글의 이웃별 누적 공감/댓글을 CSV 하나로 저장한다."""
         from tkinter import simpledialog
         from services.engagement_audit_service import EngagementAuditService
         import subprocess
@@ -711,9 +768,7 @@ class MainWindow(ctk.CTk):
 
                 if res.get("success"):
                     rep = res["report"]
-                    excel_path = res.get("excel_path", "")
-                    master_csv = res.get("master_csv_path", "")
-                    unresp_csv = res.get("unresponsive_csv_path", "")
+                    summary_csv = res.get("summary_csv_path", "")
                     audit_st = rep.get("audit_state", "complete").upper()
 
                     msg = (
@@ -723,17 +778,16 @@ class MainWindow(ctk.CTk):
                         f"• ❤️ 최근 글 반응 이웃: {rep.get('reacted_buddies_count', 0)}명\n"
                         f"   (공감+댓글: {rep.get('both_like_and_comment_count', 0)}명, 공감만: {rep.get('liked_only_count', 0)}명, 댓글만: {rep.get('commented_only_count', 0)}명)\n"
                         f"• 🚫 최근 글 무반응 이웃: {rep.get('unresponsive_buddies_count', 0)}명\n"
-                        f"   (신규 48시간 유예: {rep.get('grace_period_buddies_count', 0)}명 / 정리 대상 무반응: {rep.get('real_unresponsive_count', 0)}명)\n\n"
-                        f"📊 종합 엑셀 파일 (시트: 전체이웃, 반응자 랭킹, 무반응자 관리):\n{excel_path}\n\n"
-                        f"지금 종합 엑셀(또는 CSV) 파일을 바로 여시겠습니까?"
+                        f"   (추가일과 이후 2일 유예: {rep.get('grace_period_buddies_count', 0)}명 / 확인된 무반응: {rep.get('real_unresponsive_count', 0)}명)\n\n"
+                        f"이웃별 누적 반응 CSV:\n{summary_csv}\n\n"
+                        f"지금 파일을 바로 여시겠습니까?"
                     )
 
                     def show_dialog():
                         ans = messagebox.askyesno("감사 완료", msg)
                         if ans:
                             try:
-                                target_to_open = excel_path if (excel_path and os.path.exists(excel_path)) else (unresp_csv or master_csv)
-                                subprocess.run(["open", target_to_open])
+                                subprocess.run(["open", summary_csv])
                             except Exception:
                                 pass
 
@@ -764,6 +818,12 @@ class MainWindow(ctk.CTk):
             p_chance = float(self.pause_chance_entry.get().strip()) / 100.0
             p_min = float(self.pause_min_entry.get().strip())
             p_max = float(self.pause_max_entry.get().strip())
+            settle_min = float(self.settle_min_entry.get().strip())
+            settle_max = float(self.settle_max_entry.get().strip())
+            pre_like_min = float(self.pre_like_min_entry.get().strip())
+            pre_like_max = float(self.pre_like_max_entry.get().strip())
+            post_like_min = float(self.post_like_min_entry.get().strip())
+            post_like_max = float(self.post_like_max_entry.get().strip())
 
             like_thresh = int(self.like_thresh_entry.get().strip())
             visitor_thresh = int(self.visitor_thresh_entry.get().strip())
@@ -774,6 +834,8 @@ class MainWindow(ctk.CTk):
                 raise ValueError("동작 간격 및 다음 글 대기 시간 범위가 올바르지 않습니다.")
             if not (0 <= p_chance <= 1.0) or not (0 <= p_min <= p_max <= 3600):
                 raise ValueError("Pause 확률(0~100%) 및 시간 범위가 올바르지 않습니다.")
+            if not all((0 <= lo <= hi <= 300) for lo, hi in ((settle_min, settle_max), (pre_like_min, pre_like_max), (post_like_min, post_like_max))):
+                raise ValueError("세부 작업 간격 범위가 올바르지 않습니다.")
             if like_thresh < 1 or visitor_thresh < 1:
                 raise ValueError("공감수 및 일 방문자 수 기준값은 1 이상이어야 합니다.")
         except ValueError as ve:
@@ -823,6 +885,12 @@ class MainWindow(ctk.CTk):
             "random_pause_chance": p_chance,
             "random_pause_min": p_min,
             "random_pause_max": p_max,
+            "page_settle_min": settle_min,
+            "page_settle_max": settle_max,
+            "pre_like_delay_min": pre_like_min,
+            "pre_like_delay_max": pre_like_max,
+            "post_like_delay_min": post_like_min,
+            "post_like_delay_max": post_like_max,
 
             "like_popularity_guard_enabled": self.like_guard_chk_var.get(),
             "like_count_skip_threshold": like_thresh,
@@ -853,7 +921,8 @@ class MainWindow(ctk.CTk):
             state_mgr=self.state_mgr,
             stop_event=self.stop_event,
             command_bridge=self.command_bridge,
-            pause_event=self.pause_event
+            pause_event=self.pause_event,
+            gemini_extension_bridge=self.gemini_extension_bridge,
         )
 
         def worker():
@@ -890,3 +959,10 @@ class MainWindow(ctk.CTk):
         self.btn_pause.configure(state="disabled", text="⏸️ 일시정지", fg_color="#D97706", hover_color="#B45309")
         self.btn_stop.configure(state="disabled")
         self.pause_event.clear()
+
+    def _on_close(self):
+        self.stop_event.set()
+        try:
+            self.gemini_bridge_server.stop()
+        finally:
+            self.destroy()

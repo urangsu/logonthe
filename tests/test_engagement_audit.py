@@ -2,6 +2,7 @@ import os
 import json
 import csv
 import unittest
+import tempfile
 from unittest.mock import MagicMock, patch
 from services.buddy_list_collector import BuddyListCollector, BuddyInfo, BuddyCollectionResult
 from services.engagement_audit_service import EngagementAuditService
@@ -12,7 +13,7 @@ from services.comments.community_rhythm import FinalQualityGate, CommunityRhythm
 class TestEngagementAuditV13(unittest.TestCase):
     def test_comment_length_limit_100_chars(self):
         """댓글 100자 이하 허용, 101자 이상 거부 (V13.1 정책)"""
-        cand_ok = "남해 독일마을 플래터 구성 알차고 비쥬얼 좋네요~ 나중에 가보고 싶어요~"
+        cand_ok = "남해 독일마을 플래터 비쥬얼 좋네요 나중에 가보고 싶어요~"
         res = FinalQualityGate.validate_final_text(cand_ok, preset="community", source="test")
         self.assertTrue(res.valid)
 
@@ -81,7 +82,8 @@ class TestEngagementAuditV13(unittest.TestCase):
                 ([], "complete", 0)
             ]
 
-            audit_res = EngagementAuditService.run_audit(page=page_mock, my_blog_id="me", recent_post_count=2)
+            with tempfile.TemporaryDirectory() as output_dir:
+                audit_res = EngagementAuditService.run_audit(page=page_mock, my_blog_id="me", recent_post_count=2, output_dir=output_dir)
             self.assertTrue(audit_res["success"])
             self.assertEqual(audit_res["audit_state"], "complete")
 
@@ -148,17 +150,14 @@ class TestEngagementAuditV13(unittest.TestCase):
             ]
         }
 
-        json_p, excel_p, master_csv, unresp_csv = EngagementAuditStore.save_v13(test_report)
-
-        self.assertTrue(os.path.exists(json_p))
-        self.assertTrue(os.path.exists(excel_p))
-        self.assertTrue(os.path.exists(master_csv))
-        self.assertTrue(os.path.exists(unresp_csv))
+        with tempfile.TemporaryDirectory() as output_dir:
+            master_csv = EngagementAuditStore.save_summary(test_report, output_dir=output_dir)
+            self.assertTrue(os.path.exists(master_csv))
 
         # Check Master CSV row count & Korean headers
-        with open(master_csv, "r", encoding="utf-8-sig") as f:
-            reader = csv.DictReader(f)
-            rows = list(reader)
+            with open(master_csv, "r", encoding="utf-8-sig") as f:
+                reader = csv.DictReader(f)
+                rows = list(reader)
             self.assertEqual(len(rows), 2)
             self.assertEqual(rows[0]["블로그ID"], "b1")
             self.assertEqual(rows[0]["닉네임"], "이웃1")
@@ -178,13 +177,6 @@ class TestEngagementAuditV13(unittest.TestCase):
             self.assertEqual(rows[1]["블로그ID"], "b2")
             self.assertEqual(rows[1]["반응 구분"], "무반응")
 
-        # Check Unresponsive CSV row count & Korean headers
-        with open(unresp_csv, "r", encoding="utf-8-sig") as f:
-            reader = csv.DictReader(f)
-            rows = list(reader)
-            self.assertEqual(len(rows), 1)
-            self.assertEqual(rows[0]["블로그ID"], "b2")
-            self.assertEqual(rows[0]["그룹"], "그룹B")
 
 
 if __name__ == "__main__":

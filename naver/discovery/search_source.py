@@ -132,16 +132,23 @@ class TargetedSearchFeedSource:
                     continue
 
                 # 6. Whitelist 카테고리 필터 검증
-                allowed, cat_or_reason = DiscoveryTopicFilter.is_allowed(post.title or title)
-                if not allowed:
-                    logger.log(f"  🚫 [DISCOVERY] 비생활형/제외 주제 필터링: '{post.title[:30]}...' ({cat_or_reason})")
+                try:
+                    snippet = card.inner_text().strip()
+                except Exception:
+                    snippet = ""
+                decision = DiscoveryTopicFilter.evaluate(post.title or title, snippet, stage="card")
+                if not decision.allowed:
+                    logger.log(
+                        f"  [TOPIC_FILTER] card/{decision.blocked_category} "
+                        f"evidence={list(decision.evidence)} title=\"{post.title[:30]}\""
+                    )
                     continue
 
                 # 통과: 수집 및 상태 등록
                 self.seen_keys.add(post.key)
                 self.seen_blogs.add(post.blog_id)
                 discovered.append(post)
-                logger.log(f"  ✅ [DISCOVERY] 찐이웃 생활형 글 발굴 [{cat_or_reason}]: '{post.title[:32]}...' ({post.blog_id})")
+                logger.log(f"  [DISCOVERY] 추천 글 발굴: '{post.title[:32]}...' ({post.blog_id})")
 
                 # 검색어별 포스트 할당량 도달 시 쿼리 순환
                 should_switch = self.rotator.record_post_found()

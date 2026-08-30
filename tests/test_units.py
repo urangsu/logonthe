@@ -1,5 +1,6 @@
 import unittest
 import os
+import json
 import shutil
 import tempfile
 from app.models import (
@@ -218,6 +219,18 @@ class TestPacingService(unittest.TestCase):
         self.assertEqual(res_act.seconds, 0.0)
         self.assertFalse(res_act.interrupted)
 
+    def test_distinct_pacing_ranges_are_used(self):
+        cfg = {
+            "pacing_enabled": True,
+            "page_settle_min": 0.01, "page_settle_max": 0.01,
+            "pre_like_delay_min": 0.02, "pre_like_delay_max": 0.02,
+            "post_like_delay_min": 0.03, "post_like_delay_max": 0.03,
+        }
+        pacing = PacingService(cfg)
+        self.assertEqual(pacing.wait_page_settle().seconds, 0.01)
+        self.assertEqual(pacing.wait_pre_like().seconds, 0.02)
+        self.assertEqual(pacing.wait_post_like().seconds, 0.03)
+
 
 class TestClipboardCommandBridge(unittest.TestCase):
     def test_bridge_queue(self):
@@ -229,6 +242,15 @@ class TestClipboardCommandBridge(unittest.TestCase):
         self.assertEqual(cmd.text, "Gemini가 작성한 정성스러운 댓글입니다.")
 
         self.assertIsNone(bridge.pop_command())
+
+    def test_gemini_failure_commands_are_distinct(self):
+        bridge = ClipboardCommandBridge()
+        bridge.send_gemini_retry()
+        bridge.send_gemini_use_local_once()
+        bridge.send_gemini_skip_post()
+        self.assertEqual(bridge.pop_command().kind, WorkerCommandType.GEMINI_RETRY)
+        self.assertEqual(bridge.pop_command().kind, WorkerCommandType.GEMINI_USE_LOCAL_ONCE)
+        self.assertEqual(bridge.pop_command().kind, WorkerCommandType.GEMINI_SKIP_POST)
 
 
 class TestConfigAndHistory(unittest.TestCase):
@@ -252,6 +274,16 @@ class TestConfigAndHistory(unittest.TestCase):
         self.assertEqual(migrated["general_suffix"], "기존 꼬리말")
         self.assertFalse(migrated["recommendation_suffix_enabled"])
         self.assertEqual(migrated["gemini_browser_mode"], "existing_chrome_mac")
+
+    def test_config_service_backs_up_before_v3_migration(self):
+        original = {"schema_version": 2, "like_enabled": False, "gemini_browser_mode": "managed_playwright"}
+        with open(self.cfg_file, "w", encoding="utf-8") as handle:
+            json.dump(original, handle)
+        service = ConfigService(self.cfg_file)
+        self.assertEqual(service.get("schema_version"), 3)
+        self.assertEqual(service.get("gemini_browser_mode"), "extension_existing_chrome")
+        with open(self.cfg_file + ".v2.bak", "r", encoding="utf-8") as handle:
+            self.assertEqual(json.load(handle), original)
 
     def test_history_store(self):
         store = HistoryStore(self.hist_file)

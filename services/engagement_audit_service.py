@@ -1,4 +1,5 @@
 import time
+from datetime import date, timedelta
 from typing import Dict, Any, List, Optional, Tuple, Literal
 from playwright.sync_api import Page
 
@@ -13,13 +14,13 @@ from services.engagement_audit_store import EngagementAuditStore
 class EngagementAuditService:
     """
     내 블로그 전체 이웃 기준 감사 및 무반응 이웃 감사 서비스 (V13.1)
-    - 이웃별 관리에 직접 필요한 최소 항목만 집계 및 CSV/JSON 저장
+    - 이웃별 관리에 직접 필요한 최소 항목만 집계하고 CSV 하나로 저장
     - 비이웃 반응자는 집계 및 저장하지 않고 즉시 스킵
     """
 
     @classmethod
     def is_grace_period(cls, added_date_str: str, days: int = 2) -> bool:
-        """이웃 추가일이 최근 N일(기본 48시간) 이내인지 검사 (예: 26.08.25. 또는 2026.08.25.)"""
+        """한국 달력 날짜 기준으로 추가일과 그 이후 N일을 유예한다."""
         if not added_date_str:
             return False
         clean = added_date_str.strip().rstrip(".")
@@ -34,9 +35,9 @@ class EngagementAuditService:
             if y < 100:
                 y += 2000
 
-            added_ts = time.mktime((y, m, d, 0, 0, 0, 0, 0, -1))
-            now_ts = time.time()
-            return (now_ts - added_ts) <= (days * 86400)
+            added_day = date(y, m, d)
+            today = date.today()
+            return added_day <= today <= added_day + timedelta(days=days)
         except Exception:
             return False
 
@@ -46,7 +47,8 @@ class EngagementAuditService:
         page: Page,
         my_blog_id: str,
         recent_post_count: int = 5,
-        stop_event: Optional[Any] = None
+        stop_event: Optional[Any] = None,
+        output_dir: Optional[str] = None,
     ) -> Dict[str, Any]:
         """
         내 블로그 전체 이웃 기준 감사 실행
@@ -232,24 +234,19 @@ class EngagementAuditService:
             "unresponsive_buddies": unresponsive_rows,
         }
 
-        # [Step 6] 엑셀(다중 시트), CSV 및 JSON 원자적 저장
-        json_path, excel_path, master_csv, unresp_csv = EngagementAuditStore.save_v13(report)
+        # [Step 6] 이웃별 누적 집계 CSV 하나만 원자적으로 저장
+        summary_csv = EngagementAuditStore.save_summary(report, output_dir=output_dir)
 
         logger.log(f"==================================================")
         logger.log(f"🎉 [AUDIT] 전체 이웃 {total_buddies}명 기준 무반응 감사 완료! (상태: {audit_state.upper()})")
         logger.log(f"   👥 전체 등록 이웃 (Master): {total_buddies}명")
         logger.log(f"   ❤️ 최근 글에 반응한 이웃: {reacted_buddies_count}명 (공감+댓글 모두: {both_count}명, 공감만: {liked_only_count}명, 댓글만: {commented_only_count}명)")
         logger.log(f"   🚫 최근 글 무반응 이웃: {unresponsive_count}명 (추가일 기준 참고: {grace_count}명 / 확인된 무반응: {real_unresponsive_count}명)")
-        logger.log(f"   📊 종합 엑셀 파일 (전체/반응자랭킹/무반응자): {excel_path}")
-        logger.log(f"   📁 Master 이웃 감사 CSV: {master_csv}")
-        logger.log(f"   📁 무반응 이웃 전용 CSV: {unresp_csv}")
+        logger.log(f"   이웃별 누적 반응 CSV: {summary_csv}")
 
         return {
             "success": True,
             "audit_state": audit_state,
             "report": report,
-            "json_path": json_path,
-            "excel_path": excel_path,
-            "master_csv_path": master_csv,
-            "unresponsive_csv_path": unresp_csv
+            "summary_csv_path": summary_csv,
         }

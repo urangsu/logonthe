@@ -19,6 +19,7 @@ from services.pacing import PacingService
 from services.clipboard_bridge import ClipboardCommandBridge
 from services.blog_popularity import BlogPopularityService
 from services.like_transaction import LikeCircuitBreaker
+from services.gemini_extension_bridge import GeminiExtensionBridge
 from src.logger import logger
 
 
@@ -41,7 +42,8 @@ class FeedController:
         state_mgr: StateManager,
         stop_event: threading.Event,
         command_bridge: Optional[ClipboardCommandBridge] = None,
-        pause_event: Optional[threading.Event] = None
+        pause_event: Optional[threading.Event] = None,
+        gemini_extension_bridge: Optional[GeminiExtensionBridge] = None,
     ):
         self.config = config
         self.history = history
@@ -49,6 +51,7 @@ class FeedController:
         self.stop_event = stop_event
         self.pause_event = pause_event
         self.command_bridge = command_bridge
+        self.gemini_extension_bridge = gemini_extension_bridge
         self.session: Optional[BrowserSession] = None
         self.pacing = PacingService(config=config, stop_event=stop_event, state_manager=state_mgr, pause_event=pause_event)
 
@@ -67,12 +70,20 @@ class FeedController:
         ai_prompt_style = str(self.config.get("ai_prompt_style", "warm_short"))
 
         # Gemini Bridge 설정
-        gemini_browser_mode = str(self.config.get("gemini_browser_mode", "existing_chrome_mac"))
+        gemini_browser_mode = str(self.config.get("gemini_browser_mode", "extension_existing_chrome"))
         gemini_web_enabled = bool(self.config.get("gemini_web_enabled", True))
         gemini_mode = str(self.config.get("gemini_mode", "new"))
         gemini_custom_url = str(self.config.get("gemini_custom_url", "https://gemini.google.com/app"))
 
         gemini_url = gemini_custom_url if (gemini_mode == "custom" and gemini_custom_url) else "https://gemini.google.com/app"
+
+        if comment_enabled and gemini_web_enabled and gemini_browser_mode == "extension_existing_chrome":
+            preflight = self.gemini_extension_bridge.preflight() if self.gemini_extension_bridge else None
+            if not preflight or not preflight.ready:
+                status = preflight.status if preflight else "bridge_not_started"
+                self.state_mgr.update(new_state=FeedState.ERROR, message=f"Gemini 확장 연결 필요: {status}")
+                logger.log(f"[GEMINI/EXTENSION] 피드 시작 차단: {status}", "ERROR")
+                return
 
         # 세션 초기화 (캐시 및 서킷 브레이커 리셋)
         BlogPopularityService.clear_cache()
@@ -153,7 +164,8 @@ class FeedController:
                 command_bridge=self.command_bridge,
                 state_manager=self.state_mgr,
                 stop_event=self.stop_event,
-                pause_event=self.pause_event
+                pause_event=self.pause_event,
+                gemini_extension_bridge=self.gemini_extension_bridge,
             )
 
             processed_keys = set()
@@ -190,11 +202,14 @@ class FeedController:
                     processed_keys.add(post.key)
 
                     # 주제 필터 (피드 탐색 시 푸드/카페/리빙 선호, IT/카메라/스펙 자동 스킵)
-                    if source_type != FeedSourceType.DIRECT and self.config.get("topic_filter_enabled", True) and post.title:
+                    if source_type in {FeedSourceType.RECOMMENDATION, FeedSourceType.TARGETED_SEARCH} and self.config.get("topic_filter_enabled", True) and post.title:
                         from naver.discovery.topic_filter import DiscoveryTopicFilter
-                        allowed, topic_reason = DiscoveryTopicFilter.is_allowed(post.title, post.excerpt or "")
-                        if not allowed:
-                            logger.log(f"  🚫 [TOPIC_FILTER] 비선호 주제({topic_reason}) 감지 -> 방문 제외: \"{post.title}\"")
+                        decision = DiscoveryTopicFilter.evaluate(post.title, post.excerpt or "", stage="card")
+                        if not decision.allowed:
+                            logger.log(
+                                f"  [TOPIC_FILTER] card/{decision.blocked_category} "
+                                f"evidence={list(decision.evidence)} title=\"{post.title}\""
+                            )
                             continue
 
                     # 컴포넌트 레벨 멱등성 검사 (Like와 Comment 독립 판단)

@@ -49,6 +49,9 @@ class FailureReason(str, Enum):
 
 class WorkerCommandType(str, Enum):
     APPLY_CLIPBOARD_COMMENT = "apply_clipboard_comment"
+    GEMINI_RETRY = "gemini_retry"
+    GEMINI_SKIP_POST = "gemini_skip_post"
+    GEMINI_USE_LOCAL_ONCE = "gemini_use_local_once"
 
 
 @dataclass

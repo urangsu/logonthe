@@ -7,7 +7,8 @@ META_SUBJECTS: Set[str] = {
     "서울", "부산", "제주", "성수동", "강남", "홍대", "광양", "강릉", "남해", "속초",
     "포항", "을지로", "익선동", "한남동", "망원동", "연남동", "강남역", "경주", "도산공원",
     "애월", "경포대", "여수", "다낭", "방콕", "가평", "도쿄", "반포", "중앙시장", "죽도시장",
-    "독일마을", "골목", "샵", "노포", "대형", "근교"
+    "독일마을", "골목", "샵", "노포", "대형", "근교", "개봉기", "조립기", "가성비", "솔직",
+    "해운대", "빵지순례", "먹거리", "완성", "주말에", "함께"
 }
 
 ALLOWLIST_1CHAR: Set[str] = {"책", "앱", "펌", "룩", "옷", "뷰"}
@@ -17,15 +18,30 @@ STOPWORDS: Set[str] = {
     "입니다", "있어요", "있습니다", "같아요", "생각", "공유", "안내", "위치", "근처", "어제",
     "줄서는", "만드는", "집에서", "여름", "겨울", "가을", "봄", "주말", "평일", "아침",
     "점심", "저녁", "신상", "솔직후기", "매콤", "칼칼한", "달달하고", "바삭한", "쫀득하고",
-    "제철", "마무리", "살수율", "코스", "조합", "감성", "개조", "모습", "분위기", "특징"
+    "제철", "마무리", "살수율", "코스", "조합", "감성", "개조", "모습", "분위기", "특징",
+    "함께하는", "읽기", "좋은", "높여주는", "자연스러운", "이국적인", "푸른", "겉은", "그중",
+    "탐방", "관련", "테스트", "내용", "왔어요", "했습니다", "한잔했습니다", "들러야", "즐기고",
+    "감각적이고", "완벽했던", "부드러운", "쫄깃한", "달콤한", "얼얼한", "웅장한", "만발한",
+    "짜릿했습니다", "아기자기한", "정밀한", "집중해서", "폭신폭신한", "여행지마다"
 }
+
+_PARTICLE_SUFFIXES = ("에서는", "으로는", "에게서", "부터", "까지", "처럼", "보다", "에서", "으로", "이랑", "하고", "에게", "한테", "은", "는", "을", "를", "와", "과", "로", "의")
+
+
+def normalize_entity_token(token: str) -> str:
+    """Remove only clear Korean postpositions without pretending to do morphology."""
+    clean = token.strip()
+    for suffix in _PARTICLE_SUFFIXES:
+        if clean.endswith(suffix) and len(clean) - len(suffix) >= 2:
+            return clean[:-len(suffix)]
+    return clean
 
 
 def is_valid_subject(token: str) -> bool:
     """단어가 유효한 구체 대상(Subject Entity)인지 검증"""
     if not token or len(token) < 1:
         return False
-    clean = token.strip()
+    clean = normalize_entity_token(token)
     if clean.isdigit():
         return False
     if len(clean) == 1 and clean not in ALLOWLIST_1CHAR:
@@ -40,6 +56,7 @@ def extract_entity_tokens(text: str) -> List[str]:
     tokens = re.findall(r"[가-힣A-Za-z0-9][가-힣A-Za-z0-9·&+\-]{0,15}", text)
     valid_tokens = []
     for t in tokens:
-        if is_valid_subject(t):
-            valid_tokens.append(t)
+        normalized = normalize_entity_token(t)
+        if is_valid_subject(normalized):
+            valid_tokens.append(normalized)
     return valid_tokens

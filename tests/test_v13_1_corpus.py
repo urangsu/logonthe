@@ -77,8 +77,8 @@ class TestV131CorpusAndQA(unittest.TestCase):
         LocalComposerV41.reset_history()
         self.composer = LocalComposerV41(seed=42)
 
-    def test_50_corpus_all_generate_valid_community_comments(self):
-        """50개 실제 네이버 블로그 코퍼스 전 카테고리 로컬 생성 및 FinalQualityGate 100% 통과 검증"""
+    def test_allowed_topic_fixtures_generate_valid_community_comments(self):
+        """합성 생활주제 fixture의 로컬 생성 및 FinalQualityGate 검증"""
         passed_count = 0
         samples = []
 
@@ -86,6 +86,8 @@ class TestV131CorpusAndQA(unittest.TestCase):
             title = item["title"]
             excerpt = item["excerpt"]
             cat = item["cat"]
+            if cat == "TECH_PHOTO":
+                continue
 
             cand, score = self.composer.compose(title, excerpt, preset=CommunityRhythmPreset.COMMUNITY)
             self.assertIsNotNone(cand, f"[{idx}] Failed to generate for '{title}'")
@@ -118,12 +120,14 @@ class TestV131CorpusAndQA(unittest.TestCase):
             if len(samples) < 15:
                 samples.append((idx, cat, title, cand.body, cand.anchor))
 
-        self.assertEqual(passed_count, 50)
+        self.assertEqual(passed_count, 44)
 
     def test_calm_preset_50_corpus(self):
         """조금 더 얌전하게 (calm) 프리셋 50개 코퍼스 검증"""
         composer_calm = LocalComposerV41(seed=100)
         for idx, item in enumerate(TEST_CORPUS_50, 1):
+            if item["cat"] == "TECH_PHOTO":
+                continue
             cand, score = composer_calm.compose(item["title"], item["excerpt"], preset=CommunityRhythmPreset.CALM)
             self.assertIsNotNone(cand, f"[{idx}] Failed in calm preset for '{item['title']}'")
             gate_res = FinalQualityGate.validate_final_text(cand.body, preset=CommunityRhythmPreset.CALM, source="local")
@@ -137,6 +141,24 @@ class TestV131CorpusAndQA(unittest.TestCase):
         cand, score = self.composer.compose(empty_title, empty_excerpt, preset=CommunityRhythmPreset.COMMUNITY)
         self.assertIsNone(cand)
         self.assertEqual(score, 0.0)
+
+    def test_non_visual_subjects_never_receive_visual_reactions(self):
+        cases = [
+            ("화장실 줄눈 곰팡이 제거 청소법", "락스 희석 비율과 타일 틈새 청소 순서"),
+            ("돌아기 수면교육 루틴", "목욕과 백색소음으로 통잠 루틴을 만들었어요"),
+            ("아침 10분 스트레칭", "폼롤러로 어깨와 등을 천천히 풀어주는 동작"),
+            ("노이즈 캔슬링 사용 후기", "지하철 소음을 줄여주는 헤드폰 기능"),
+        ]
+        for title, excerpt in cases:
+            cand, _ = self.composer.compose(title, excerpt)
+            if cand:
+                self.assertNotIn("비쥬얼", cand.body, cand.body)
+                self.assertNotIn("뷰 뭐야", cand.body, cand.body)
+
+    def test_tilde_is_optional_but_never_repeated(self):
+        cand, _ = self.composer.compose("성수 딸기라떼 카페", "생딸기와 부드러운 크림이 올라간 라떼")
+        self.assertIsNotNone(cand)
+        self.assertLessEqual(cand.body.count("~"), 1)
 
     def test_anti_repetition_session_deque(self):
         """동일 오프너/패밀리가 3회 연속 선택되지 않도록 방어하는지 검증"""

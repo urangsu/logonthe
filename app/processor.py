@@ -1,9 +1,12 @@
 import threading
+import time
+import uuid
 from typing import Optional
 from playwright.sync_api import Page
 from app.models import (
     FeedPost, PostProcessResult, LikeProcessResult, CommentProcessResult,
-    UserAction, CommentSubmitState, LikeState, FailureReason, FeedSourceType, PostActionPlan
+    UserAction, CommentSubmitState, LikeState, FailureReason, FeedSourceType, PostActionPlan,
+    WorkerCommandType
 )
 from app.state import StateManager, FeedState
 from app.errors import (
@@ -23,6 +26,7 @@ from services.ai_prompt import AIPromptBuilder
 from services.clipboard_bridge import ClipboardCommandBridge
 from services.gemini_web import GeminiWebBridge
 from services.gemini_existing_chrome import ExistingChromeGeminiBridge
+from services.gemini_extension_bridge import GeminiCommand, GeminiExtensionBridge, GeminiResultStatus
 from services.pacing import PacingService
 from browser.session import interruptible_wait
 from src.logger import logger
@@ -43,7 +47,7 @@ class PostProcessor:
         ai_clipboard_enabled: bool = True,
         ai_context_max_chars: int = 700,
         ai_prompt_style: str = "warm_short",
-        gemini_browser_mode: str = "existing_chrome_mac",
+        gemini_browser_mode: str = "extension_existing_chrome",
         gemini_web_enabled: bool = True,
         gemini_url: str = "https://gemini.google.com/app",
         gemini_page: Optional[Page] = None,
@@ -52,7 +56,8 @@ class PostProcessor:
         command_bridge: Optional[ClipboardCommandBridge] = None,
         state_manager: Optional[StateManager] = None,
         stop_event: Optional[threading.Event] = None,
-        pause_event: Optional[threading.Event] = None
+        pause_event: Optional[threading.Event] = None,
+        gemini_extension_bridge: Optional[GeminiExtensionBridge] = None,
     ):
         self.config = config
         self.like_enabled = like_enabled
@@ -72,6 +77,8 @@ class PostProcessor:
         self.state_mgr = state_manager
         self.stop_event = stop_event
         self.pause_event = pause_event
+        self.gemini_extension_bridge = gemini_extension_bridge
+        self.navigation_version = 0
 
     def process(
         self,
@@ -86,6 +93,8 @@ class PostProcessor:
         3. 댓글 처리: 댓글창 오픈 -> ServerCommentDuplicateGuard 확인 -> (부재 시에만) Gemini/로컬 초안 생성 -> 검토 및 등록
         """
         result = PostProcessResult(post=post)
+        self.navigation_version += 1
+        navigation_version = self.navigation_version
 
         if self.stop_event and self.stop_event.is_set():
             raise StopRequestedException("작업 중지 요청됨")
@@ -102,7 +111,12 @@ class PostProcessor:
 
         try:
             detail_page.goto(post.url, wait_until="domcontentloaded", timeout=25000)
-            interruptible_wait(self.stop_event, 1.0)
+            if self.pacing:
+                settle = self.pacing.wait_page_settle()
+                if settle.interrupted:
+                    raise StopRequestedException("작업 중지 요청됨")
+            else:
+                interruptible_wait(self.stop_event, 1.0)
         except Exception as e:
             logger.log(f"[POST] 상세 페이지 로드 오류: {e}", "WARNING")
             raise PostNavigationMismatchError(f"페이지 로드 실패: {e}", post_key=post.key, reason="navigation_error")
@@ -113,13 +127,33 @@ class PostProcessor:
         # TargetPostGuard: 대상 글 일치 여부 확인 (Fail-Open 원천 차단)
         TargetPostGuard.verify(detail_page, post)
 
+        # 추천/관심주제는 실제 본문을 한 번 더 확인한 뒤 어떤 상호작용도 수행한다.
+        detail_context = None
+        if post.source in {FeedSourceType.RECOMMENDATION, FeedSourceType.TARGETED_SEARCH} and self.config.get("topic_filter_enabled", True):
+            detail_context = ContentContextExtractor.extract(detail_page, post, max_chars=self.ai_context_max_chars)
+            from naver.discovery.topic_filter import DiscoveryTopicFilter
+            topic_decision = DiscoveryTopicFilter.evaluate(
+                detail_context.title or post.title or "",
+                detail_context.excerpt,
+                stage="detail",
+            )
+            if not topic_decision.allowed:
+                logger.log(
+                    f"  [TOPIC_FILTER] detail/{topic_decision.blocked_category} "
+                    f"evidence={list(topic_decision.evidence)} title=\"{detail_context.title or post.title or ''}\""
+                )
+                result.like_result.error = f"topic_blocked:{topic_decision.blocked_category}"
+                result.comment_result.status = CommentSubmitState.SKIPPED
+                result.comment_result.error = f"topic_blocked:{topic_decision.blocked_category}"
+                return result
+
         # 2. 공감(하트) 처리 (Re-ordered Like Pipeline: State -> Popularity Guard -> Transaction)
         if effective_like:
             # Keep the configured human pacing before the first mutating
             # action as well as between actions.  This is intentionally
             # cancellable and never bypasses the state/confidence checks below.
             if self.pacing:
-                p_res = self.pacing.wait_action()
+                p_res = self.pacing.wait_pre_like()
                 if p_res.interrupted:
                     raise StopRequestedException("작업 중지 요청됨")
             if self.state_mgr:
@@ -169,7 +203,7 @@ class PostProcessor:
 
         # 액션 사이 Pacing 대기
         if self.pacing:
-            p_res = self.pacing.wait_action()
+            p_res = self.pacing.wait_post_like() if effective_like else self.pacing.wait_action()
             if p_res.interrupted:
                 raise StopRequestedException("작업 중지 요청됨")
 
@@ -193,10 +227,7 @@ class PostProcessor:
                     logger.log(f"  ⚠️ [COMMENT] 댓글 레이어 준비 타임아웃 ({open_reason}).", "WARNING")
                     result.comment_result = CommentProcessResult(status=CommentSubmitState.FAILED, error=open_reason)
             else:
-                # [코퍼스 자동 수집] 방문한 글의 기존 우수 댓글을 학습 코퍼스에 비식별화하여 자동 누적
-                from services.visited_comment_collector import VisitedCommentCollector
                 from services.user_learning_service import UserLearningService
-                VisitedCommentCollector.collect_from_page(detail_page, post)
 
                 # 3-2. 서버 사이드 중복 댓글 스캔 (Gemini 호출 전 반드시 선행)
                 presence = ServerCommentDuplicateGuard.scan_page_for_my_comment(detail_page, stop_event=self.stop_event)
@@ -211,7 +242,7 @@ class PostProcessor:
                     result.comment_result = CommentProcessResult(status=CommentSubmitState.SKIPPED, error="server_duplicate_check_unknown")
                 else:
                     # 3-3. 내 댓글이 없는 것이 확실한 경우(ABSENT HIGH)에만 초안 생성 및 주입
-                    context = ContentContextExtractor.extract(detail_page, post, max_chars=self.ai_context_max_chars)
+                    context = detail_context or ContentContextExtractor.extract(detail_page, post, max_chars=self.ai_context_max_chars)
                     post.title = context.title or post.title
                     post.excerpt = context.excerpt
                     if not post.excerpt.strip():
@@ -230,9 +261,13 @@ class PostProcessor:
                     preset = self.config.get("comment_style_preset", "community")
                     suffix = DraftService.resolve_suffix(post.source, self.config)
 
+                    request_id = uuid.uuid4().hex
                     ai_prompt = ""
                     if self.ai_clipboard_enabled or self.gemini_web_enabled:
-                        ai_prompt = AIPromptBuilder.build(post.title, post.excerpt, style=self.ai_prompt_style, preset=preset)
+                        ai_prompt = AIPromptBuilder.build(
+                            post.title, post.excerpt, style=self.ai_prompt_style,
+                            preset=preset, request_id=request_id,
+                        )
 
                     if self.state_mgr:
                         self.state_mgr.update(
@@ -245,19 +280,112 @@ class PostProcessor:
                     draft_text = ""
                     draft_source_label = ""
                     detected_category = "UNKNOWN"
+                    local_res = None
 
                     # [Tier 1] Gemini 자동 댓글 생성
                     gemini_answer = None
+                    use_local_requested = False
                     if self.gemini_web_enabled and ai_prompt:
                         if self.state_mgr:
                             self.state_mgr.update(message="Gemini로 자동 댓글 생성 중...")
 
-                        if self.gemini_browser_mode == "existing_chrome_mac":
+                        if self.gemini_browser_mode == "extension_existing_chrome":
+                            while not gemini_answer and not use_local_requested:
+                                failure = "invalid_response"
+                                preflight = self.gemini_extension_bridge.preflight() if self.gemini_extension_bridge else None
+                                if preflight and preflight.ready:
+                                    command = GeminiCommand(
+                                        request_id=request_id,
+                                        post_key=post.key,
+                                        navigation_version=navigation_version,
+                                        prompt=ai_prompt,
+                                        created_at=time.time(),
+                                    )
+                                    self.gemini_extension_bridge.publish(command)
+                                    extension_result = self.gemini_extension_bridge.wait_for_result(
+                                        command,
+                                        timeout=float(self.config.get("gemini_response_timeout", 55.0)),
+                                        stop_event=self.stop_event,
+                                    )
+                                    if extension_result and extension_result.status == GeminiResultStatus.COMPLETED:
+                                        gemini_answer = DraftService.clean_ai_response(
+                                            extension_result.text,
+                                            expected_request_id=request_id,
+                                        )
+                                        if gemini_answer:
+                                            from services.comments.community_rhythm import FinalQualityGate
+                                            candidate_with_suffix = DraftService.compose_body_and_suffix(gemini_answer, suffix)
+                                            extension_gate = FinalQualityGate.validate_final_text(
+                                                candidate_with_suffix, preset=preset, source="gemini"
+                                            )
+                                            if not extension_gate.valid:
+                                                failure = f"quality_{extension_gate.code}"
+                                                logger.log(
+                                                    f"[GEMINI/EXTENSION] 품질 검사 실패: {extension_gate.code}",
+                                                    "ERROR",
+                                                )
+                                                gemini_answer = None
+                                    else:
+                                        failure = extension_result.status.value if extension_result else "timeout"
+                                        failure_detail = extension_result.error if extension_result else "response_timeout"
+                                        logger.log(f"[GEMINI/EXTENSION] 생성 실패: {failure} / {failure_detail}", "ERROR")
+                                else:
+                                    failure = preflight.status if preflight else "bridge_not_started"
+                                    logger.log(f"[GEMINI/EXTENSION] 연결 준비 안 됨: {failure}", "ERROR")
+
+                                if gemini_answer:
+                                    break
+                                if self.stop_event and self.stop_event.is_set():
+                                    raise StopRequestedException("사용자 작업 중지")
+                                if self.pause_event is not None:
+                                    self.pause_event.set()
+                                else:
+                                    result.comment_result = CommentProcessResult(
+                                        status=CommentSubmitState.FAILED,
+                                        error=f"gemini_failed:{failure}",
+                                    )
+                                    return result
+                                if self.state_mgr:
+                                    self.state_mgr.update(
+                                        new_state=FeedState.PAUSED,
+                                        message=f"Gemini 실패로 일시정지됨 ({failure}) - 연결 복구 후 작업 재개를 누르세요",
+                                    )
+                                while self.pause_event is not None and self.pause_event.is_set():
+                                    if self.stop_event and self.stop_event.is_set():
+                                        raise StopRequestedException("사용자 작업 중지")
+                                    cmd = self.command_bridge.pop_command() if self.command_bridge else None
+                                    if cmd and cmd.kind == WorkerCommandType.GEMINI_SKIP_POST:
+                                        result.comment_result = CommentProcessResult(
+                                            status=CommentSubmitState.SKIPPED,
+                                            error=f"gemini_failed:{failure}",
+                                        )
+                                        self.pause_event.clear()
+                                        if self.state_mgr:
+                                            self.state_mgr.update(new_state=FeedState.SKIPPING, inc_skip=True)
+                                        return result
+                                    if cmd and cmd.kind == WorkerCommandType.GEMINI_USE_LOCAL_ONCE:
+                                        use_local_requested = True
+                                        self.pause_event.clear()
+                                        break
+                                    if cmd and cmd.kind == WorkerCommandType.GEMINI_RETRY:
+                                        self.pause_event.clear()
+                                        break
+                                    time.sleep(0.2)
+                                if use_local_requested:
+                                    break
+                                request_id = uuid.uuid4().hex
+                                ai_prompt = AIPromptBuilder.build(
+                                    post.title, post.excerpt, style=self.ai_prompt_style,
+                                    preset=preset, request_id=request_id,
+                                )
+
+                        elif self.gemini_browser_mode == "existing_chrome_mac":
                             try:
                                 gemini_answer = ExistingChromeGeminiBridge.generate_comment(
                                     prompt=ai_prompt,
                                     stop_event=self.stop_event,
-                                    preset=preset
+                                    preset=preset,
+                                    request_id=request_id,
                                 )
                             except Exception as e:
                                 logger.log(f"[GEMINI/EXTERNAL] 연동 실패: {e}", "WARNING")
@@ -269,7 +397,8 @@ class PostProcessor:
                                     prompt=ai_prompt,
                                     gemini_url=self.gemini_url,
                                     stop_event=self.stop_event,
-                                    preset=preset
+                                    preset=preset,
+                                    request_id=request_id,
                                 )
                             except Exception as e:
                                 logger.log(f"[GEMINI/MANAGED] 생성 실패: {e}", "WARNING")
@@ -288,10 +417,10 @@ class PostProcessor:
                             draft_text = cand_composed
                             draft_source_label = "Gemini 생성"
                         else:
-                            logger.log(f"⚠️ [GEMINI] 생성된 텍스트가 품질 게이트를 통과하지 못했습니다 ([{gate_res.code}] {gate_res.reason} / 매칭: {gate_res.matched}). 로컬 엔진으로 전환합니다.", "WARNING")
+                            logger.log(f"[GEMINI] 생성된 텍스트가 품질 게이트를 통과하지 못했습니다 ([{gate_res.code}] {gate_res.reason}).", "ERROR")
 
-                    if not draft_text:
-                        # [Tier 2] 로컬 V4.1 인간형 엔진
+                    if not draft_text and (use_local_requested or not self.gemini_web_enabled or self.config.get("allow_local_draft_on_gemini_failure", False)):
+                        # 로컬 엔진은 사용자가 Gemini를 끄거나 명시적으로 허용한 경우에만 사용한다.
                         local_res = ContextualDraftEngine.generate(post.title or "", post.excerpt or "", preset=preset)
                         if local_res and local_res.body:
                             cand_composed = DraftService.compose_body_and_suffix(local_res.body, suffix)
@@ -349,6 +478,16 @@ class PostProcessor:
                         elif action == UserAction.SKIP:
                             logger.log(f"  ⏭️ [COMMENT] 사용자가 해당 글을 건너뛰었습니다.")
                             cmt_res.status = CommentSubmitState.SKIPPED
+                            UserLearningService.record_decision(
+                                post=post,
+                                initial_draft=draft_text,
+                                category=detected_category,
+                                anchor=(local_res.anchor if local_res else ""),
+                                evidence_span=(local_res.evidence_span if local_res else ""),
+                                source=("gemini" if draft_source_label == "Gemini 생성" else "local"),
+                                decision="skipped",
+                                rejection_reason="user_skip",
+                            )
                             if self.state_mgr:
                                 self.state_mgr.update(new_state=FeedState.SKIPPING, inc_skip=True)
                         elif action == UserAction.SUBMIT:
@@ -361,6 +500,17 @@ class PostProcessor:
                                 logger.log(f"  ❌ [COMMENT] 등록 직전 댓글 품질 게이트 통과 실패: [{final_gate.code}] {final_gate.reason} (매칭: {final_gate.matched}) - 등록 취소", "ERROR")
                                 cmt_res.status = CommentSubmitState.FAILED
                                 cmt_res.error = final_gate.code
+                                UserLearningService.record_decision(
+                                    post=post,
+                                    initial_draft=draft_text,
+                                    final_submitted=submitted_cand,
+                                    category=detected_category,
+                                    anchor=(local_res.anchor if local_res else ""),
+                                    evidence_span=(local_res.evidence_span if local_res else ""),
+                                    source=("gemini" if draft_source_label == "Gemini 생성" else "local"),
+                                    decision="rejected",
+                                    rejection_reason=final_gate.code,
+                                )
                                 result.comment_result = cmt_res
                                 return result
 
@@ -380,7 +530,10 @@ class PostProcessor:
                                     post=post,
                                     initial_draft=draft_text,
                                     final_submitted=cmt_res.submitted_text,
-                                    category=detected_category
+                                    category=detected_category,
+                                    anchor=(local_res.anchor if 'local_res' in locals() and local_res else ""),
+                                    evidence_span=(local_res.evidence_span if 'local_res' in locals() and local_res else ""),
+                                    source=("gemini" if draft_source_label == "Gemini 생성" else "local"),
                                 )
                                 if self.state_mgr:
                                     self.state_mgr.update(inc_comment=True)

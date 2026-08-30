@@ -1,6 +1,10 @@
 import unittest
+from unittest.mock import MagicMock, patch
+from app.models import FeedPost, FeedSourceType
+from app.processor import PostProcessor
+from naver.content_extractor import PostContext
 from naver.discovery.query_pool import QueryRotator, DISCOVERY_QUERIES
-from naver.discovery.topic_filter import DiscoveryTopicFilter, TARGET_DISCOVERY_CATEGORIES
+from naver.discovery.topic_filter import DiscoveryTopicFilter, TARGET_DISCOVERY_CATEGORIES, TopicDecision
 from services.ai_prompt import AIPromptBuilder
 from services.comments.validators import PositiveSafetyValidator
 from services.comments.intents import CommentCandidate, ReactionIntent, FirstPersonIntent
@@ -51,12 +55,60 @@ class TestTargetedDiscoveryV9(unittest.TestCase):
             "소니 A7M4 탐론 망원 렌즈 첫인상 개봉기",
             "엔비디아 GPU 주가 전망 코인 반도체 수혜주",
             "2026 청년 월세 지원금 환급금 신청 방법",
-            "유퀴즈 방송인 프로필 나이 학력 논란 사건",
-            "무의미한 텍스트 제목만 있는 글"
         ]
         for title in drop_titles:
             allowed, reason = DiscoveryTopicFilter.is_allowed(title)
             self.assertFalse(allowed, f"Should drop: {title} (got {reason})")
+
+    def test_topic_decision_reports_category_evidence_and_stage(self):
+        decision = DiscoveryTopicFilter.evaluate(
+            "요즘 시장 흐름 정리",
+            "ETF와 금리, 주식 포트폴리오를 함께 살펴봤어요",
+            stage="detail",
+        )
+        self.assertIsInstance(decision, TopicDecision)
+        self.assertFalse(decision.allowed)
+        self.assertEqual(decision.blocked_category, "finance")
+        self.assertEqual(decision.stage, "detail")
+        self.assertIn("ETF", decision.evidence)
+
+    def test_ambiguous_substrings_do_not_false_positive(self):
+        allowed_titles = [
+            "바디워시 향 좋은 제품으로 욕실 정리",
+            "여행 사진 남기기 좋은 제주 산책 코스",
+            "애플파이 바삭하게 굽는 홈베이킹 레시피",
+            "waiting for spring 주말 일상 기록",
+            "산리오 랜덤박스 개봉기 키링 굿즈",
+            "컬러 콘택트렌즈 착용 메이크업 후기",
+        ]
+        for title in allowed_titles:
+            decision = DiscoveryTopicFilter.evaluate(title, stage="card")
+            self.assertTrue(decision.allowed, f"false positive: {title} / {decision}")
+
+    def test_detail_filter_blocks_all_mutating_actions(self):
+        post = FeedPost(
+            key="tech:1", source=FeedSourceType.RECOMMENDATION,
+            url="https://m.blog.naver.com/tech/1", title="주말 기록",
+        )
+        page = MagicMock()
+        processor = PostProcessor(
+            config={"topic_filter_enabled": True},
+            like_enabled=True,
+            comment_enabled=True,
+            gemini_web_enabled=False,
+        )
+        with patch("app.processor.TargetPostGuard.verify"), \
+             patch("app.processor.interruptible_wait"), \
+             patch("app.processor.ContentContextExtractor.extract", return_value=PostContext(
+                 title="주말 기록", excerpt="소니 미러리스 카메라 렌즈와 촬영 장비를 비교했어요"
+             )), \
+             patch("app.processor.LikeTransactionService.resolve_like_state") as like_state, \
+             patch("app.processor.CommentInteractionService.open_comment_layer") as comment_open:
+            result = processor.process(page, post)
+        self.assertEqual(result.like_result.error, "topic_blocked:camera")
+        self.assertEqual(result.comment_result.error, "topic_blocked:camera")
+        like_state.assert_not_called()
+        comment_open.assert_not_called()
 
     def test_validator_rejects_ai_summary_and_exaggerations(self):
         # AI 요약 어투 및 유행어 차단

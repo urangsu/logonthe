@@ -16,6 +16,15 @@ class ClipboardCommandBridge:
         cmd = WorkerCommand(kind=WorkerCommandType.APPLY_CLIPBOARD_COMMENT, text=text)
         self._queue.put(cmd)
 
+    def send_gemini_retry(self):
+        self._queue.put(WorkerCommand(kind=WorkerCommandType.GEMINI_RETRY))
+
+    def send_gemini_skip_post(self):
+        self._queue.put(WorkerCommand(kind=WorkerCommandType.GEMINI_SKIP_POST))
+
+    def send_gemini_use_local_once(self):
+        self._queue.put(WorkerCommand(kind=WorkerCommandType.GEMINI_USE_LOCAL_ONCE))
+
     def pop_command(self) -> Optional[WorkerCommand]:
         """Worker 스레드에서 대기 중인 명령을 논블로킹으로 꺼냄"""
         try:

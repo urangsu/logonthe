@@ -69,7 +69,7 @@ class CommentLengthPolicy:
 
 COMMENT_POLICIES: Dict[Union[CommunityRhythmPreset, str], CommentLengthPolicy] = {
     CommunityRhythmPreset.COMMUNITY: CommentLengthPolicy(
-        minimum=15, target_max=55, preferred_min=18, preferred_max=45, maximum=100
+        minimum=16, target_max=48, preferred_min=18, preferred_max=45, maximum=100
     ),
     CommunityRhythmPreset.CALM: CommentLengthPolicy(
         minimum=20, target_max=65, preferred_min=20, preferred_max=65, maximum=100
@@ -100,6 +100,10 @@ class FinalQualityResult:
     quality_band: str
     length_score: float
     matched: Optional[str] = None
+    anchor_evidence: Optional[str] = None
+    semantic_compatibility: Optional[bool] = None
+    repetition_family: Optional[str] = None
+    tone_score: float = 0.0
 
     @property
     def ok(self) -> bool:
@@ -347,6 +351,9 @@ class FinalQualityGate:
         source: Optional[str] = None,
         allow_period: bool = False,
         legacy: bool = False,
+        anchor_evidence: Optional[str] = None,
+        semantic_compatibility: Optional[bool] = None,
+        repetition_family: Optional[str] = None,
     ) -> FinalQualityResult:
         original = text if isinstance(text, str) else ""
         normalized = cls.normalize(original)
@@ -375,6 +382,10 @@ class FinalQualityGate:
                 quality_band=policy.band(length) if band is None else band,
                 length_score=policy.score(length) if score is None else score,
                 matched=matched,
+                anchor_evidence=anchor_evidence,
+                semantic_compatibility=semantic_compatibility,
+                repetition_family=repetition_family,
+                tone_score=round((policy.score(length) * 0.8) + (0.2 if normalized.endswith("~") else 0.1), 2),
             )
 
         if not isinstance(text, str):
@@ -382,6 +393,13 @@ class FinalQualityGate:
         if not allow_period and not legacy and ("." in normalized or "。" in normalized):
             matched = "." if "." in normalized else "。"
             return result(False, "forbidden_period", f"period is forbidden: {matched}", matched=matched)
+        if not legacy and normalized.count("~") > 1:
+            return result(False, "excessive_tilde", "at most one tilde is allowed", matched="~")
+        strong_slang = re.findall(r"(?:^|\s)(헐|와|세상에|대박)(?=\s)|미쳤|맛도리", normalized)
+        if not legacy and len(strong_slang) > 1:
+            return result(False, "excessive_slang", "at most one strong slang expression is allowed")
+        if semantic_compatibility is False:
+            return result(False, "semantic_mismatch", "reaction is incompatible with its anchor")
         if length > policy.maximum:
             return result(False, "length_exceeded", f"comment exceeds {policy.maximum} characters", band="above_maximum", score=0.0)
 
@@ -434,8 +452,16 @@ class FinalQualityGate:
         preset: PresetLike = CommunityRhythmPreset.COMMUNITY,
         *,
         source: Optional[str] = None,
+        anchor_evidence: Optional[str] = None,
+        semantic_compatibility: Optional[bool] = None,
+        repetition_family: Optional[str] = None,
     ) -> FinalQualityResult:
-        return cls.validate(final_text, preset=preset, source=source)
+        return cls.validate(
+            final_text, preset=preset, source=source,
+            anchor_evidence=anchor_evidence,
+            semantic_compatibility=semantic_compatibility,
+            repetition_family=repetition_family,
+        )
 
     @classmethod
     def validate_text(

@@ -1,6 +1,8 @@
 import os
 import json
 import time
+import hashlib
+import tempfile
 from typing import Optional, Dict, Any
 from app.models import FeedPost
 from src.logger import logger
@@ -21,24 +23,76 @@ class UserLearningService:
         post: FeedPost,
         initial_draft: str,
         final_submitted: str,
-        category: str = "UNKNOWN"
+        category: str = "UNKNOWN",
+        anchor: str = "",
+        evidence_span: str = "",
+        source: str = "unknown",
+        rejection_reason: str = "",
     ):
         if not final_submitted or not final_submitted.strip():
             return
+        cls.record_decision(
+            post=post,
+            initial_draft=initial_draft,
+            final_submitted=final_submitted,
+            category=category,
+            anchor=anchor,
+            evidence_span=evidence_span,
+            source=source,
+            decision="edited" if (initial_draft or "").strip() != final_submitted.strip() else "adopted",
+            rejection_reason=rejection_reason,
+        )
+
+    @classmethod
+    def infer_anchor(cls, post: FeedPost, comment: str) -> tuple[str, str]:
+        """Infer only a comment token that is visibly grounded in title/body."""
+        from services.comments.entities import extract_entity_tokens
+
+        context = f"{post.title or ''} {post.excerpt or ''}"
+        for token in sorted(set(extract_entity_tokens(comment or "")), key=len, reverse=True):
+            index = context.find(token)
+            if index >= 0:
+                start = max(0, index - 30)
+                end = min(len(context), index + len(token) + 30)
+                return token, context[start:end].strip()
+        return "", ""
+
+    @classmethod
+    def record_decision(
+        cls,
+        post: FeedPost,
+        initial_draft: str,
+        final_submitted: str = "",
+        category: str = "UNKNOWN",
+        anchor: str = "",
+        evidence_span: str = "",
+        source: str = "unknown",
+        decision: str = "skipped",
+        rejection_reason: str = "",
+    ):
+        if decision not in {"adopted", "edited", "skipped", "rejected"}:
+            raise ValueError(f"unsupported learning decision: {decision}")
 
         initial_s = (initial_draft or "").strip()
-        final_s = final_submitted.strip()
+        final_s = (final_submitted or "").strip()
         is_edited = (initial_s != final_s)
+
+        if not anchor:
+            anchor, evidence_span = cls.infer_anchor(post, final_s or initial_s)
 
         entry = {
             "timestamp": time.strftime("%Y-%m-%d %H:%M:%S"),
-            "post_url": post.url,
-            "post_title": post.title or "",
+            "post_key_hash": hashlib.sha256((post.key or post.url).encode("utf-8")).hexdigest(),
             "category": category,
+            "anchor": anchor,
+            "evidence_span": evidence_span[:160],
+            "source": source,
+            "decision": decision,
             "initial_draft": initial_s,
             "final_submitted": final_s,
             "is_user_edited": is_edited,
-            "length": len(final_s)
+            "length": len(final_s),
+            "rejection_reason": rejection_reason,
         }
 
         try:
@@ -53,10 +107,20 @@ class UserLearningService:
 
             existing.append(entry)
 
-            with open(USER_LEARNING_FILE, "w", encoding="utf-8") as f:
-                json.dump(existing, f, ensure_ascii=False, indent=2)
+            fd, tmp = tempfile.mkstemp(prefix=".learning-", suffix=".json", dir=os.path.dirname(USER_LEARNING_FILE))
+            try:
+                with os.fdopen(fd, "w", encoding="utf-8") as f:
+                    json.dump(existing, f, ensure_ascii=False, indent=2)
+                    f.flush()
+                    os.fsync(f.fileno())
+                os.replace(tmp, USER_LEARNING_FILE)
+            finally:
+                if os.path.exists(tmp):
+                    os.unlink(tmp)
 
-            if is_edited:
+            if decision == "skipped":
+                logger.log("  📝 [LEARNING] 사용자가 건너뛴 초안과 사유를 기록했습니다.")
+            elif is_edited:
                 logger.log("  📝 [LEARNING] 사용자가 수정한 댓글을 학습용 데이터셋(user_learning_corpus.json)에 기록했습니다.")
             else:
                 logger.log("  📝 [LEARNING] 등록된 댓글을 학습용 데이터셋(user_learning_corpus.json)에 기록했습니다.")

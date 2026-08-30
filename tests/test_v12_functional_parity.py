@@ -21,7 +21,8 @@ class V12FunctionalParityTests(unittest.TestCase):
         first = FeedPost("one:1", FeedSourceType.DIRECT, "https://m.blog.naver.com/one/1")
         second = FeedPost("two:2", FeedSourceType.DIRECT, "https://m.blog.naver.com/two/2")
         config = {"feed_source": "direct", "direct_urls": [first.url, second.url], "max_feed_items": 2,
-                  "like_enabled": True, "comment_enabled": True, "assistant_mode": False}
+                  "like_enabled": True, "comment_enabled": True, "assistant_mode": False,
+                  "gemini_web_enabled": False}
         history = MagicMock(); history.is_liked.return_value = False; history.is_comment_submitted.return_value = False
         with patch("app.controller.BrowserSession") as session_type, \
              patch("app.controller.NaverAuthGuard.check_login_cookies", return_value=(True, [])), \
@@ -59,7 +60,7 @@ class V12FunctionalParityTests(unittest.TestCase):
              patch("services.my_blog_recent_posts.MyBlogRecentPostService.fetch_recent_posts", return_value=[{"log_no": "1", "url": "u", "title": "t"}]), \
              patch("services.reaction_participant_collector.ReactionParticipantCollector.collect", return_value=([], "partial", None)), \
              patch("services.comment_participant_collector.CommentParticipantCollector.collect", return_value=([], "complete", 0)), \
-             patch("services.engagement_audit_store.EngagementAuditStore.save_v13", return_value=("j", "x", "m", "u")):
+             patch("services.engagement_audit_store.EngagementAuditStore.save_summary", return_value="m"):
             collect.return_value = BuddyCollectionResult(
                 {"b": BuddyInfo("b", "N", "", "", "이웃", None, "26.08.01.")},
                 "complete", 1, 1, 1, ["p"])
@@ -71,8 +72,8 @@ class V12FunctionalParityTests(unittest.TestCase):
     def test_csv_output_is_atomic_formula_safe(self):
         report = {"master_buddies": [{"blog_id": "=HYPERLINK(\"x\")", "nickname": "N", "no_reaction": None}],
                   "unresponsive_buddies": []}
-        with tempfile.TemporaryDirectory() as tmp, patch.object(EngagementAuditStore, "get_file_paths", return_value=(f"{tmp}/r.json", f"{tmp}/x.xlsx", f"{tmp}/m.csv", f"{tmp}/u.csv")):
-            _, _, master, _ = EngagementAuditStore.save_v13(report)
+        with tempfile.TemporaryDirectory() as tmp:
+            master = EngagementAuditStore.save_summary(report, output_dir=tmp)
             with open(master, encoding="utf-8-sig", newline="") as handle:
                 row = next(csv.DictReader(handle))
             self.assertEqual(row["블로그ID"], "'=HYPERLINK(\"x\")")

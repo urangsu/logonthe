@@ -1,8 +1,6 @@
-"""V13.2 Community Rhythm Chunk Banks (Massive 20s Real Community Upgrade).
+"""Synthetic community-style chunks used only by the optional local composer.
 
-Provides curated OPEN, REACTION, INTENT, and SOFT_END chunks derived from
-real 20s/30s online community (theqoo, instiz, real food/cafe/living blogs)
-reactions without formal tone, periods, or AI summary boilerplate.
+These are hand-authored patterns, not comments collected from external communities.
 """
 
 from typing import List, Tuple, Dict
@@ -24,22 +22,22 @@ OPENERS: List[Tuple[str, str]] = [
 # Reaction chunks by category: list of (text_template, family_id)
 CATEGORY_REACTIONS: Dict[str, List[Tuple[str, str]]] = {
     "COMMON": [
-        ("{anchor} 비쥬얼부터 딱이네", "visual_fit"),
-        ("{anchor} 너무 이쁜데요~", "pretty_tilde"),
-        ("{anchor} 분위기 너무 좋잖아요~", "mood_good_janayo"),
-        ("{anchor} 느낌 너무 좋은데요~", "feeling_good_tilde"),
-        ("{anchor} 사진 보니까 너무 땡기네요~", "crave_photo"),
-        ("{anchor} 이건 저장해둬야지~", "save_intent"),
-        ("{anchor} 비쥬얼 진짜 미쳤네요~", "visual_crazy"),
-        ("{anchor} 감성 완전 낭낭하네요~", "vibe_nangnang"),
-        ("{anchor} 딱 제 스타일이에요~", "my_style"),
+        ("{anchor} 포인트가 딱 눈에 들어오네요~", "detail_stands_out"),
+        ("{anchor} 부분은 좀 더 궁금해지네요~", "detail_curious"),
+        ("{anchor} 얘기가 제일 기억에 남네요~", "detail_memorable"),
+        ("{anchor} 설명이 구체적이라 이해하기 편하네요~", "detail_clear"),
+        ("{anchor} 부분을 이렇게 풀어주니 새롭게 보이네요~", "detail_new_view"),
+        ("{anchor} 기준을 짚어준 부분이 눈에 남네요~", "detail_criteria"),
+        ("{anchor} 과정이 차근차근 보여서 흥미롭네요~", "detail_process"),
+        ("{anchor} 선택한 이유가 잘 보여서 공감되네요~", "detail_reason"),
+        ("{anchor} 차이를 알려준 부분이 도움 되네요~", "detail_difference"),
     ],
     "FOOD": [
         ("{anchor} 비쥬얼부터 딱이네", "food_visual_fit"),
         ("{anchor} 때깔 미쳤다 너무 맛있겠어요~", "food_color_insane"),
         ("{anchor} 진짜 맛있겠는데요 침고여요~", "food_salivate"),
         ("{anchor} 조합은 진짜 반칙인데요 완전 맛도리겠다~", "food_foul_combo"),
-        ("{anchor} 사진 보니까 오늘 저녁으로 너무 땡기네요~", "food_crave_dinner"),
+        ("{anchor} 오늘 저녁으로 너무 땡기네요~", "food_crave_dinner"),
         ("{anchor} 비쥬얼 보니까 바로 군침도네요~", "food_mouthwater"),
         ("{anchor} 이건 맛없없 조합이네요~", "food_cant_fail"),
         ("{anchor} 윤기 좔좔 흐르는 것 좀 봐 대박이네요~", "food_glossy"),
@@ -50,6 +48,8 @@ CATEGORY_REACTIONS: Dict[str, List[Tuple[str, str]]] = {
         ("{anchor} 하나 시켜서 맥주랑 먹으면 꿀맛이겠어요~", "food_with_beer"),
     ],
     "CAFE": [
+        ("{anchor} 색감이 산뜻해서 마셔보고 싶네요~", "cafe_drink_color"),
+        ("{anchor} 향이 얼마나 좋을지 궁금해지네요~", "cafe_coffee_aroma"),
         ("{anchor} 뷰 뭐야 너무 이쁜데~", "cafe_view_what"),
         ("{anchor} 디저트 비쥬얼 뭐야 너무 이쁜데요~", "cafe_dessert_pretty"),
         ("{anchor} 색감 무슨 일이야 너무 감성적이네요~", "cafe_color_vibe"),
@@ -111,7 +111,7 @@ CATEGORY_REACTIONS: Dict[str, List[Tuple[str, str]]] = {
         ("{anchor} 실물 비쥬얼 딱이네 너무 귀여워요~", "hobby_real_cute"),
         ("{anchor} 디테일 뭐야 너무 이쁜데요~", "hobby_detail_what"),
         ("{anchor} 색감 조합 너무 좋다 저두 탐나네요~", "hobby_combo_covet"),
-        ("{anchor} 퀄리티 생각보다 진짜 좋아 보여요~", "hobby_high_quality"),
+        ("{anchor} 디테일이 또렷해서 보기 좋네요~", "hobby_high_quality"),
         ("{anchor} 소장 가치 100%네요 대박~", "hobby_collector_value"),
     ],
 }

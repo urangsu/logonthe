@@ -13,7 +13,7 @@ class TestCommunityRhythmPolicy(unittest.TestCase):
         calm = COMMENT_POLICIES[CommunityRhythmPreset.CALM]
 
         self.assertEqual(len(FinalQualityGate.AI_SUMMARY_MACRO_PHRASES), len(set(FinalQualityGate.AI_SUMMARY_MACRO_PHRASES)))
-        self.assertEqual((community.minimum, community.target_max, community.preferred_min, community.preferred_max, community.maximum), (15, 55, 18, 45, 100))
+        self.assertEqual((community.minimum, community.target_max, community.preferred_min, community.preferred_max, community.maximum), (16, 48, 18, 45, 100))
         self.assertEqual((calm.minimum, calm.target_max, calm.preferred_min, calm.preferred_max, calm.maximum), (20, 65, 20, 65, 100))
         self.assertEqual(FinalQualityGate.policy_for("community"), community)
         self.assertEqual(FinalQualityGate.policy_for("calm"), calm)

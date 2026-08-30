@@ -153,10 +153,17 @@ class RecommendationFeedSource:
 
                 title = MobileDOMResolver.get_card_title(card)
                 author = MobileDOMResolver.get_card_author(card)
+                try:
+                    snippet = card.inner_text().strip()
+                except Exception:
+                    snippet = ""
 
-                # IT/카메라/스펙 주제 제외
-                allowed, reason = DiscoveryTopicFilter.is_allowed(title or "")
-                if not allowed:
+                decision = DiscoveryTopicFilter.evaluate(title or "", snippet, stage="card")
+                if not decision.allowed:
+                    logger.log(
+                        f"  [TOPIC_FILTER] card/{decision.blocked_category} "
+                        f"evidence={list(decision.evidence)} title=\"{title}\""
+                    )
                     continue
 
                 post = extract_canonical_post(raw_href, FeedSourceType.RECOMMENDATION, title=title, author=author)
