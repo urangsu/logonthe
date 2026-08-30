@@ -95,6 +95,8 @@ class CommentInteractionService:
                                      (rawBtn.tagName === 'BUTTON' && (rawBtn.textContent || '').trim() === '등록');
 
                     if (isSubmit) {
+                        e.preventDefault();
+                        e.stopPropagation();
                         const editor = document.querySelector('#naverComment__write_textarea, div.u_cbox_text[contenteditable="true"], textarea.u_cbox_text');
                         window.__NAVER_COMMENT_FINAL_TEXT__ = editor ? (editor.innerText || editor.value || '').trim() : '';
                         window.__NAVER_COMMENT_SUBMITTED_FLAG__ = true;
@@ -342,22 +344,28 @@ class CommentInteractionService:
         except Exception:
             return CommentSubmitState.FAILED
 
-        interruptible_wait(stop_event, 1.2)
-
         try:
-            # 1. 서버 댓글 목록에 내 댓글(mine:true / u_cbox_type_mine)이 등장했는지 검증
-            presence = ServerCommentDuplicateGuard.scan_page_for_my_comment(page, stop_event=stop_event)
-            if presence.state == CommentPresenceState.PRESENT:
-                logger.log("  ✅ [COMMENT] 댓글 등록 및 서버 목록 반영(mine:true) 검증 완료!")
-                return CommentSubmitState.SUBMITTED
+            # 에디터가 비워지는 것은 네이버의 로컬 UI 반응일 뿐 등록 증거가 아니다.
+            # 서버 목록에서 본인 댓글이 확인될 때만 SUBMITTED를 반환한다.
+            for delay in (0.5, 1.0, 2.0):
+                interruptible_wait(stop_event, delay)
+                presence = ServerCommentDuplicateGuard.scan_page_for_my_comment(
+                    page, stop_event=stop_event
+                )
+                if presence.state == CommentPresenceState.PRESENT:
+                    logger.log("  ✅ [COMMENT][SERVER_VERIFIED] 본인 댓글이 서버 목록에 확인되었습니다")
+                    return CommentSubmitState.SUBMITTED
+                if presence.state == CommentPresenceState.UNKNOWN:
+                    logger.log(
+                        "  ⚠️ [COMMENT] 서버 댓글 목록을 확인할 수 없어 등록 상태를 확정하지 않습니다",
+                        "WARNING",
+                    )
+                    return CommentSubmitState.FAILED
 
-            # 2. 에디터가 비워졌는지 확인
-            editor_text = CommentEditorAdapter.get_text(page)
-            if not editor_text:
-                logger.log("  ✅ [COMMENT] 댓글 등록 성공 (에디터 초기화 확인)!")
-                return CommentSubmitState.SUBMITTED
-
-            logger.log("  ⚠️ [COMMENT] 댓글 등록 후 에디터 초기화 또는 서버 목록 반영 미확인", "WARNING")
+            logger.log(
+                "  ❌ [COMMENT] comment_submit_server_unverified: 서버 목록에 본인 댓글이 확인되지 않았습니다",
+                "ERROR",
+            )
             return CommentSubmitState.FAILED
         except Exception as e:
             logger.log(f"  ❌ [COMMENT] 등록 검증 중 예외: {e}", "ERROR")

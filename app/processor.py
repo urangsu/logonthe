@@ -302,9 +302,6 @@ class PostProcessor:
                                         created_at=time.time(),
                                     )
                                     self.gemini_extension_bridge.publish(command)
-                                    logger.log(
-                                        f"[GEMINI][PUBLISH] rid={request_id} post={post.key} nav={navigation_version}"
-                                    )
                                     extension_result = self.gemini_extension_bridge.wait_for_result(
                                         command,
                                         timeout=float(self.config.get("gemini_response_timeout", 55.0)),
@@ -476,6 +473,9 @@ class PostProcessor:
                         if self.state_mgr:
                             msg = f"댓글 확인 대기 중 ({draft_source_label} 입력됨 / 수정 후 Enter=등록 / Esc=건너뛰기)"
                             self.state_mgr.update(new_state=FeedState.WAITING_USER, message=msg)
+                        logger.log(
+                            f"[COMMENT][WAITING_USER] post={post.key} source={draft_source_label} chars={len(draft_text)}"
+                        )
 
                         action = CommentInteractionService.wait_for_user_action(
                             detail_page, self.stop_event, command_bridge=self.command_bridge, preset=preset
@@ -499,6 +499,7 @@ class PostProcessor:
                             if self.state_mgr:
                                 self.state_mgr.update(new_state=FeedState.SKIPPING, inc_skip=True)
                         elif action == UserAction.SUBMIT:
+                            logger.log(f"[COMMENT][SUBMIT_REQUESTED] post={post.key}")
                             final_text = CommentInteractionService.read_final_text(detail_page)
                             submitted_cand = final_text or draft_text
 

@@ -63,7 +63,7 @@ DEFAULT_CONFIG_V2: Dict[str, Any] = {
     "gemini_browser_mode": "extension_existing_chrome",
     "gemini_web_enabled": True,
     "gemini_bridge_port": 43127,
-    "gemini_extension_version": "13.2.1",
+    "gemini_extension_version": "13.2.2",
     "gemini_response_timeout": 55.0,
     "allow_local_draft_on_gemini_failure": False,
     "gemini_mode": "new",

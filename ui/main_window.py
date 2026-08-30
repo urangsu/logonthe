@@ -81,7 +81,7 @@ class MainWindow(ctk.CTk):
 
         self.config_service = ConfigService()
         self.gemini_extension_bridge = GeminiExtensionBridge(
-            expected_extension_version=str(self.config_service.get("gemini_extension_version", "13.2.1"))
+            expected_extension_version=str(self.config_service.get("gemini_extension_version", "13.2.2"))
         )
         self.gemini_bridge_server = GeminiBridgeHTTPServer(
             self.gemini_extension_bridge,

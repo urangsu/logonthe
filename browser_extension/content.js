@@ -5,7 +5,7 @@ const EDITOR_SELECTORS = [
   'textarea'
 ];
 const RESPONSE_SELECTORS = 'model-response';
-const CONTENT_BUILD = '13.2.1';
+const CONTENT_BUILD = '13.2.2';
 let lastRequestId = null;
 let busy = false;
 

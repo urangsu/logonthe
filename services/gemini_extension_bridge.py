@@ -144,7 +144,11 @@ class GeminiExtensionBridge:
                 return False
             self._command_state = "claimed"
             self._command_claimed_by = claimant or uuid.uuid4().hex
-            logger.log(f"[GEMINI][CLAIM] rid={request_id} claimant={self._command_claimed_by}")
+            command = self._command
+            logger.log(
+                f"[GEMINI][CLAIM] rid={request_id} post={command.post_key} "
+                f"nav={command.navigation_version} claimant={self._command_claimed_by}"
+            )
             return True
 
     def submit_result(self, result: GeminiResult) -> None:

@@ -21,7 +21,7 @@ class GeminiExtensionBridgeTests(unittest.TestCase):
         self.assertTrue(bridge.preflight().ready)
 
     def test_extension_version_mismatch_blocks_preflight(self):
-        bridge = GeminiExtensionBridge(expected_extension_version="13.2.1")
+        bridge = GeminiExtensionBridge(expected_extension_version="13.2.2")
         bridge.record_heartbeat("ready", "Gemini", "https://gemini.google.com/app", "13.2.0", "13.2.0")
         self.assertFalse(bridge.preflight().ready)
         self.assertEqual(bridge.preflight().status, "extension_version_mismatch")
