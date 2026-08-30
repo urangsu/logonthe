@@ -364,6 +364,7 @@ class CommentInteractionService:
         try:
             # 에디터가 비워지는 것은 네이버의 로컬 UI 반응일 뿐 등록 증거가 아니다.
             # 서버 목록에서 본인 댓글이 확인될 때만 SUBMITTED를 반환한다.
+            unknown_seen = False
             for delay in (0.5, 1.0, 2.0):
                 interruptible_wait(stop_event, delay)
                 presence = ServerCommentDuplicateGuard.scan_page_for_my_comment(
@@ -376,14 +377,14 @@ class CommentInteractionService:
                     logger.log("  ✅ [COMMENT][SERVER_VERIFIED] 본인 댓글이 서버 목록에 확인되었습니다")
                     return CommentSubmitState.SUBMITTED
                 if presence.state == CommentPresenceState.UNKNOWN:
+                    unknown_seen = True
                     logger.log(
-                        "  ⚠️ [COMMENT] 서버 댓글 목록을 확인할 수 없어 등록 상태를 확정하지 않습니다",
+                        "  ⚠️ [COMMENT] 서버 댓글 목록 확인이 불완전합니다. 재확인합니다",
                         "WARNING",
                     )
-                    return CommentSubmitState.FAILED
 
             logger.log(
-                "  ❌ [COMMENT] comment_submit_server_unverified: 서버 목록에 본인 댓글이 확인되지 않았습니다",
+                "  ❌ [COMMENT] " + ("server_verification_unavailable" if unknown_seen else "server_comment_not_found") + ": 서버 목록에 본인 댓글이 확인되지 않았습니다",
                 "ERROR",
             )
             return CommentSubmitState.FAILED

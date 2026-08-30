@@ -123,12 +123,14 @@ function generationActive() {
 }
 
 async function postResult(command, status, text = '', error = '') {
-  await bridgeFetch('/v1/result', 'POST', {
+  const result = await bridgeFetch('/v1/result', 'POST', {
     requestId: command.requestId,
     postKey: command.postKey,
     navigationVersion: command.navigationVersion,
     status, text, error
   });
+  if (!result?.accepted) console.warn('[GEMINI][RESULT_REJECTED]', result?.reason || 'unknown');
+  return result;
 }
 
 async function execute(command) {
@@ -151,7 +153,7 @@ async function execute(command) {
     let sendControl = null;
     const sendReady = await waitUntil(3000, () => {
       sendControl = findSendControl();
-      return Boolean(sendControl);
+      return Boolean(sendControl && !sendControl.disabled && sendControl.getAttribute('aria-disabled') !== 'true');
     });
     if (!sendReady || !sendControl) return await postResult(command, 'dom_unsupported', '', remaining() ? 'send_button_not_found' : 'command_deadline_exceeded');
     if (sendControl.disabled || sendControl.getAttribute('aria-disabled') === 'true') {

@@ -308,7 +308,6 @@ class PostProcessor:
                                     self.gemini_extension_bridge.publish(command)
                                     extension_result = self.gemini_extension_bridge.wait_for_result(
                                         command,
-                                        timeout=float(self.config.get("gemini_response_timeout", 55.0)),
                                         stop_event=self.stop_event,
                                     )
                                     if extension_result and extension_result.status == GeminiResultStatus.COMPLETED:

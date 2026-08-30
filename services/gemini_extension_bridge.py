@@ -143,7 +143,7 @@ class GeminiExtensionBridge:
         with self._condition:
             if not self._command:
                 return None
-            if time.time() - self._command.created_at > self.COMMAND_TTL:
+            if time.time() >= self._command.deadline_at or time.time() - self._command.created_at > self.COMMAND_TTL:
                 self._command_state = "expired"
                 self._command = None
                 return None
@@ -152,6 +152,10 @@ class GeminiExtensionBridge:
     def claim_command(self, request_id: str, claimant: str = "") -> bool:
         with self._condition:
             if not self._command or self._command_state != "pending":
+                return False
+            if time.time() >= self._command.deadline_at:
+                self._command = None
+                self._command_state = "expired"
                 return False
             if self._command.request_id != request_id:
                 return False
@@ -187,7 +191,8 @@ class GeminiExtensionBridge:
             self._condition.notify_all()
             return True, "accepted"
 
-    def wait_for_result(self, command: GeminiCommand, timeout: float, stop_event=None) -> Optional[GeminiResult]:
+    def wait_for_result(self, command: GeminiCommand, timeout: Optional[float] = None, stop_event=None) -> Optional[GeminiResult]:
+        timeout = float(timeout) if timeout is not None else max(0.0, command.deadline_at - time.time())
         deadline_at = command.deadline_at or (time.time() + timeout)
         deadline = min(time.monotonic() + timeout, time.monotonic() + max(0.0, deadline_at - time.time()))
         with self._condition:
