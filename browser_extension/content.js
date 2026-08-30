@@ -48,9 +48,20 @@ function setEditorText(target, text) {
   if (target instanceof HTMLTextAreaElement) {
     target.value = text;
   } else {
-    target.textContent = text;
+    // Use the browser editing command first so Gemini's framework observes a
+    // real input transaction and enables its send control.
+    const selection = window.getSelection();
+    const range = document.createRange();
+    range.selectNodeContents(target);
+    selection.removeAllRanges();
+    selection.addRange(range);
+    document.execCommand('insertText', false, text);
+    if ((target.innerText || target.textContent || '').trim() !== text.trim()) {
+      target.textContent = text;
+    }
   }
   target.dispatchEvent(new InputEvent('input', { bubbles: true, inputType: 'insertText', data: text }));
+  target.dispatchEvent(new Event('keyup', { bubbles: true }));
   target.dispatchEvent(new Event('change', { bubbles: true }));
   return (target.innerText || target.value || '').includes(text.slice(0, 30));
 }
@@ -68,9 +79,10 @@ function clickSend() {
     ].filter(Boolean).join(' ');
     return /보내기|전송|메시지 보내기|send message|send/i.test(label);
   });
-  if (!button || button.disabled || button.getAttribute('aria-disabled') === 'true') return false;
+  if (!button) return 'send_button_not_found';
+  if (button.disabled || button.getAttribute('aria-disabled') === 'true') return 'send_button_disabled';
   button.click();
-  return true;
+  return 'sent';
 }
 
 function responseNodes() {
@@ -118,7 +130,8 @@ async function execute(command) {
     if (!target) return await postResult(command, pageStatus(), '', 'editor_not_found');
     const beforeCount = responseNodes().length;
     if (!setEditorText(target, command.prompt)) return await postResult(command, 'dom_unsupported', '', 'prompt_readback_failed');
-    if (!clickSend()) return await postResult(command, 'dom_unsupported', '', 'send_button_not_found');
+    const sendStatus = clickSend();
+    if (sendStatus !== 'sent') return await postResult(command, 'dom_unsupported', '', sendStatus);
 
     const deadline = Date.now() + 50000;
     let previous = '';
