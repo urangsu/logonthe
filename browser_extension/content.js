@@ -56,9 +56,19 @@ function setEditorText(target, text) {
 }
 
 function clickSend() {
-  const buttons = [...document.querySelectorAll('button')].filter(visible);
-  const button = buttons.find(b => /보내기|전송|send/i.test(`${b.getAttribute('aria-label') || ''} ${b.innerText || ''}`));
-  if (!button || button.disabled) return false;
+  // Gemini renders the send control as a role=button element in some builds,
+  // so querying native <button> only causes false send_button_not_found errors.
+  const buttons = [...document.querySelectorAll('button, [role="button"]')].filter(visible);
+  const button = buttons.find(b => {
+    const label = [
+      b.getAttribute('aria-label'),
+      b.getAttribute('data-tooltip'),
+      b.getAttribute('title'),
+      b.innerText
+    ].filter(Boolean).join(' ');
+    return /보내기|전송|메시지 보내기|send message|send/i.test(label);
+  });
+  if (!button || button.disabled || button.getAttribute('aria-disabled') === 'true') return false;
   button.click();
   return true;
 }
