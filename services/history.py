@@ -3,7 +3,10 @@ import json
 import tempfile
 from datetime import datetime
 from typing import Dict, Any, Optional
-from app.models import FeedPost, PostProcessResult, CommentSubmitState, LikeState
+from app.models import (
+    FeedPost, PostProcessResult, LikeProcessResult, CommentProcessResult,
+    CommentSubmitState, LikeState
+)
 from src.logger import logger
 
 DEFAULT_HISTORY_PATH = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "data", "history.json"))
@@ -82,6 +85,68 @@ class HistoryStore:
         if not item:
             return False
         return item.get("like", {}).get("state_after") == LikeState.LIKED.value
+
+    def record_like_checkpoint(self, post: FeedPost, like_result: LikeProcessResult):
+        """서버 공감 확정 즉시 체크포인트 기록 (후속 단계 오류 시에도 공감 멱등성 보존)"""
+        now_str = datetime.now().isoformat()
+        existing = self.posts.get(post.key, {})
+        existing_like = existing.get("like", {})
+        final_like_state = LikeState.LIKED.value if (like_result.state_after == LikeState.LIKED or existing_like.get("state_after") == LikeState.LIKED.value) else like_result.state_after.value
+
+        like_record = {
+            "state_before": like_result.state_before.value,
+            "action": "clicked" if like_result.action_taken else existing_like.get("action", "none"),
+            "state_after": final_like_state,
+            "error": like_result.error or existing_like.get("error")
+        }
+
+        self.posts[post.key] = {
+            "key": post.key,
+            "source": post.source.value,
+            "url": post.url,
+            "blog_id": post.blog_id,
+            "log_no": post.log_no,
+            "title": post.title or existing.get("title"),
+            "author": post.author or existing.get("author"),
+            "updated_at": now_str,
+            "like": like_record,
+            "comment": existing.get("comment", {"status": "none"})
+        }
+        self.save()
+
+    def record_comment_checkpoint(self, post: FeedPost, comment_result: CommentProcessResult):
+        """서버 댓글 확정 즉시 체크포인트 기록"""
+        now_str = datetime.now().isoformat()
+        existing = self.posts.get(post.key, {})
+        existing_comment = existing.get("comment", {})
+        existing_status = existing_comment.get("status")
+
+        final_comment_status = comment_result.status.value
+        final_submitted_text = comment_result.submitted_text or existing_comment.get("submitted_text")
+        if existing_status == CommentSubmitState.SUBMITTED.value:
+            final_comment_status = CommentSubmitState.SUBMITTED.value
+            final_submitted_text = existing_comment.get("submitted_text") or comment_result.submitted_text
+
+        comment_record = {
+            "status": final_comment_status,
+            "draft": comment_result.draft_text or existing_comment.get("draft"),
+            "submitted_text": final_submitted_text,
+            "error": comment_result.error or existing_comment.get("error")
+        }
+
+        self.posts[post.key] = {
+            "key": post.key,
+            "source": post.source.value,
+            "url": post.url,
+            "blog_id": post.blog_id,
+            "log_no": post.log_no,
+            "title": post.title or existing.get("title"),
+            "author": post.author or existing.get("author"),
+            "updated_at": now_str,
+            "like": existing.get("like", {"state_after": "unknown"}),
+            "comment": comment_record
+        }
+        self.save()
 
     def record_result(self, result: PostProcessResult):
         """단조 병합(Monotonic Merge)을 적용하여 이전 성공 기록을 덮어쓰지 않음"""

@@ -10,7 +10,6 @@
 
   const INSTANCE_ID = Math.random().toString(36).slice(2, 10);
   let isStopped = false;
-  let tickTimer = null;
   const eventCleanups = [];
 
   const EDITOR_SELECTORS = [
@@ -22,13 +21,13 @@
   const RESPONSE_SELECTORS = 'model-response';
   let runtimeContract = {
     extensionVersion: '13.2.3',
-    runtimeBuild: '13.2.3-r3',
+    runtimeBuild: '13.2.3-r4',
     protocolVersion: 3,
     bridgeSchemaVersion: 2
   };
 
   try {
-    chrome.runtime.sendMessage({ type: "getRuntimeContract" }, (res) => {
+    chrome.runtime.sendMessage({ type: 'getRuntimeContract' }, (res) => {
       if (res && res.ok && res.data) {
         runtimeContract = {
           extensionVersion: res.data.extensionVersion || runtimeContract.extensionVersion,
@@ -43,17 +42,11 @@
     });
   } catch (_) {}
 
-  let lastRequestId = null;
   let busy = false;
-  let lastBridgeFailLog = 0;
 
   function stopRuntime() {
     if (isStopped) return;
     isStopped = true;
-    if (tickTimer) {
-      clearInterval(tickTimer);
-      tickTimer = null;
-    }
     while (eventCleanups.length > 0) {
       const cleanup = eventCleanups.pop();
       try { cleanup(); } catch (_) {}
@@ -70,21 +63,6 @@
       return true;
     }
     return false;
-  }
-
-  function logBridgeFail(stage, err) {
-    if (isStopped) return;
-    if (checkExtensionInvalidated(err)) return;
-    const errStr = String(err?.message || err);
-    // Standby when Python app is not running: do NOT use console.warn to avoid cluttering chrome://extensions
-    if (errStr.includes('loopback_bridge_unreachable') || errStr.includes('runtime_stopped')) {
-      return;
-    }
-    const now = Date.now();
-    if (now - lastBridgeFailLog > 5000) {
-      lastBridgeFailLog = now;
-      console.info(`[GEMINI][BRIDGE_STANDBY] stage=${stage} msg=${errStr}`);
-    }
   }
 
   function normalizeText(value) {
@@ -110,47 +88,6 @@
     if (/captcha|로봇이 아닙니다|비정상적인 트래픽/i.test(body)) return 'captcha';
     if (/accounts\.google\.com/.test(location.href) || /로그인/.test(body) && !editor()) return 'auth_required';
     return editor() ? (busy ? 'busy' : 'ready') : 'dom_unsupported';
-  }
-
-  function bridgeFetch(path, method = 'GET', body = null) {
-    if (isStopped) return Promise.reject(new Error('runtime_stopped'));
-    return new Promise((resolve, reject) => {
-      try {
-        chrome.runtime.sendMessage({ type: 'bridgeFetch', path, method, body }, response => {
-          if (chrome.runtime.lastError) {
-            const err = chrome.runtime.lastError;
-            if (checkExtensionInvalidated(err)) return reject(new Error('Extension context invalidated'));
-            return reject(err);
-          }
-          if (!response?.ok) return reject(new Error(response?.error || 'bridge_error'));
-          resolve(response.data);
-        });
-      } catch (e) {
-        if (checkExtensionInvalidated(e)) return reject(new Error('Extension context invalidated'));
-        reject(e);
-      }
-    });
-  }
-
-  async function heartbeat() {
-    if (isStopped) return;
-    try {
-      await bridgeFetch('/v1/heartbeat', 'POST', {
-        status: pageStatus(),
-        title: document.title,
-        url: location.href,
-        extensionVersion: runtimeContract.extensionVersion,
-        contentBuild: runtimeContract.runtimeBuild,
-        buildId: runtimeContract.runtimeBuild,
-        protocolVersion: runtimeContract.protocolVersion,
-        bridgeSchemaVersion: runtimeContract.bridgeSchemaVersion
-      });
-    } catch (err) {
-      if (!checkExtensionInvalidated(err)) {
-        logBridgeFail('heartbeat', err);
-      }
-      throw err;
-    }
   }
 
   function setEditorText(target, text) {
@@ -222,26 +159,14 @@
     return Boolean(stopButton || document.querySelector('.generating, .loading, mat-progress-bar, [aria-busy="true"]'));
   }
 
-  async function postResult(command, status, text = '', error = '') {
-    if (isStopped) return;
-    return bridgeFetch('/v1/result', 'POST', {
-      requestId: command.requestId,
-      postKey: command.postKey,
-      navigationVersion: command.navigationVersion,
-      status,
-      text,
-      error
-    });
-  }
-
   async function execute(command) {
-    if (isStopped) return;
+    if (isStopped) return { status: 'failed', text: '', error: 'runtime_stopped' };
     busy = true;
     const initialNodes = responseNodes();
     const input = editor();
     if (!input) {
       busy = false;
-      return await postResult(command, 'dom_unsupported', '', 'Gemini 입력창을 찾지 못했습니다.');
+      return { status: 'dom_unsupported', text: '', error: 'Gemini 입력창을 찾지 못했습니다.' };
     }
 
     setEditorText(input, command.prompt);
@@ -251,66 +176,62 @@
     const deadline = Date.now() + Math.min(65000, Math.max(10000, (command.deadlineAt - Date.now() / 1000) * 1000));
     let stableSince = null;
     let previous = '';
-    try {
-      while (Date.now() < deadline && !isStopped) {
+
+    return new Promise((resolve) => {
+      let resolved = false;
+      const marker = `[[CMT:${command.requestId}]]`;
+
+      const cleanupObserver = () => {
+        try { observer.disconnect(); } catch (_) {}
+        if (checkTimer) clearInterval(checkTimer);
+      };
+
+      const finish = (res) => {
+        if (resolved) return;
+        resolved = true;
+        cleanupObserver();
+        busy = false;
+        resolve(res);
+      };
+
+      const checkOutput = () => {
+        if (isStopped) return finish({ status: 'failed', text: '', error: 'runtime_stopped' });
+        if (Date.now() > deadline) return finish({ status: 'timeout', text: '', error: 'command_deadline_exceeded' });
+
         const newNodes = responseNodes().slice(initialNodes.length);
         const current = newNodes.length ? latestResponseText() : '';
+
         if (current && current !== previous) {
           previous = current;
           stableSince = Date.now();
-        } else if (current && stableSince && Date.now() - stableSince >= 1800 && !generationActive()) {
-          const marker = `[[CMT:${command.requestId}]]`;
+        } else if (current && stableSince && Date.now() - stableSince >= 1600 && !generationActive()) {
           const correlated = newNodes.find(node => {
             const content = node.querySelector('message-content, div.markdown, div.model-response-text, .response-body-inner') || node;
             return (content.innerText || '').includes(marker);
           });
           if (!correlated) {
-            return await postResult(command, 'failed', '', 'request_marker_missing_in_new_node');
+            return finish({ status: 'failed', text: '', error: 'request_marker_missing_in_new_node' });
           }
           const correlatedContent = correlated.querySelector('message-content, div.markdown, div.model-response-text, .response-body-inner') || correlated;
-          return await postResult(command, 'completed', (correlatedContent.innerText || '').trim(), '');
+          return finish({ status: 'completed', text: (correlatedContent.innerText || '').trim(), error: '' });
         }
-        await new Promise(resolve => setTimeout(resolve, 350));
-      }
-      if (!isStopped) {
-        await postResult(command, 'timeout', '', 'command_deadline_exceeded');
-      }
-    } catch (error) {
-      if (!checkExtensionInvalidated(error)) {
-        logBridgeFail('execute', error);
-        await postResult(command, 'failed', '', String(error.message || error)).catch(() => {});
-      }
-    } finally {
-      busy = false;
-    }
+      };
+
+      // MutationObserver watches DOM for streaming updates
+      const targetNode = document.querySelector('chat-history, main, body') || document.body;
+      const observer = new MutationObserver(() => {
+        checkOutput();
+      });
+      observer.observe(targetNode, { childList: true, subtree: true, characterData: true });
+
+      const checkTimer = setInterval(checkOutput, 300);
+    });
   }
 
-  async function tick() {
-    if (isStopped) return;
-    try {
-      await heartbeat();
-      if (isStopped || busy || pageStatus() !== 'ready') return;
-      const data = await bridgeFetch('/v1/command');
-      const command = data.command;
-      if (!command || command.requestId === lastRequestId) return;
-      const claim = await bridgeFetch('/v1/claim', 'POST', { requestId: command.requestId, claimant: runtimeContract.runtimeBuild });
-      if (!claim.claimed) return;
-      lastRequestId = command.requestId;
-      await execute(command);
-    } catch (err) {
-      if (!checkExtensionInvalidated(err)) {
-        logBridgeFail('tick', err);
-      }
-    }
-  }
-
-  // Register ping message handler
+  // Register message listeners
   const messageListener = (message, _sender, sendResponse) => {
     if (isStopped) return false;
-    if (message.type === 'TRIGGER_HEARTBEAT') {
-      tick().then(() => sendResponse({ ok: true })).catch(() => sendResponse({ ok: false }));
-      return true;
-    }
+
     if (message.type === 'NFA_RUNTIME_PING') {
       sendResponse({
         ok: true,
@@ -318,10 +239,20 @@
         build: runtimeContract.runtimeBuild,
         version: runtimeContract.extensionVersion,
         instanceId: INSTANCE_ID,
-        status: pageStatus()
+        status: pageStatus(),
+        url: location.href,
+        title: document.title
       });
       return true;
     }
+
+    if (message.type === 'NFA_EXECUTE_COMMAND') {
+      execute(message.command)
+        .then(result => sendResponse(result))
+        .catch(err => sendResponse({ status: 'failed', text: '', error: String(err?.message || err) }));
+      return true;
+    }
+
     return false;
   };
 
@@ -332,27 +263,10 @@
     } catch (_) {}
   });
 
-  // Setup tick intervals and visibility listeners
-  tickTimer = setInterval(tick, 1000);
-
-  const onVisibilityChange = () => {
-    if (document.visibilityState === 'visible') tick();
-  };
-  document.addEventListener('visibilitychange', onVisibilityChange);
-  eventCleanups.push(() => document.removeEventListener('visibilitychange', onVisibilityChange));
-
-  window.addEventListener('focus', tick);
-  eventCleanups.push(() => window.removeEventListener('focus', tick));
-
-  window.addEventListener('pageshow', tick);
-  eventCleanups.push(() => window.removeEventListener('pageshow', tick));
-
   globalThis.__NFA_GEMINI_RUNTIME__ = {
     build: runtimeContract.runtimeBuild,
     instanceId: INSTANCE_ID,
     stop: stopRuntime,
     ping: () => ({ alive: !isStopped, build: runtimeContract.runtimeBuild, instanceId: INSTANCE_ID })
   };
-
-  tick();
 })();

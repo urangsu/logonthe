@@ -1,7 +1,8 @@
 import threading
 import time
 import uuid
-from typing import Optional
+import traceback
+from typing import Any, Callable, Optional
 from playwright.sync_api import Page
 from app.models import (
     FeedPost, PostProcessResult, LikeProcessResult, CommentProcessResult,
@@ -15,6 +16,7 @@ from app.errors import (
     BrowserFailureKind, classify_playwright_failure
 )
 from naver.target_guard import TargetPostGuard
+from naver.resolver import MobileDOMResolver
 from naver.interaction import LikeInteractionService, CommentInteractionService
 from naver.editor_adapter import CommentEditorAdapter
 from naver.comment_guard import ServerCommentDuplicateGuard, CommentPresenceState
@@ -60,6 +62,8 @@ class PostProcessor:
         pause_event: Optional[threading.Event] = None,
         gemini_extension_bridge: Optional[GeminiExtensionBridge] = None,
         session: Optional[Any] = None,
+        on_like_committed: Optional[Callable[[FeedPost, LikeProcessResult], None]] = None,
+        on_comment_committed: Optional[Callable[[FeedPost, CommentProcessResult], None]] = None,
     ):
         self.config = config
         self.session = session
@@ -81,6 +85,8 @@ class PostProcessor:
         self.stop_event = stop_event
         self.pause_event = pause_event
         self.gemini_extension_bridge = gemini_extension_bridge
+        self.on_like_committed = on_like_committed
+        self.on_comment_committed = on_comment_committed
         self.navigation_version = 0
 
     def process(
@@ -216,6 +222,11 @@ class PostProcessor:
                     if tx_res.action_taken and tx_res.state_after == LikeState.LIKED:
                         if self.state_mgr:
                             self.state_mgr.update(inc_like=True)
+                        if self.on_like_committed:
+                            try:
+                                self.on_like_committed(post, tx_res)
+                            except Exception as cp_err:
+                                logger.log(f"  ⚠️ [CHECKPOINT] Like checkpoint 기록 실패: {cp_err}", "WARNING")
 
         if self.stop_event and self.stop_event.is_set():
             raise StopRequestedException("작업 중지 요청됨")
@@ -258,6 +269,11 @@ class PostProcessor:
                         status=CommentSubmitState.SUBMITTED,
                         submitted_text=presence.comment_text or "서버 감지 기존 등록 댓글"
                     )
+                    if self.on_comment_committed:
+                        try:
+                            self.on_comment_committed(post, result.comment_result)
+                        except Exception as cp_err:
+                            logger.log(f"  ⚠️ [CHECKPOINT] Comment checkpoint 기록 실패: {cp_err}", "WARNING")
                 elif presence.state == CommentPresenceState.UNKNOWN:
                     logger.log("  ⚠️ [COMMENT] 댓글 목록이 불완전하여 중복 방지를 위해 안전하게 작성을 스킵합니다.", "WARNING")
                     result.comment_result = CommentProcessResult(status=CommentSubmitState.SKIPPED, error="server_duplicate_check_unknown")
@@ -572,6 +588,11 @@ class PostProcessor:
                                 )
                                 if self.state_mgr:
                                     self.state_mgr.update(inc_comment=True)
+                                if self.on_comment_committed:
+                                    try:
+                                        self.on_comment_committed(post, cmt_res)
+                                    except Exception as cp_err:
+                                        logger.log(f"  ⚠️ [CHECKPOINT] Comment checkpoint 기록 실패: {cp_err}", "WARNING")
 
                         result.comment_result = cmt_res
 

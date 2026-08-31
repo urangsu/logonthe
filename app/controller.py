@@ -1,4 +1,5 @@
 import threading
+import traceback
 from typing import Optional, List, Set
 from app.models import (
     FeedSourceType, FeedPost, PostProcessResult, LikeProcessResult, CommentProcessResult,
@@ -45,18 +46,59 @@ class FeedController:
         pause_event: Optional[threading.Event] = None,
         gemini_extension_bridge: Optional[GeminiExtensionBridge] = None,
     ):
-        self.config = config
+        self.config_service = config
+        if hasattr(config, "load") and callable(getattr(config, "load")):
+            self.config = config.load()
+        else:
+            self.config = config
         self.history = history
         self.state_mgr = state_mgr
         self.stop_event = stop_event
         self.pause_event = pause_event
-        self.command_bridge = command_bridge
+        self.command_bridge = command_bridge or ClipboardCommandBridge()
         self.gemini_extension_bridge = gemini_extension_bridge
         self.session: Optional[BrowserSession] = None
-        self.pacing = PacingService(config=config, stop_event=stop_event, state_manager=state_mgr, pause_event=pause_event)
+        self.pacing = PacingService(self.config)
+        self._thread: Optional[threading.Thread] = None
 
     def run(self):
-        source_type_str = self.config.get("feed_source", FeedSourceType.TARGETED_SEARCH.value)
+        self._run()
+
+    def start(self):
+        if self._thread and self._thread.is_alive():
+            return
+        self.stop_event.clear()
+        if self.pause_event:
+            self.pause_event.clear()
+        self._thread = threading.Thread(target=self._run, daemon=True)
+        self._thread.start()
+
+    def stop(self):
+        self.stop_event.set()
+        self.pacing.interrupt()
+        if self.session:
+            self.session.close(reason="user_stop")
+            self.session = None
+
+    def pause(self):
+        if self.pause_event:
+            self.pause_event.set()
+        self.state_mgr.update(new_state=FeedState.PAUSED, message="작업이 일시정지되었습니다.")
+
+    def resume(self):
+        if self.pause_event:
+            self.pause_event.clear()
+        self.state_mgr.update(new_state=FeedState.RUNNING, message="작업을 재개합니다.")
+
+    def _run(self):
+        if hasattr(self.config_service, "load") and callable(getattr(self.config_service, "load")):
+            loaded = self.config_service.load()
+            self.config = loaded if isinstance(loaded, dict) else self.config_service
+        else:
+            self.config = self.config_service
+
+        raw_source = self.config.get("feed_source", FeedSourceType.TARGETED_SEARCH.value) if hasattr(self.config, "get") else FeedSourceType.TARGETED_SEARCH.value
+        source_type_str = str(raw_source.value if hasattr(raw_source, "value") else raw_source)
         source_type = FeedSourceType(source_type_str)
         max_items = int(self.config.get("max_feed_items", 20))
         like_enabled = bool(self.config.get("like_enabled", True))
@@ -69,7 +111,6 @@ class FeedController:
         ai_context_max_chars = int(self.config.get("ai_context_max_chars", 700))
         ai_prompt_style = str(self.config.get("ai_prompt_style", "warm_short"))
 
-        # Gemini Bridge 설정
         gemini_browser_mode = str(self.config.get("gemini_browser_mode", "extension_existing_chrome"))
         gemini_web_enabled = bool(self.config.get("gemini_web_enabled", True))
         gemini_mode = str(self.config.get("gemini_mode", "new"))
@@ -77,16 +118,20 @@ class FeedController:
 
         gemini_url = gemini_custom_url if (gemini_mode == "custom" and gemini_custom_url) else "https://gemini.google.com/app"
 
-        # [RUN_CONFIG] 실행 환경 스냅샷 로깅
+        # [RUN_CONFIG] 실행 환경 스냅샷 로깅 (이웃 새글/직접입력일 때는 탐색 카테고리/토픽필터 n/a 표시)
         discovery_cats = self.config.get("discovery_categories", ["FOOD", "CAFE", "PARENTING", "LIVING", "TRAVEL", "LIFESTYLE"])
+        is_discovery_source = source_type in (FeedSourceType.TARGETED_SEARCH, FeedSourceType.RECOMMENDATION)
+        log_cats = ",".join(discovery_cats) if is_discovery_source else "n/a (neighbor mode)"
+        log_topic_filter = str(self.config.get("topic_filter_enabled", True)) if is_discovery_source else "n/a (neighbor mode)"
+
         logger.log(
             f"[RUN_CONFIG]\n"
             f"source={source_type.value}\n"
-            f"categories={','.join(discovery_cats)}\n"
+            f"categories={log_cats}\n"
             f"max_items={max_items}\n"
             f"like_enabled={like_enabled}\n"
             f"comment_enabled={comment_enabled}\n"
-            f"topic_filter={self.config.get('topic_filter_enabled', True)}\n"
+            f"topic_filter={log_topic_filter}\n"
             f"like_threshold={self.config.get('like_count_skip_threshold', 999)}\n"
             f"visitor_threshold={self.config.get('daily_visitor_skip_threshold', 10000)}\n"
             f"gemini_enabled={gemini_web_enabled}\n"
@@ -98,20 +143,9 @@ class FeedController:
                 preflight = self.gemini_extension_bridge.await_ready(timeout=6.0, stop_event=self.stop_event)
                 if not preflight.ready:
                     self.state_mgr.update(new_state=FeedState.ERROR, message=f"Gemini 확장 연결 실패: {preflight.status}")
-                    logger.log(
-                        f"[GEMINI][PREFLIGHT] 피드 시작 차단: {preflight.status} "
-                        f"(heartbeatAgeMs={preflight.heartbeat_age_ms}, version={preflight.extension_version}, build={preflight.content_build})",
-                        "ERROR"
-                    )
+                    logger.log(f"[GEMINI][PREFLIGHT] 피드 시작 차단: {preflight.status}", "ERROR")
                     return
-                else:
-                    logger.log(
-                        f"[GEMINI][PREFLIGHT] status=ready heartbeatAgeMs={preflight.heartbeat_age_ms} "
-                        f"version={preflight.extension_version} runtimeBuild={preflight.content_build} "
-                        f"protocol={preflight.protocol_version} schema={preflight.bridge_schema_version}"
-                    )
 
-        # 세션 초기화 (캐시 및 서킷 브레이커 리셋)
         BlogPopularityService.clear_cache()
         LikeCircuitBreaker.reset()
 
@@ -124,45 +158,30 @@ class FeedController:
         try:
             self.session.start()
 
-            # Pre-flight Login Guard: 비로그인 상태 검사 (헛돌기 방지)
             is_logged_in, missing_cookies = NaverAuthGuard.check_login_cookies(self.session.context)
             if not is_logged_in:
-                err_msg = "네이버 로그인이 필요합니다. [🌐 로그인 창 열기] 버튼을 눌러 로그인해 주세요."
+                err_msg = "네이버 로그인이 필요합니다."
                 self.state_mgr.update(new_state=FeedState.ERROR, message=err_msg)
-                logger.log("==================================================", "ERROR")
-                logger.log("❌ [LOGIN_REQUIRED] 프로그램 브라우저에 네이버 로그인이 되어있지 않습니다!", "ERROR")
-                logger.log("💡 [조치 방법] 메인 화면 우측 하단의 [🌐 로그인 창 열기] 버튼을 클릭하여 네이버에 로그인하신 후 다시 [피드 작업 시작]을 눌러주세요.", "WARNING")
-                logger.log("🚫 비로그인 상태에서 타인의 조회수만 올려주는 헛돌기를 방지하기 위해 작업을 안전하게 중단합니다.", "WARNING")
-                logger.log("==================================================", "ERROR")
-                final_close_reason = "login_required"
+                logger.log("❌ [LOGIN_REQUIRED] 네이버 로그인이 필요합니다.", "ERROR")
                 return
 
             feed_page = self.session.get_feed_page()
-
-            # managed_playwright 모드일 때만 Playwright 내부 gemini_page 준비
             gemini_page = self.session.get_gemini_page() if (gemini_web_enabled and gemini_browser_mode == "managed_playwright") else None
+            stats_page = self.session.get_stats_page() if (like_enabled and self.config.get("daily_visitor_guard_enabled", True)) else None
 
-            # 일 방문자 통계 가드 활성화 시 stats_page 준비
-            stats_page = None
-            if like_enabled and self.config.get("daily_visitor_guard_enabled", True):
-                stats_page = self.session.get_stats_page()
-
-            # 1. Feed Source 초기화
             self.state_mgr.update(new_state=FeedState.OPENING_SOURCE, message=f"피드 소스({source_type.value}) 접속 중...")
 
             source: FeedSource
             if source_type == FeedSourceType.NEIGHBOR:
                 source = NeighborFeedSource(feed_page, max_items=max_items, stop_event=self.stop_event)
             elif source_type == FeedSourceType.TARGETED_SEARCH:
-                custom_queries = self.config.get("custom_discovery_queries", [])
-                posts_per_q = int(self.config.get("posts_per_query", 3))
                 source = TargetedSearchFeedSource(
                     feed_page,
                     max_items=max_items,
                     stop_event=self.stop_event,
                     enabled_categories=discovery_cats,
-                    custom_queries=custom_queries,
-                    posts_per_query=posts_per_q
+                    custom_queries=self.config.get("custom_discovery_queries", []),
+                    posts_per_query=int(self.config.get("posts_per_query", 3))
                 )
             elif source_type == FeedSourceType.RECOMMENDATION:
                 source = RecommendationFeedSource(feed_page, max_items=max_items, stop_event=self.stop_event)
@@ -171,7 +190,7 @@ class FeedController:
 
             source.open()
 
-            # 2. PostProcessor 초기화
+            # 2. Post Processor 준비 (체크포인트 콜백 주입)
             processor = PostProcessor(
                 config=self.config,
                 like_enabled=like_enabled,
@@ -193,6 +212,8 @@ class FeedController:
                 pause_event=self.pause_event,
                 gemini_extension_bridge=self.gemini_extension_bridge,
                 session=self.session,
+                on_like_committed=self.history.record_like_checkpoint,
+                on_comment_committed=self.history.record_comment_checkpoint,
             )
 
             seen_candidate_keys: Set[str] = set()
@@ -364,7 +385,7 @@ class FeedController:
             final_close_reason = "fatal_error"
         except Exception as e:
             self.state_mgr.update(new_state=FeedState.ERROR, message=f"예기치 않은 오류: {e}")
-            logger.log(f"💥 [ASSISTANT] 예기치 않은 오류 발생: {e}", "ERROR")
+            logger.log(f"💥 [ASSISTANT] 예기치 않은 오류 발생: {e}\n{traceback.format_exc()}", "ERROR")
             final_close_reason = "fatal_error"
         finally:
             if self.session:

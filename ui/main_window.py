@@ -796,8 +796,9 @@ class MainWindow(ctk.CTk):
                     err_msg = res.get('error', 'unknown')
                     self.after(0, lambda: messagebox.showwarning("수집 실패", f"감사 실패: {err_msg}"))
             except Exception as e:
-                logger.log(f"❌ [AUDIT] 수집 중 오류: {e}", "ERROR")
-                self.after(0, lambda: messagebox.showerror("오류", f"수집 중 오류 발생: {e}"))
+                err_text = str(e)
+                logger.log(f"❌ [AUDIT] 수집 중 오류: {err_text}", "ERROR")
+                self.after(0, lambda msg=err_text: messagebox.showerror("오류", f"수집 중 오류 발생: {msg}"))
             finally:
                 session.close()
 

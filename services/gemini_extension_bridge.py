@@ -83,11 +83,12 @@ class GeminiPreflight:
     heartbeat_age_ms: int = 0
 
 
+import urllib.parse
 from services.runtime_contract import load_runtime_contract
 
 
 class GeminiExtensionBridge:
-    HEARTBEAT_TTL = 35.0
+    HEARTBEAT_TTL = 45.0
     COMMAND_TTL = 90.0
 
     def __init__(
@@ -111,6 +112,11 @@ class GeminiExtensionBridge:
         self._content_build = ""
         self._protocol_version = 0
         self._bridge_schema_version = 0
+        self._transport_alive = False
+        self._runtime_alive = False
+        self._runtime_status = "unknown"
+        self._consumer_id = ""
+        self._last_runtime_ping_at = 0.0
         self._expected_extension_version = expected_extension_version or contract.extension_version
         self._expected_build_id = expected_build_id or contract.runtime_build
         self._protocol_version_expected = contract.protocol_version
@@ -126,7 +132,12 @@ class GeminiExtensionBridge:
         extension_version: str = "",
         content_build: str = "",
         protocol_version: int = 0,
-        bridge_schema_version: int = 0
+        bridge_schema_version: int = 0,
+        transport_alive: bool = True,
+        runtime_alive: bool = True,
+        runtime_status: str = "ready",
+        consumer_id: str = "",
+        last_runtime_ping_at: float = 0.0
     ) -> None:
         with self._condition:
             self._heartbeat_at = time.time()
@@ -138,6 +149,11 @@ class GeminiExtensionBridge:
             self._content_build = content_build
             self._protocol_version = int(protocol_version or 0)
             self._bridge_schema_version = int(bridge_schema_version or 0)
+            self._transport_alive = bool(transport_alive)
+            self._runtime_alive = bool(runtime_alive)
+            self._runtime_status = str(runtime_status or status)
+            self._consumer_id = str(consumer_id or "")
+            self._last_runtime_ping_at = float(last_runtime_ping_at or self._heartbeat_at)
             self._condition.notify_all()
 
     def preflight(self) -> GeminiPreflight:
@@ -259,6 +275,21 @@ class GeminiExtensionBridge:
                 return None
             return self._command if self._command_state == "pending" else None
 
+    def wait_for_command(self, timeout: float = 15.0, stop_event: Optional[threading.Event] = None) -> Optional[GeminiCommand]:
+        deadline = time.monotonic() + max(0.1, timeout)
+        with self._condition:
+            while time.monotonic() < deadline:
+                if stop_event and stop_event.is_set():
+                    return None
+                cmd = self.current_command()
+                if cmd:
+                    return cmd
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    break
+                self._condition.wait(timeout=min(remaining, 0.5))
+            return self.current_command()
+
     def claim_command(self, request_id: str, claimant: str = "") -> bool:
         with self._condition:
             if not self._command or self._command_state != "pending":
@@ -369,24 +400,44 @@ class GeminiBridgeHTTPServer:
                 return json.loads(self.rfile.read(length) or b"{}")
 
             def do_GET(self):
-                if self.path == "/v1/command":
+                parsed = urllib.parse.urlparse(self.path)
+                path = parsed.path
+                query = urllib.parse.parse_qs(parsed.query)
+
+                if path == "/v1/command/wait":
+                    try:
+                        timeout_param = float(query.get("timeout", [15.0])[0])
+                    except (ValueError, IndexError):
+                        timeout_param = 15.0
+                    timeout_val = min(30.0, max(0.5, timeout_param))
+                    cmd = bridge.wait_for_command(timeout=timeout_val)
+                    return self._json(200, {"command": cmd.to_json() if cmd else None})
+
+                if path == "/v1/command":
                     cmd = bridge.current_command()
                     return self._json(200, {"command": cmd.to_json() if cmd else None})
-                if self.path == "/v1/status":
+
+                if path == "/v1/status":
                     return self._json(200, asdict(bridge.preflight()))
+
                 return self._json(404, {"error": "not_found"})
 
             def do_POST(self):
                 payload = self._payload()
                 if self.path == "/v1/heartbeat":
                     bridge.record_heartbeat(
-                        str(payload.get("status", "failed")),
-                        str(payload.get("title", "")),
-                        str(payload.get("url", "")),
-                        str(payload.get("extensionVersion", "")),
-                        str(payload.get("buildId", payload.get("contentBuild", ""))),
-                        int(payload.get("protocolVersion", 0) or 0),
-                        int(payload.get("bridgeSchemaVersion", 0) or 0)
+                        status=str(payload.get("status", "failed")),
+                        title=str(payload.get("title", "")),
+                        url=str(payload.get("url", "")),
+                        extension_version=str(payload.get("extensionVersion", "")),
+                        content_build=str(payload.get("buildId", payload.get("contentBuild", ""))),
+                        protocol_version=int(payload.get("protocolVersion", 0) or 0),
+                        bridge_schema_version=int(payload.get("bridgeSchemaVersion", 0) or 0),
+                        transport_alive=bool(payload.get("transportAlive", True)),
+                        runtime_alive=bool(payload.get("runtimeAlive", True)),
+                        runtime_status=str(payload.get("runtimeStatus", payload.get("status", "ready"))),
+                        consumer_id=str(payload.get("consumerId", "")),
+                        last_runtime_ping_at=float(payload.get("lastRuntimePingAt", 0.0) or 0.0)
                     )
                     return self._json(200, {"ok": True})
                 if self.path == "/v1/claim":
