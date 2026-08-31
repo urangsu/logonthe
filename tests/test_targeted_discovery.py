@@ -85,6 +85,44 @@ class TestTargetedDiscoveryV9(unittest.TestCase):
             decision = DiscoveryTopicFilter.evaluate(title, stage="card")
             self.assertTrue(decision.allowed, f"false positive: {title} / {decision}")
 
+    def test_topic_filter_regression_actual_logs(self):
+        """실제 운영 로그에서 오탐(False-Positive) 및 비대상 오통과 발생 케이스 회귀 검증"""
+        allow_cases = [
+            ("동대문엽기떡볶이 밀키트 착한맛 솔직후기", "소분해서 보관하면 편해요 분양", "FOOD"),
+            ("제주시청 제주양식맛집 제주도민이 추천하는 제주 한양", "주식회사 한양에서 운영하는 맛집", "FOOD"),
+            ("영화 <호프> 촬영지 전남 해남 여행지 소개", "사진 출사하기 좋은 여행지", "TRAVEL"),
+            ("면세점에서 구매한 디올 선글라스 유럽여행 착용 후기", "환율에 따라 가격 차이는 있었습니다", "TRAVEL"),
+            ("성수동 조용한 카페 추천", "노트북으로 작업하기 너무 좋은 분위기", "CAFE"),
+            ("광양 맛집 다녀온 후기", "카메라로 찍은 사진 몇 장 올려봅니다", "FOOD"),
+        ]
+        for title, snippet, expected_cat in allow_cases:
+            decision = DiscoveryTopicFilter.evaluate(title, snippet, stage="detail")
+            self.assertTrue(decision.allowed, f"Should ALLOW: '{title}' + '{snippet}' (got blocked {decision})")
+            if hasattr(decision, "detected_category"):
+                self.assertEqual(decision.detected_category, expected_cat)
+
+        block_cases = [
+            ("ETF 배당주 포트폴리오 정리", "미국 배당주와 환율 투자 전략", "finance"),
+            ("아이폰 17 프로 성능 비교", "스마트폰 CPU GPU 벤치마크", "tech"),
+            ("소니 A7M4 망원 렌즈 출사 리뷰", "미러리스 카메라 바디 스펙", "camera"),
+        ]
+        for title, snippet, expected_block_cat in block_cases:
+            decision = DiscoveryTopicFilter.evaluate(title, snippet, stage="detail")
+            self.assertFalse(decision.allowed, f"Should BLOCK: '{title}' (got allowed)")
+            self.assertEqual(decision.blocked_category, expected_block_cat)
+
+        unknown_cases = [
+            ("디올 선글라스 신상품 착용 리뷰", "백화점 매장에서 써본 후기"),
+            ("셀럽 패션 선글라스 추천", "올여름 유행하는 선글라스 모음"),
+        ]
+        for title, snippet in unknown_cases:
+            decision = DiscoveryTopicFilter.evaluate(title, snippet, stage="card")
+            # 비대상(UNKNOWN) 글은 allowed=False 이거나 detected_category가 TARGET에 없어야 함
+            self.assertFalse(
+                decision.allowed and decision.detected_category in TARGET_DISCOVERY_CATEGORIES,
+                f"Non-target fashion post should NOT be allowed as target category: '{title}' (got {decision})"
+            )
+
     def test_detail_filter_blocks_all_mutating_actions(self):
         post = FeedPost(
             key="tech:1", source=FeedSourceType.RECOMMENDATION,

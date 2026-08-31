@@ -1,3 +1,56 @@
+from enum import Enum
+from typing import Optional, Any
+
+
+class BrowserFailureKind(Enum):
+    PAGE_CLOSED = "page_closed"
+    CONTEXT_CLOSED = "context_closed"
+    BROWSER_DISCONNECTED = "browser_disconnected"
+    NAVIGATION_TIMEOUT = "navigation_timeout"
+    ORDINARY_NAVIGATION_ERROR = "ordinary_navigation_error"
+
+
+def classify_playwright_failure(
+    exc: Exception,
+    page: Optional[Any] = None,
+    context: Optional[Any] = None
+) -> BrowserFailureKind:
+    """
+    Playwright 예외 및 브라우저 세션 상태를 종합하여 실패 유형을 정밀 분류
+    - page closed vs context closed vs browser crash 구분
+    """
+    msg = str(exc).lower()
+
+    if "target page, context or browser has been closed" in msg or "browser has been closed" in msg or "context has been closed" in msg:
+        if context is not None:
+            try:
+                _ = context.pages
+            except Exception:
+                return BrowserFailureKind.CONTEXT_CLOSED
+        if page is not None:
+            try:
+                if page.is_closed():
+                    return BrowserFailureKind.PAGE_CLOSED
+            except Exception:
+                return BrowserFailureKind.CONTEXT_CLOSED
+        return BrowserFailureKind.CONTEXT_CLOSED
+
+    if "connection closed" in msg or "target closed" in msg or "disconnected" in msg:
+        return BrowserFailureKind.BROWSER_DISCONNECTED
+
+    if "timeout" in msg:
+        return BrowserFailureKind.NAVIGATION_TIMEOUT
+
+    if page is not None:
+        try:
+            if page.is_closed():
+                return BrowserFailureKind.PAGE_CLOSED
+        except Exception:
+            return BrowserFailureKind.CONTEXT_CLOSED
+
+    return BrowserFailureKind.ORDINARY_NAVIGATION_ERROR
+
+
 class BotError(Exception):
     """네이버 피드 어시스턴트 기본 예외"""
     pass

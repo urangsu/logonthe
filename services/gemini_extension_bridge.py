@@ -20,6 +20,7 @@ class GeminiResultStatus(str, Enum):
     CAPTCHA = "captcha"
     TIMEOUT = "timeout"
     FAILED = "failed"
+    BUSY = "busy"
 
 
 @dataclass(frozen=True)
@@ -79,22 +80,26 @@ class GeminiPreflight:
     content_build: str = ""
     protocol_version: int = 0
     bridge_schema_version: int = 0
+    heartbeat_age_ms: int = 0
 
 
 class GeminiExtensionBridge:
-    HEARTBEAT_TTL = 3.0
-
+    HEARTBEAT_TTL = 12.0
     COMMAND_TTL = 90.0
 
-    def __init__(self, token: Optional[str] = None, expected_extension_version: Optional[str] = None, expected_build_id: str = "ea9b41a"):
-        # Kept for compatibility with preview callers; loopback binding is the
-        # only access control in the simplified connection flow.
+    def __init__(
+        self,
+        token: Optional[str] = None,
+        expected_extension_version: Optional[str] = "13.2.3",
+        expected_build_id: str = "13.2.3-r1"
+    ):
         self._condition = threading.Condition()
         self._command: Optional[GeminiCommand] = None
         self._command_state = "idle"
         self._command_claimed_by = ""
         self._results: Dict[str, GeminiResult] = {}
         self._heartbeat_at = 0.0
+        self._ever_seen_heartbeat = False
         self._heartbeat_status = "disconnected"
         self._heartbeat_title = ""
         self._heartbeat_url = ""
@@ -104,10 +109,22 @@ class GeminiExtensionBridge:
         self._bridge_schema_version = 0
         self._expected_extension_version = expected_extension_version
         self._expected_build_id = expected_build_id
+        self.bridge_server_started = True
+        self.bridge_server_error = ""
 
-    def record_heartbeat(self, status: str, title: str = "", url: str = "", extension_version: str = "", content_build: str = "", protocol_version: int = 0, bridge_schema_version: int = 0) -> None:
+    def record_heartbeat(
+        self,
+        status: str,
+        title: str = "",
+        url: str = "",
+        extension_version: str = "",
+        content_build: str = "",
+        protocol_version: int = 0,
+        bridge_schema_version: int = 0
+    ) -> None:
         with self._condition:
             self._heartbeat_at = time.time()
+            self._ever_seen_heartbeat = True
             self._heartbeat_status = status
             self._heartbeat_title = title
             self._heartbeat_url = url
@@ -118,17 +135,104 @@ class GeminiExtensionBridge:
             self._condition.notify_all()
 
     def preflight(self) -> GeminiPreflight:
-        fresh = time.time() - self._heartbeat_at <= self.HEARTBEAT_TTL
-        version_ok = not self._expected_extension_version or self._extension_version == self._expected_extension_version
-        identity_ok = self._content_build == self._expected_build_id and self._protocol_version == 3 and self._bridge_schema_version == 2
-        ready = fresh and self._heartbeat_status == GeminiResultStatus.READY.value and version_ok and identity_ok
-        status = self._heartbeat_status if fresh else "disconnected"
-        if fresh and not version_ok:
-            status = "extension_version_mismatch"
-        elif fresh and not identity_ok:
-            status = "extension_identity_mismatch"
-        message = "Gemini extension ready" if ready else f"Gemini extension not ready: {status}"
-        return GeminiPreflight(ready, status, self._heartbeat_title, self._heartbeat_url, message, self._extension_version, self._content_build, self._protocol_version, self._bridge_schema_version)
+        with self._condition:
+            if not self.bridge_server_started:
+                err_lower = self.bridge_server_error.lower()
+                status = "bridge_port_in_use" if "address already in use" in err_lower or "in use" in err_lower else "bridge_server_unavailable"
+                return GeminiPreflight(
+                    False, status, "", "", f"Gemini bridge server unavailable: {self.bridge_server_error}",
+                    self._extension_version, self._content_build, self._protocol_version, self._bridge_schema_version, 0
+                )
+
+            if not self._ever_seen_heartbeat:
+                return GeminiPreflight(
+                    False, "heartbeat_never_received", "", "", "Gemini extension heartbeat never received",
+                    self._extension_version, self._content_build, self._protocol_version, self._bridge_schema_version, 0
+                )
+
+            age_sec = time.time() - self._heartbeat_at
+            age_ms = int(age_sec * 1000)
+            fresh = age_sec <= self.HEARTBEAT_TTL
+
+            if not fresh:
+                return GeminiPreflight(
+                    False, "heartbeat_stale", self._heartbeat_title, self._heartbeat_url,
+                    f"Gemini heartbeat stale (age: {age_sec:.1f}s)",
+                    self._extension_version, self._content_build, self._protocol_version, self._bridge_schema_version, age_ms
+                )
+
+            version_ok = not self._expected_extension_version or self._extension_version == self._expected_extension_version
+            if not version_ok:
+                return GeminiPreflight(
+                    False, "extension_version_mismatch", self._heartbeat_title, self._heartbeat_url,
+                    f"Extension version mismatch: expected {self._expected_extension_version}, got {self._extension_version}",
+                    self._extension_version, self._content_build, self._protocol_version, self._bridge_schema_version, age_ms
+                )
+
+            identity_ok = (
+                self._content_build == self._expected_build_id
+                and self._protocol_version == 3
+                and self._bridge_schema_version == 2
+            )
+            if not identity_ok:
+                return GeminiPreflight(
+                    False, "extension_identity_mismatch", self._heartbeat_title, self._heartbeat_url,
+                    f"Extension runtime identity mismatch: build={self._content_build}, proto={self._protocol_version}, schema={self._bridge_schema_version}",
+                    self._extension_version, self._content_build, self._protocol_version, self._bridge_schema_version, age_ms
+                )
+
+            if self._heartbeat_status == "auth_required":
+                return GeminiPreflight(
+                    False, "auth_required", self._heartbeat_title, self._heartbeat_url,
+                    "Gemini login required (auth_required)",
+                    self._extension_version, self._content_build, self._protocol_version, self._bridge_schema_version, age_ms
+                )
+
+            if self._heartbeat_status == "dom_unsupported":
+                return GeminiPreflight(
+                    False, "dom_unsupported", self._heartbeat_title, self._heartbeat_url,
+                    "Gemini DOM editor not found or unsupported",
+                    self._extension_version, self._content_build, self._protocol_version, self._bridge_schema_version, age_ms
+                )
+
+            if self._heartbeat_status == "captcha":
+                return GeminiPreflight(
+                    False, "captcha", self._heartbeat_title, self._heartbeat_url,
+                    "Gemini captcha detected",
+                    self._extension_version, self._content_build, self._protocol_version, self._bridge_schema_version, age_ms
+                )
+
+            if self._heartbeat_status == "busy":
+                return GeminiPreflight(
+                    False, "busy", self._heartbeat_title, self._heartbeat_url,
+                    "Gemini generation currently busy",
+                    self._extension_version, self._content_build, self._protocol_version, self._bridge_schema_version, age_ms
+                )
+
+            if self._heartbeat_status == GeminiResultStatus.READY.value:
+                return GeminiPreflight(
+                    True, "ready", self._heartbeat_title, self._heartbeat_url,
+                    "Gemini extension ready",
+                    self._extension_version, self._content_build, self._protocol_version, self._bridge_schema_version, age_ms
+                )
+
+            return GeminiPreflight(
+                False, self._heartbeat_status, self._heartbeat_title, self._heartbeat_url,
+                f"Gemini extension status: {self._heartbeat_status}",
+                self._extension_version, self._content_build, self._protocol_version, self._bridge_schema_version, age_ms
+            )
+
+    def await_ready(self, timeout: float = 3.0, stop_event: Optional[threading.Event] = None) -> GeminiPreflight:
+        """피드 작업 시작 시 단기 유예 시간(3초)을 두고 ready 상태를 대기"""
+        deadline = time.monotonic() + max(0.1, timeout)
+        while time.monotonic() < deadline:
+            if stop_event and stop_event.is_set():
+                break
+            pf = self.preflight()
+            if pf.ready:
+                return pf
+            time.sleep(0.15)
+        return self.preflight()
 
     def publish(self, command: GeminiCommand) -> None:
         with self._condition:
@@ -256,7 +360,15 @@ class GeminiBridgeHTTPServer:
             def do_POST(self):
                 payload = self._payload()
                 if self.path == "/v1/heartbeat":
-                    bridge.record_heartbeat(str(payload.get("status", "failed")), str(payload.get("title", "")), str(payload.get("url", "")), str(payload.get("extensionVersion", "")), str(payload.get("buildId", payload.get("contentBuild", ""))), int(payload.get("protocolVersion", 0) or 0), int(payload.get("bridgeSchemaVersion", 0) or 0))
+                    bridge.record_heartbeat(
+                        str(payload.get("status", "failed")),
+                        str(payload.get("title", "")),
+                        str(payload.get("url", "")),
+                        str(payload.get("extensionVersion", "")),
+                        str(payload.get("buildId", payload.get("contentBuild", ""))),
+                        int(payload.get("protocolVersion", 0) or 0),
+                        int(payload.get("bridgeSchemaVersion", 0) or 0)
+                    )
                     return self._json(200, {"ok": True})
                 if self.path == "/v1/claim":
                     return self._json(200, {"claimed": bridge.claim_command(str(payload.get("requestId", "")), str(payload.get("claimant", "")))})
@@ -265,10 +377,18 @@ class GeminiBridgeHTTPServer:
                     return self._json(200, {"ok": True, "accepted": accepted, "reason": reason})
                 return self._json(404, {"error": "not_found"})
 
-        self._server = _LoopbackHTTPServer((self.host, self.port), Handler)
-        self.port = int(self._server.server_port)
-        self._thread = threading.Thread(target=self._server.serve_forever, daemon=True)
-        self._thread.start()
+        try:
+            self._server = _LoopbackHTTPServer((self.host, self.port), Handler)
+            self.port = int(self._server.server_port)
+            self.bridge.bridge_server_started = True
+            self.bridge.bridge_server_error = ""
+            self._thread = threading.Thread(target=self._server.serve_forever, daemon=True)
+            self._thread.start()
+        except Exception as e:
+            self.bridge.bridge_server_started = False
+            self.bridge.bridge_server_error = str(e)
+            logger.log(f"[GEMINI] Bridge HTTP 서버 시작 실패 ({self.host}:{self.port}): {e}", "ERROR")
+            raise
 
     def stop(self) -> None:
         if self._server:

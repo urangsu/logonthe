@@ -15,16 +15,74 @@ from services.gemini_extension_bridge import (
 
 class GeminiExtensionBridgeTests(unittest.TestCase):
     def test_preflight_requires_fresh_ready_heartbeat(self):
-        bridge = GeminiExtensionBridge(token="test-token")
+        bridge = GeminiExtensionBridge(expected_extension_version="13.2.3", expected_build_id="13.2.3-r1")
         self.assertFalse(bridge.preflight().ready)
-        bridge.record_heartbeat("ready", "Gemini", "https://gemini.google.com/app", "13.2.2", "ea9b41a", 3, 2)
+        self.assertEqual(bridge.preflight().status, "heartbeat_never_received")
+        bridge.record_heartbeat("ready", "Gemini", "https://gemini.google.com/app", "13.2.3", "13.2.3-r1", 3, 2)
         self.assertTrue(bridge.preflight().ready)
+        self.assertEqual(bridge.preflight().status, "ready")
 
-    def test_extension_version_mismatch_blocks_preflight(self):
-        bridge = GeminiExtensionBridge(expected_extension_version="13.2.2")
-        bridge.record_heartbeat("ready", "Gemini", "https://gemini.google.com/app", "13.2.0", "13.2.0")
-        self.assertFalse(bridge.preflight().ready)
-        self.assertEqual(bridge.preflight().status, "extension_version_mismatch")
+    def test_gem_conn_001_server_unavailable(self):
+        bridge = GeminiExtensionBridge()
+        bridge.bridge_server_started = False
+        bridge.bridge_server_error = "Address already in use"
+        pf = bridge.preflight()
+        self.assertFalse(pf.ready)
+        self.assertEqual(pf.status, "bridge_port_in_use")
+
+    def test_gem_conn_002_heartbeat_never_received(self):
+        bridge = GeminiExtensionBridge()
+        pf = bridge.preflight()
+        self.assertFalse(pf.ready)
+        self.assertEqual(pf.status, "heartbeat_never_received")
+
+    def test_gem_conn_003_heartbeat_stale(self):
+        bridge = GeminiExtensionBridge()
+        bridge.record_heartbeat("ready", "Gemini", "https://gemini.google.com/app", "13.2.3", "13.2.3-r1", 3, 2)
+        bridge._heartbeat_at = time.time() - 20.0
+        pf = bridge.preflight()
+        self.assertFalse(pf.ready)
+        self.assertEqual(pf.status, "heartbeat_stale")
+
+    def test_gem_conn_004_extension_version_mismatch(self):
+        bridge = GeminiExtensionBridge(expected_extension_version="13.2.3")
+        bridge.record_heartbeat("ready", "Gemini", "https://gemini.google.com/app", "13.2.0", "13.2.3-r1", 3, 2)
+        pf = bridge.preflight()
+        self.assertFalse(pf.ready)
+        self.assertEqual(pf.status, "extension_version_mismatch")
+
+    def test_gem_conn_005_extension_identity_mismatch(self):
+        bridge = GeminiExtensionBridge(expected_extension_version="13.2.3", expected_build_id="13.2.3-r1")
+        bridge.record_heartbeat("ready", "Gemini", "https://gemini.google.com/app", "13.2.3", "wrong-build", 3, 2)
+        pf = bridge.preflight()
+        self.assertFalse(pf.ready)
+        self.assertEqual(pf.status, "extension_identity_mismatch")
+
+    def test_gem_conn_006_auth_required(self):
+        bridge = GeminiExtensionBridge(expected_extension_version="13.2.3", expected_build_id="13.2.3-r1")
+        bridge.record_heartbeat("auth_required", "Gemini", "https://gemini.google.com/app", "13.2.3", "13.2.3-r1", 3, 2)
+        pf = bridge.preflight()
+        self.assertFalse(pf.ready)
+        self.assertEqual(pf.status, "auth_required")
+
+    def test_gem_conn_007_dom_unsupported(self):
+        bridge = GeminiExtensionBridge(expected_extension_version="13.2.3", expected_build_id="13.2.3-r1")
+        bridge.record_heartbeat("dom_unsupported", "Gemini", "https://gemini.google.com/app", "13.2.3", "13.2.3-r1", 3, 2)
+        pf = bridge.preflight()
+        self.assertFalse(pf.ready)
+        self.assertEqual(pf.status, "dom_unsupported")
+
+    def test_gem_conn_008_await_ready_grace_success(self):
+        bridge = GeminiExtensionBridge(expected_extension_version="13.2.3", expected_build_id="13.2.3-r1")
+
+        def delayed_heartbeat():
+            time.sleep(0.2)
+            bridge.record_heartbeat("ready", "Gemini", "https://gemini.google.com/app", "13.2.3", "13.2.3-r1", 3, 2)
+
+        threading.Thread(target=delayed_heartbeat, daemon=True).start()
+        pf = bridge.await_ready(timeout=1.0)
+        self.assertTrue(pf.ready)
+        self.assertEqual(pf.status, "ready")
 
     def test_claimed_and_completed_command_is_not_replayed(self):
         bridge = GeminiExtensionBridge()
@@ -37,7 +95,7 @@ class GeminiExtensionBridgeTests(unittest.TestCase):
         self.assertIsNone(bridge.current_command())
 
     def test_stale_result_cannot_complete_new_request(self):
-        bridge = GeminiExtensionBridge(token="test-token")
+        bridge = GeminiExtensionBridge()
         command = GeminiCommand.create("post:1", 3, "prompt")
         bridge.publish(command)
         bridge.submit_result(GeminiResult("old", "post:0", 2, GeminiResultStatus.COMPLETED, "wrong"))
@@ -49,7 +107,7 @@ class GeminiExtensionBridgeTests(unittest.TestCase):
         self.assertEqual(result.text, "right")
 
     def test_failure_result_is_returned_without_local_fallback(self):
-        bridge = GeminiExtensionBridge(token="test-token")
+        bridge = GeminiExtensionBridge()
         command = GeminiCommand.create("post:2", 1, "prompt")
         bridge.publish(command)
         bridge.submit_result(GeminiResult(command.request_id, command.post_key, 1, GeminiResultStatus.AUTH_REQUIRED, "", "login"))
@@ -57,7 +115,7 @@ class GeminiExtensionBridgeTests(unittest.TestCase):
         self.assertEqual(result.status, GeminiResultStatus.AUTH_REQUIRED)
 
     def test_http_server_is_loopback_without_extra_pairing_step(self):
-        bridge = GeminiExtensionBridge(token="test-token")
+        bridge = GeminiExtensionBridge()
         server = GeminiBridgeHTTPServer(bridge, port=0)
         server.start()
         try:
@@ -65,14 +123,10 @@ class GeminiExtensionBridgeTests(unittest.TestCase):
             connection.request("GET", "/v1/status")
             response = connection.getresponse()
             self.assertEqual(response.status, 200)
-            response.read()
-            connection.close()
-            connection = http.client.HTTPConnection("127.0.0.1", server.port, timeout=1)
-            connection.request("GET", "/v1/status", headers={"Authorization": "Bearer test-token"})
-            response = connection.getresponse()
-            payload = json.loads(response.read())
+            payload = json.loads(response.read().decode("utf-8"))
             connection.close()
             self.assertFalse(payload["ready"])
+            self.assertEqual(payload["status"], "heartbeat_never_received")
         finally:
             server.stop()
 

@@ -1,7 +1,7 @@
 {
   "manifest_version": 3,
   "name": "Naver Assistant Gemini Bridge",
-  "version": "13.2.2",
+  "version": "13.2.3",
   "description": "Connects the local Naver Blog Assistant to the already signed-in Gemini tab.",
   "permissions": [],
   "host_permissions": ["http://127.0.0.1/*", "https://gemini.google.com/*"],

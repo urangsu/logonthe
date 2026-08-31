@@ -90,7 +90,7 @@ class NeighborFeedSource:
 
 
 class RecommendationFeedSource:
-    """모바일 탐색 추천 피드 (Recommendation.naver) 탐색 소스 - 푸드/라이프 카테고리 필터 자동 클릭"""
+    """모바일 탐색 추천 피드 (Recommendation.naver) 탐색 소스 - 푸드/라이프 카테고리 필터 선택 및 검증"""
     URL = "https://m.blog.naver.com/Recommendation.naver"
 
     def __init__(self, page: Page, max_items: int = 20, stop_event: Optional[threading.Event] = None, preferred_category: str = "푸드"):
@@ -99,6 +99,7 @@ class RecommendationFeedSource:
         self.stop_event = stop_event
         self.preferred_category = preferred_category
         self.seen_keys: Set[str] = set()
+        self.seen_blogs: Set[str] = set()
         self._exhausted = False
 
     def open(self):
@@ -107,26 +108,40 @@ class RecommendationFeedSource:
             self.page.goto(self.URL, wait_until="domcontentloaded", timeout=20000)
             interruptible_wait(self.stop_event, 1.5)
 
-            # 탐색 탭 상단의 카테고리 필터 중 '[🍔 푸드]' 버튼 자동 클릭
-            clicked_cat = self.page.evaluate("""(targetCategory) => {
+            # 탐색 탭 상단의 카테고리 필터 중 interactive element만 탐색 후 클릭 및 상태 검증
+            click_result = self.page.evaluate("""(targetCategory) => {
                 const shown = el => !!el && !!el.getClientRects().length && getComputedStyle(el).visibility !== 'hidden';
-                const candidates = Array.from(document.querySelectorAll('a, button, [role=tab], li, span, div')).filter(shown);
-                const target = candidates.find(el => {
+                const interactiveCandidates = Array.from(document.querySelectorAll('button, a, [role=tab], li[role=tab], div[role=button]')).filter(shown);
+
+                const target = interactiveCandidates.find(el => {
                     const text = el.textContent.trim();
                     return new RegExp(targetCategory).test(text) && !/전체/.test(text) && text.length <= 15;
                 });
-                if (target) {
-                    target.click();
-                    return target.textContent.trim();
-                }
-                return null;
+
+                if (!target) return { status: "not_found" };
+
+                const beforeActive = target.getAttribute('aria-selected') === 'true' || /active|on|selected/.test(target.className);
+                target.click();
+
+                // 클릭 후 상태 확인
+                const afterActive = target.getAttribute('aria-selected') === 'true' || /active|on|selected/.test(target.className);
+                const text = target.textContent.trim();
+
+                return {
+                    status: "clicked",
+                    text: text,
+                    verified: afterActive || !beforeActive
+                };
             }""", self.preferred_category)
 
-            if clicked_cat:
-                logger.log(f"✅ [SOURCE] 탐색 탭에서 '[{clicked_cat}]' 필터 버튼 클릭 완료")
+            if click_result and click_result.get("status") == "clicked":
+                if click_result.get("verified"):
+                    logger.log(f"✅ [SOURCE] 탐색 탭에서 '[{click_result.get('text')}]' 필터 버튼 클릭 및 활성화 확인 완료")
+                else:
+                    logger.log(f"⚠️ [SOURCE] 탐색 탭 카테고리 버튼('{self.preferred_category}') 클릭됨 (선택 상태 미확인: category_filter_unverified)", "WARNING")
                 interruptible_wait(self.stop_event, 1.5)
             else:
-                logger.log(f"ℹ️ [SOURCE] 탐색 탭 카테고리 버튼('{self.preferred_category}') 자동 클릭 건너뜀")
+                logger.log(f"ℹ️ [SOURCE] 탐색 탭 카테고리 버튼('{self.preferred_category}') 미발견 (전체 탐색 모드 유지)")
         except Exception as e:
             logger.log(f"[SOURCE] 추천 페이지 로드 안내: {e}", "WARNING")
 
@@ -134,6 +149,12 @@ class RecommendationFeedSource:
         discovered = []
         cards = MobileDOMResolver.get_feed_cards(self.page)
         card_count = cards.count()
+
+        cards_seen = card_count
+        cards_parsed = 0
+        cards_topic_blocked = 0
+        cards_same_blog = 0
+        card_dom_errors = 0
 
         from naver.discovery.topic_filter import DiscoveryTopicFilter
 
@@ -158,20 +179,40 @@ class RecommendationFeedSource:
                 except Exception:
                     snippet = ""
 
+                post = extract_canonical_post(raw_href, FeedSourceType.RECOMMENDATION, title=title, author=author)
+                if not post:
+                    continue
+
+                cards_parsed += 1
+
+                # 동일 블로그 1세션 1글 제한
+                if post.blog_id in self.seen_blogs:
+                    cards_same_blog += 1
+                    logger.log(f"  ⏭️ [SOURCE] 동일 블로그 1세션 1글 제한에 따라 스킵: {post.blog_id}")
+                    continue
+
+                # Positive category + Contextual negative gate
                 decision = DiscoveryTopicFilter.evaluate(title or "", snippet, stage="card")
                 if not decision.allowed:
+                    cards_topic_blocked += 1
                     logger.log(
-                        f"  [TOPIC_FILTER] card/{decision.blocked_category} "
+                        f"  [TOPIC_FILTER] card/{decision.blocked_category or decision.reason_code} "
                         f"evidence={list(decision.evidence)} title=\"{title}\""
                     )
                     continue
 
-                post = extract_canonical_post(raw_href, FeedSourceType.RECOMMENDATION, title=title, author=author)
-                if post and post.key not in self.seen_keys:
+                if post.key not in self.seen_keys:
                     self.seen_keys.add(post.key)
+                    self.seen_blogs.add(post.blog_id)
                     discovered.append(post)
             except Exception:
+                card_dom_errors += 1
                 continue
+
+        logger.log(
+            f"[DISCOVERY_SUMMARY] recommendation seen={cards_seen} parsed={cards_parsed} "
+            f"allowed={len(discovered)} topicBlocked={cards_topic_blocked} sameBlog={cards_same_blog} domError={card_dom_errors}"
+        )
 
         return discovered
 

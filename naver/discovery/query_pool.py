@@ -1,5 +1,12 @@
+from dataclasses import dataclass
 from typing import List, Dict, Optional, Set
 import random
+
+
+@dataclass(frozen=True)
+class QuerySpec:
+    category: str
+    query: str
 
 
 DISCOVERY_QUERIES: Dict[str, List[str]] = {
@@ -44,8 +51,8 @@ DISCOVERY_QUERIES: Dict[str, List[str]] = {
 
 class QueryRotator:
     """
-    생활형 주제 검색어 순환 풀 (v9-lite)
-    - 선택된 카테고리별 검색어 및 사용자 지정 검색어를 순환
+    생활형 주제 검색어 순환 풀 (v9-lite / V13.3)
+    - 선택된 카테고리별 검색어 및 사용자 지정 검색어와 QuerySpec(category, query) 보존
     - 검색어당 2~3개 처리 후 다음 검색어로 자연스럽게 로테이션
     """
     def __init__(
@@ -58,32 +65,48 @@ class QueryRotator:
         self.enabled_categories = enabled_categories or list(DISCOVERY_QUERIES.keys())
         self.custom_queries = [q.strip() for q in (custom_queries or []) if q.strip()]
 
-        # 검색어 리스트 조합
-        self.queries: List[str] = []
+        # QuerySpec 리스트 조합
+        self.specs: List[QuerySpec] = []
         for cat in self.enabled_categories:
             if cat in DISCOVERY_QUERIES:
-                self.queries.extend(DISCOVERY_QUERIES[cat])
+                for q in DISCOVERY_QUERIES[cat]:
+                    self.specs.append(QuerySpec(cat, q))
 
-        # 사용자 정의 검색어 추가
+        # 사용자 정의 검색어 추가 (CUSTOM 카테고리)
         for cq in self.custom_queries:
-            if cq not in self.queries:
-                self.queries.append(cq)
+            if not any(s.query == cq for s in self.specs):
+                self.specs.append(QuerySpec("CUSTOM", cq))
 
-        if not self.queries:
-            # 폴백: 기본 맛집/카페/일상
-            self.queries = ["내돈내산 맛집 후기", "동네 카페 후기", "육아 일상", "살림 일상"]
+        if not self.specs:
+            self.specs = [
+                QuerySpec("FOOD", "내돈내산 맛집 후기"),
+                QuerySpec("CAFE", "동네 카페 후기"),
+                QuerySpec("PARENTING", "육아 일상"),
+                QuerySpec("LIVING", "살림 일상"),
+            ]
 
-        # 세션 시작 시 다양성을 위해 약간의 셔플 (순환 순서 섞기)
-        random.shuffle(self.queries)
+        # 세션 시작 시 다양성을 위해 셔플
+        random.shuffle(self.specs)
+
+        # 하위 호환성 문자열 리스트
+        self.queries: List[str] = [s.query for s in self.specs]
 
         self._current_index = 0
         self._current_query_post_count = 0
 
     @property
+    def current_spec(self) -> QuerySpec:
+        if not self.specs:
+            return QuerySpec("FOOD", "내돈내산 맛집 후기")
+        return self.specs[self._current_index % len(self.specs)]
+
+    @property
     def current_query(self) -> str:
-        if not self.queries:
-            return "내돈내산 맛집 후기"
-        return self.queries[self._current_index % len(self.queries)]
+        return self.current_spec.query
+
+    @property
+    def current_category(self) -> str:
+        return self.current_spec.category
 
     def record_post_found(self) -> bool:
         """
@@ -98,6 +121,6 @@ class QueryRotator:
 
     def next_query(self) -> str:
         """강제로 다음 쿼리로 전환"""
-        self._current_index = (self._current_index + 1) % len(self.queries)
+        self._current_index += 1
         self._current_query_post_count = 0
         return self.current_query

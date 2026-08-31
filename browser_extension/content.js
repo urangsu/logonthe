@@ -5,11 +5,21 @@ const EDITOR_SELECTORS = [
   'textarea'
 ];
 const RESPONSE_SELECTORS = 'model-response';
-const CONTENT_BUILD = '13.2.2';
+const EXTENSION_VERSION = '13.2.3';
+const CONTENT_BUILD = '13.2.3-r1';
 const PROTOCOL_VERSION = 3;
 const BRIDGE_SCHEMA_VERSION = 2;
 let lastRequestId = null;
 let busy = false;
+let lastBridgeFailLog = 0;
+
+function logBridgeFail(stage, err) {
+  const now = Date.now();
+  if (now - lastBridgeFailLog > 5000) {
+    lastBridgeFailLog = now;
+    console.warn(`[GEMINI][BRIDGE_FAIL] stage=${stage} error=${String(err?.message || err)}`);
+  }
+}
 
 function normalizeText(value) {
   return String(value || '').replace(/\r\n?/g, '\n').trim();
@@ -47,11 +57,21 @@ function bridgeFetch(path, method = 'GET', body = null) {
 }
 
 async function heartbeat() {
-  await bridgeFetch('/v1/heartbeat', 'POST', {
-    status: pageStatus(), title: document.title, url: location.href,
-    extensionVersion: chrome.runtime.getManifest().version, contentBuild: CONTENT_BUILD,
-    buildId: 'ea9b41a', protocolVersion: PROTOCOL_VERSION, bridgeSchemaVersion: BRIDGE_SCHEMA_VERSION
-  });
+  try {
+    await bridgeFetch('/v1/heartbeat', 'POST', {
+      status: pageStatus(),
+      title: document.title,
+      url: location.href,
+      extensionVersion: EXTENSION_VERSION,
+      contentBuild: CONTENT_BUILD,
+      buildId: CONTENT_BUILD,
+      protocolVersion: PROTOCOL_VERSION,
+      bridgeSchemaVersion: BRIDGE_SCHEMA_VERSION
+    });
+  } catch (err) {
+    logBridgeFail('heartbeat', err);
+    throw err;
+  }
 }
 
 function setEditorText(target, text) {
@@ -59,8 +79,6 @@ function setEditorText(target, text) {
   if (target instanceof HTMLTextAreaElement) {
     target.value = text;
   } else {
-    // Use the browser editing command first so Gemini's framework observes a
-    // real input transaction and enables its send control.
     const selection = window.getSelection();
     const range = document.createRange();
     range.selectNodeContents(target);
@@ -78,8 +96,6 @@ function setEditorText(target, text) {
 }
 
 function findSendControl() {
-  // Gemini renders the send control as a role=button element in some builds,
-  // so querying native <button> only causes false send_button_not_found errors.
   const buttons = [...document.querySelectorAll('button, [role="button"]')].filter(visible);
   const button = buttons.find(b => {
     const label = [
@@ -100,83 +116,57 @@ function responseNodes() {
 
 function latestResponseText() {
   const nodes = responseNodes();
-  const latest = nodes[nodes.length - 1];
-  if (!latest) return '';
-  const content = latest.querySelector('message-content, div.markdown, div.model-response-text, .response-body-inner') || latest;
+  if (!nodes.length) return '';
+  const last = nodes[nodes.length - 1];
+  const content = last.querySelector('message-content, div.markdown, div.model-response-text, .response-body-inner') || last;
   return (content.innerText || '').trim();
 }
 
-function responseTexts() {
-  return responseNodes()
-    .map(node => {
-      const content = node.querySelector('message-content, div.markdown, div.model-response-text, .response-body-inner') || node;
-      return (content.innerText || '').trim();
-    })
-    .filter(Boolean);
-}
-
 function generationActive() {
-  const buttons = [...document.querySelectorAll('button')].filter(visible);
-  return buttons.some(button => /중지|stop responding|stop generating|응답 중지/i.test(
-    `${button.getAttribute('aria-label') || ''} ${button.innerText || ''}`
-  ));
+  const stopButton = [...document.querySelectorAll('button, [role="button"]')].find(b => {
+    const label = [b.getAttribute('aria-label'), b.innerText].filter(Boolean).join(' ');
+    return /답변 중지|생성 중지|중지|stop/i.test(label);
+  });
+  return Boolean(stopButton && visible(stopButton));
 }
 
 async function postResult(command, status, text = '', error = '') {
-  const result = await bridgeFetch('/v1/result', 'POST', {
+  return await bridgeFetch('/v1/result', 'POST', {
     requestId: command.requestId,
     postKey: command.postKey,
     navigationVersion: command.navigationVersion,
-    status, text, error
+    status,
+    text,
+    error
   });
-  if (!result?.accepted) console.warn('[GEMINI][RESULT_REJECTED]', result?.reason || 'unknown');
-  return result;
 }
 
 async function execute(command) {
   busy = true;
+  const initialNodes = responseNodes();
+  const target = editor();
+  if (!target) {
+    busy = false;
+    return await postResult(command, 'dom_unsupported', '', 'editor_not_found');
+  }
+  const textSet = setEditorText(target, command.prompt);
+  if (!textSet) {
+    busy = false;
+    return await postResult(command, 'failed', '', 'editor_text_set_failed');
+  }
+  await new Promise(resolve => setTimeout(resolve, 300));
+  const sendButton = findSendControl();
+  if (!sendButton) {
+    busy = false;
+    return await postResult(command, 'failed', '', 'send_button_not_found');
+  }
+  sendButton.click();
+  const deadline = Date.now() + Math.min(65000, Math.max(10000, (command.deadlineAt - Date.now() / 1000) * 1000));
+  let stableSince = null;
+  let previous = '';
   try {
-    const deadlineAt = Number(command.deadlineAt || (Date.now() + 70000));
-    const remaining = () => Math.max(0, deadlineAt - Date.now());
-    const waitUntil = async (maxMs, predicate, interval = 120) => {
-      const end = Math.min(deadlineAt, Date.now() + maxMs);
-      while (Date.now() < end && remaining() > 0) {
-        if (predicate()) return true;
-        await new Promise(resolve => setTimeout(resolve, Math.min(interval, Math.max(1, end - Date.now()))));
-      }
-      return Boolean(predicate());
-    };
-    const target = editor();
-    if (!target) return await postResult(command, pageStatus(), '', 'editor_not_found');
-    const beforeCount = responseNodes().length;
-    if (!setEditorText(target, command.prompt)) return await postResult(command, 'dom_unsupported', '', 'prompt_readback_failed');
-    let sendControl = null;
-    const sendReady = await waitUntil(3000, () => {
-      sendControl = findSendControl();
-      return Boolean(sendControl && !sendControl.disabled && sendControl.getAttribute('aria-disabled') !== 'true');
-    });
-    if (!sendReady || !sendControl) return await postResult(command, 'dom_unsupported', '', remaining() ? 'send_button_not_found' : 'command_deadline_exceeded');
-    if (sendControl.disabled || sendControl.getAttribute('aria-disabled') === 'true') {
-      return await postResult(command, 'dom_unsupported', '', 'send_button_disabled');
-    }
-    sendControl.click();
-
-    // A click is not proof that Gemini accepted the prompt. Wait briefly for
-    // the editor to clear or a generation control/new response to appear.
-    const sendConfirmed = await waitUntil(3000, () => {
-      const editorNow = editor();
-      const editorValue = editorNow ? (editorNow.innerText || editorNow.value || '').trim() : '';
-      return !editorValue || generationActive() || responseNodes().length > beforeCount;
-    }, 150);
-    if (!sendConfirmed) return await postResult(command, 'failed', '', remaining() ? 'send_click_unconfirmed' : 'command_deadline_exceeded');
-
-    let previous = '';
-    let stableSince = 0;
-    while (remaining() > 0) {
-      const status = pageStatus();
-      if (status === 'captcha' || status === 'auth_required') return await postResult(command, status, '', status);
-      const count = responseNodes().length;
-      const newNodes = count > beforeCount ? responseNodes().slice(beforeCount) : [];
+    while (Date.now() < deadline) {
+      const newNodes = responseNodes().slice(initialNodes.length);
       const current = newNodes.length ? latestResponseText() : '';
       if (current && current !== previous) {
         previous = current;
@@ -197,6 +187,7 @@ async function execute(command) {
     }
     await postResult(command, 'timeout', '', 'command_deadline_exceeded');
   } catch (error) {
+    logBridgeFail('execute', error);
     await postResult(command, 'failed', '', String(error.message || error)).catch(() => {});
   } finally {
     busy = false;
@@ -214,8 +205,17 @@ async function tick() {
     if (!claim.claimed) return;
     lastRequestId = command.requestId;
     await execute(command);
-  } catch (_) {}
+  } catch (err) {
+    logBridgeFail('tick', err);
+  }
 }
 
-setInterval(tick, 700);
+setInterval(tick, 1000);
+document.addEventListener('visibilitychange', () => {
+  if (document.visibilityState === 'visible') {
+    tick();
+  }
+});
+window.addEventListener('focus', tick);
+window.addEventListener('pageshow', tick);
 tick();

@@ -120,3 +120,7 @@ class PacingService:
         logger.log(f"☕ [PAUSE] 작업 간격 조정을 위해 {seconds:.1f}초 동안 잠시 대기합니다.")
         interrupted = interruptible_wait(self.stop_event, seconds, pause_event=self.pause_event)
         return PacingResult(PacingKind.PAUSE, seconds, interrupted)
+
+    def reset(self) -> None:
+        """세션 종료 또는 리셋 시 상태 초기화"""
+        pass

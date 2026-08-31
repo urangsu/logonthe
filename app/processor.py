@@ -11,7 +11,8 @@ from app.models import (
 from app.state import StateManager, FeedState
 from app.errors import (
     UserStopRequestedError, RecoverablePostError, PostNavigationMismatchError,
-    PostDOMContractError, CommentUnavailableError
+    PostDOMContractError, CommentUnavailableError, BrowserDisconnectedError,
+    BrowserFailureKind, classify_playwright_failure
 )
 from naver.target_guard import TargetPostGuard
 from naver.interaction import LikeInteractionService, CommentInteractionService
@@ -117,9 +118,20 @@ class PostProcessor:
                     raise StopRequestedException("작업 중지 요청됨")
             else:
                 interruptible_wait(self.stop_event, 1.0)
+        except StopRequestedException:
+            raise
         except Exception as e:
-            logger.log(f"[POST] 상세 페이지 로드 오류: {e}", "WARNING")
-            raise PostNavigationMismatchError(f"페이지 로드 실패: {e}", post_key=post.key, reason="navigation_error")
+            context = getattr(detail_page, "context", None)
+            failure_kind = classify_playwright_failure(e, page=detail_page, context=context)
+            if failure_kind in (BrowserFailureKind.CONTEXT_CLOSED, BrowserFailureKind.BROWSER_DISCONNECTED):
+                logger.log(f"💥 [POST] 브라우저/컨텍스트 종료 감지 ({failure_kind.value}): {e}", "ERROR")
+                raise BrowserDisconnectedError(f"브라우저 또는 컨텍스트가 종료되었습니다: {e}")
+            elif failure_kind == BrowserFailureKind.PAGE_CLOSED:
+                logger.log(f"⚠️ [POST] 상세 페이지 종료 감지: {e}", "WARNING")
+                raise PostNavigationMismatchError(f"페이지 종료 감지: {e}", post_key=post.key, reason="page_closed")
+            else:
+                logger.log(f"[POST] 상세 페이지 로드 오류: {e}", "WARNING")
+                raise PostNavigationMismatchError(f"페이지 로드 실패: {e}", post_key=post.key, reason="navigation_error")
 
         if self.stop_event and self.stop_event.is_set():
             raise StopRequestedException("작업 중지 요청됨")

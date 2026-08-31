@@ -247,6 +247,8 @@ class BrowserSession:
             )
 
         os.makedirs(self.user_data_dir, exist_ok=True)
+        self._is_closing = False
+        self._closing_reason = "active"
         logger.log(f"[SESSION] 브라우저 세션 시작 중... (프로필: {self.user_data_dir})")
 
         try:
@@ -264,11 +266,22 @@ class BrowserSession:
                 ]
             )
 
+            try:
+                self.context.on("close", lambda: logger.log(f"[SESSION][CONTEXT_CLOSED] reason={self._closing_reason} expected={self._is_closing}"))
+            except Exception:
+                pass
+
             self._init_pages_from_context()
             return self.context
         except Exception as e:
-            self.close()
+            self.close(reason="startup_failed")
             raise e
+
+    def _attach_page_instrumentation(self, page: Page, role: str):
+        try:
+            page.on("close", lambda p: logger.log(f"[SESSION][PAGE_CLOSED] role={role} url={getattr(p, 'url', '')} expected={self._is_closing}"))
+        except Exception:
+            pass
 
     def _init_pages_from_context(self):
         if not self.context:
@@ -281,6 +294,7 @@ class BrowserSession:
                 if "gemini.google.com" in (p.url or ""):
                     logger.log("[SESSION] 기존 브라우저에 열려 있는 Gemini 탭을 감지하여 연동합니다.")
                     self.gemini_page = p
+                    self._attach_page_instrumentation(p, "gemini")
                     break
             except Exception:
                 pass
@@ -288,66 +302,106 @@ class BrowserSession:
         remaining = [p for p in pages if p != self.gemini_page]
         if remaining:
             self.feed_page = remaining[0]
+            self._attach_page_instrumentation(self.feed_page, "feed")
             if len(remaining) > 1:
                 self.detail_page = remaining[1]
+                self._attach_page_instrumentation(self.detail_page, "detail")
             else:
                 self.detail_page = self.context.new_page()
+                self._attach_page_instrumentation(self.detail_page, "detail")
         else:
             self.feed_page = self.context.new_page()
+            self._attach_page_instrumentation(self.feed_page, "feed")
             self.detail_page = self.context.new_page()
+            self._attach_page_instrumentation(self.detail_page, "detail")
 
     def get_feed_page(self) -> Page:
+        if not self.context:
+            raise BrowserDisconnectedError("브라우저 컨텍스트가 존재하지 않습니다.")
+        try:
+            _ = self.context.pages
+        except Exception as e:
+            raise BrowserDisconnectedError(f"브라우저 컨텍스트가 닫혔습니다: {e}")
+
         if not self.feed_page or self.feed_page.is_closed():
-            if self.context and not self.context.pages:
+            if not self.context.pages:
                 self.feed_page = self.context.new_page()
-            elif self.context:
+            else:
                 self.feed_page = self.context.pages[0]
+            self._attach_page_instrumentation(self.feed_page, "feed")
         return self.feed_page
 
     def get_detail_page(self) -> Page:
+        if not self.context:
+            raise BrowserDisconnectedError("브라우저 컨텍스트가 존재하지 않습니다.")
+        try:
+            _ = self.context.pages
+        except Exception as e:
+            raise BrowserDisconnectedError(f"브라우저 컨텍스트가 닫혔습니다: {e}")
+
         if not self.detail_page or self.detail_page.is_closed():
-            if self.context:
+            logger.log("[SESSION] 상세 페이지가 닫혀 있어 새 페이지를 생성합니다.")
+            try:
                 self.detail_page = self.context.new_page()
+                self._attach_page_instrumentation(self.detail_page, "detail")
+            except Exception as e:
+                raise BrowserDisconnectedError(f"상세 페이지 생성 실패 (컨텍스트 종료): {e}")
+
         return self.detail_page
 
     def get_gemini_page(self) -> Page:
+        if not self.context:
+            raise BrowserDisconnectedError("브라우저 컨텍스트가 존재하지 않습니다.")
+        try:
+            _ = self.context.pages
+        except Exception as e:
+            raise BrowserDisconnectedError(f"브라우저 컨텍스트가 닫혔습니다: {e}")
+
         if self.gemini_page and not self.gemini_page.is_closed():
             return self.gemini_page
 
-        if self.context:
-            for p in self.context.pages:
-                try:
-                    if not p.is_closed() and "gemini.google.com" in (p.url or ""):
-                        logger.log("[SESSION] 열려 있는 Gemini 탭을 발견하여 재사용합니다.")
-                        self.gemini_page = p
-                        return self.gemini_page
-                except Exception:
-                    pass
+        for p in self.context.pages:
+            try:
+                if not p.is_closed() and "gemini.google.com" in (p.url or ""):
+                    logger.log("[SESSION] 열려 있는 Gemini 탭을 발견하여 재사용합니다.")
+                    self.gemini_page = p
+                    self._attach_page_instrumentation(p, "gemini")
+                    return self.gemini_page
+            except Exception:
+                pass
 
-            for p in self.context.pages:
-                try:
-                    if not p.is_closed() and p != self.feed_page and p != self.detail_page and p != self.stats_page:
-                        self.gemini_page = p
-                        return self.gemini_page
-                except Exception:
-                    pass
+        for p in self.context.pages:
+            try:
+                if not p.is_closed() and p != self.feed_page and p != self.detail_page and p != self.stats_page:
+                    self.gemini_page = p
+                    self._attach_page_instrumentation(p, "gemini")
+                    return self.gemini_page
+            except Exception:
+                pass
 
-            self.gemini_page = self.context.new_page()
-            return self.gemini_page
-
-        raise RuntimeError("브라우저 세션 컨텍스트가 초기화되지 않았습니다.")
+        self.gemini_page = self.context.new_page()
+        self._attach_page_instrumentation(self.gemini_page, "gemini")
+        return self.gemini_page
 
     def get_stats_page(self) -> Page:
+        if not self.context:
+            raise BrowserDisconnectedError("브라우저 컨텍스트가 존재하지 않습니다.")
+        try:
+            _ = self.context.pages
+        except Exception as e:
+            raise BrowserDisconnectedError(f"브라우저 컨텍스트가 닫혔습니다: {e}")
+
         if self.stats_page and not self.stats_page.is_closed():
             return self.stats_page
 
-        if self.context:
-            self.stats_page = self.context.new_page()
-            return self.stats_page
+        self.stats_page = self.context.new_page()
+        self._attach_page_instrumentation(self.stats_page, "stats")
+        return self.stats_page
 
-        raise RuntimeError("브라우저 세션 컨텍스트가 초기화되지 않았습니다.")
+    def close(self, reason: str = "completed"):
+        self._is_closing = True
+        self._closing_reason = reason
 
-    def close(self):
         try:
             if self.stats_page and not self.stats_page.is_closed():
                 self.stats_page.close()
@@ -377,4 +431,4 @@ class BrowserSession:
             time.sleep(0.2)
 
         ProfileLockManager.release(self.user_data_dir)
-        logger.log("[SESSION] 브라우저 세션이 정상 종료되었습니다.")
+        logger.log(f"[SESSION][CLOSED] reason={reason}")

@@ -121,7 +121,7 @@ class MainWindow(ctk.CTk):
 
         subtitle_lbl = ctk.CTkLabel(
             header,
-            text="Human-in-the-loop 피드 순회 · 인기 가드(공감999+/방문자1만+) · Human-Like v3.1 긍정 칭찬 댓글 · Enter 승인",
+            text="Human-in-the-loop 피드 순회 · 인기 가드 · 20대 커뮤니티 리듬 댓글 · Enter 승인",
             font=ctk.CTkFont(size=12),
             text_color="#81C784"
         )
@@ -144,12 +144,12 @@ class MainWindow(ctk.CTk):
         ).grid(row=0, column=1, padx=4, pady=2)
 
         ctk.CTkRadioButton(
-            src_frame, text="🎯 관심주제 탐색 (추천)",
+            src_frame, text="🎯 관심주제 검색 (생활형 검색어)",
             variable=self.source_var, value=FeedSourceType.TARGETED_SEARCH.value, command=self._on_source_change
         ).grid(row=0, column=2, padx=4, pady=2)
 
         ctk.CTkRadioButton(
-            src_frame, text="추천 피드 (보조)",
+            src_frame, text="네이버 추천 피드 (보조/실험)",
             variable=self.source_var, value=FeedSourceType.RECOMMENDATION.value, command=self._on_source_change
         ).grid(row=0, column=3, padx=4, pady=2)
 
