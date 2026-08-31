@@ -3,13 +3,13 @@
   "name": "Naver Assistant Gemini Bridge",
   "version": "13.2.3",
   "description": "Connects the local Naver Blog Assistant to the already signed-in Gemini tab.",
-  "permissions": [],
+  "permissions": ["scripting", "tabs"],
   "host_permissions": ["http://127.0.0.1/*", "https://gemini.google.com/*"],
   "background": {"service_worker": "background.js"},
   "action": {"default_popup": "popup.html", "default_title": "Gemini Bridge"},
   "content_scripts": [{
     "matches": ["https://gemini.google.com/*"],
-    "js": ["content.js"],
+    "js": ["bootstrap.js"],
     "run_at": "document_idle"
   }],
   "web_accessible_resources": [{
