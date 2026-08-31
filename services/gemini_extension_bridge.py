@@ -87,7 +87,7 @@ from services.runtime_contract import load_runtime_contract
 
 
 class GeminiExtensionBridge:
-    HEARTBEAT_TTL = 12.0
+    HEARTBEAT_TTL = 35.0
     COMMAND_TTL = 90.0
 
     def __init__(
@@ -228,8 +228,8 @@ class GeminiExtensionBridge:
                 self._extension_version, self._content_build, self._protocol_version, self._bridge_schema_version, age_ms
             )
 
-    def await_ready(self, timeout: float = 3.0, stop_event: Optional[threading.Event] = None) -> GeminiPreflight:
-        """피드 작업 시작 시 단기 유예 시간(3초)을 두고 ready 상태를 대기"""
+    def await_ready(self, timeout: float = 5.0, stop_event: Optional[threading.Event] = None) -> GeminiPreflight:
+        """피드 작업 시작 시 단기 유예 시간(5초)을 두고 ready 상태를 대기"""
         deadline = time.monotonic() + max(0.1, timeout)
         while time.monotonic() < deadline:
             if stop_event and stop_event.is_set():

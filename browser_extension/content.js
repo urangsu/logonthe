@@ -307,6 +307,10 @@
   // Register ping message handler
   const messageListener = (message, _sender, sendResponse) => {
     if (isStopped) return false;
+    if (message.type === 'TRIGGER_HEARTBEAT') {
+      tick().then(() => sendResponse({ ok: true })).catch(() => sendResponse({ ok: false }));
+      return true;
+    }
     if (message.type === 'NFA_RUNTIME_PING') {
       sendResponse({
         ok: true,

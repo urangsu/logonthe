@@ -39,7 +39,7 @@ class GeminiExtensionBridgeTests(unittest.TestCase):
     def test_gem_conn_003_heartbeat_stale(self):
         bridge = GeminiExtensionBridge()
         bridge.record_heartbeat("ready", "Gemini", "https://gemini.google.com/app", "13.2.3", "13.2.3-r3", 3, 2)
-        bridge._heartbeat_at = time.time() - 20.0
+        bridge._heartbeat_at = time.time() - 50.0
         pf = bridge.preflight()
         self.assertFalse(pf.ready)
         self.assertEqual(pf.status, "heartbeat_stale")

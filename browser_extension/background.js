@@ -130,6 +130,22 @@ chrome.tabs.onUpdated.addListener((tabId, changeInfo, tab) => {
   }
 });
 
+// Periodically wake and trigger heartbeats in background Gemini tabs (defeats tab throttling)
+async function keepaliveHeartbeats() {
+  try {
+    const tabs = await chrome.tabs.query({ url: '*://gemini.google.com/*' });
+    for (const tab of tabs) {
+      if (!tab.id) continue;
+      chrome.tabs.sendMessage(tab.id, { type: 'TRIGGER_HEARTBEAT' }, () => {
+        void chrome.runtime.lastError;
+      });
+    }
+  } catch (_) {}
+}
+
+setInterval(keepaliveHeartbeats, 3000);
+keepaliveHeartbeats().catch(() => {});
+
 // Re-inject into Gemini tabs on service worker wake
 ensureAllGeminiTabs().catch(() => {});
 
