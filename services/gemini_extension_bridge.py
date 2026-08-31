@@ -347,9 +347,22 @@ class GeminiBridgeHTTPServer:
                 body = json.dumps(payload, ensure_ascii=False).encode("utf-8")
                 self.send_response(status)
                 self.send_header("Content-Type", "application/json; charset=utf-8")
+                self.send_header("Access-Control-Allow-Origin", "*")
+                self.send_header("Access-Control-Allow-Methods", "GET, POST, OPTIONS")
+                self.send_header("Access-Control-Allow-Headers", "Content-Type, Authorization, X-Requested-With")
+                self.send_header("Cache-Control", "no-store, no-cache, must-revalidate")
                 self.send_header("Content-Length", str(len(body)))
                 self.end_headers()
                 self.wfile.write(body)
+
+            def do_OPTIONS(self):
+                self.send_response(204)
+                self.send_header("Access-Control-Allow-Origin", "*")
+                self.send_header("Access-Control-Allow-Methods", "GET, POST, OPTIONS")
+                self.send_header("Access-Control-Allow-Headers", "Content-Type, Authorization, X-Requested-With")
+                self.send_header("Access-Control-Max-Age", "86400")
+                self.send_header("Content-Length", "0")
+                self.end_headers()
 
             def _payload(self):
                 length = int(self.headers.get("Content-Length", "0") or 0)
@@ -390,6 +403,21 @@ class GeminiBridgeHTTPServer:
             self.bridge.bridge_server_error = ""
             self._thread = threading.Thread(target=self._server.serve_forever, daemon=True)
             self._thread.start()
+
+            # Execute loopback self-test on /v1/status
+            self_test_status = "FAIL"
+            try:
+                import http.client
+                conn = http.client.HTTPConnection(self.host, self.port, timeout=1.0)
+                conn.request("GET", "/v1/status")
+                resp = conn.getresponse()
+                if resp.status == 200:
+                    self_test_status = "PASS"
+                conn.close()
+            except Exception as st_err:
+                self_test_status = f"FAIL({st_err})"
+
+            logger.log(f"[GEMINI][BRIDGE_SERVER] bind={self.host}:{self.port} selfTest={self_test_status}")
         except Exception as e:
             self.bridge.bridge_server_started = False
             self.bridge.bridge_server_error = str(e)

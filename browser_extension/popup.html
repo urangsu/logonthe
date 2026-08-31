@@ -1,15 +1,58 @@
 <!doctype html>
-<meta charset="utf-8">
-<style>
-body{font:13px system-ui;width:320px;padding:14px;color:#111;background:#fff}
-strong{font-size:14px}
-button{width:100%;padding:8px 10px;margin-top:8px;cursor:pointer}
-#status{margin-top:10px;padding:9px;border-radius:8px;background:#f5f5f5;white-space:pre-wrap;word-break:break-word}
-#contract{margin-top:8px;color:#666;font-size:11px;white-space:pre-wrap}
-</style>
-<strong>Naver Assistant Gemini Bridge</strong>
-<p>앱을 실행하고 로그인된 Gemini 탭을 열어 두면 자동으로 연결됩니다.</p>
-<button id="diagnose">연결 복구 / 진단</button>
-<div id="status">상태 확인 대기</div>
-<div id="contract"></div>
-<script src="popup.js"></script>
+<html>
+<head>
+  <meta charset="utf-8">
+  <style>
+    body { font: 13px system-ui, -apple-system, sans-serif; width: 340px; padding: 14px; margin: 0; color: #111; background: #fff; }
+    h3 { margin: 0 0 10px 0; font-size: 14px; font-weight: 600; display: flex; align-items: center; justify-content: space-between; }
+    .sec { background: #f8f9fa; border: 1px solid #e1e4e8; border-radius: 6px; padding: 10px; margin-bottom: 10px; }
+    .sec-title { font-size: 12px; font-weight: 600; color: #444; margin-bottom: 6px; border-bottom: 1px solid #eaecef; padding-bottom: 4px; }
+    .row { display: flex; justify-content: space-between; margin: 3px 0; font-size: 12px; }
+    .label { color: #555; }
+    .val { font-weight: 500; }
+    .badge { display: inline-block; padding: 1px 6px; border-radius: 4px; font-size: 11px; font-weight: 600; }
+    .badge-ok { background: #e6f4ea; color: #137333; }
+    .badge-warn { background: #fef7e0; color: #b06000; }
+    .badge-err { background: #fce8e6; color: #c5221f; }
+    .badge-info { background: #e8f0fe; color: #1a73e8; }
+    .btn { background: #1a73e8; color: #fff; border: none; border-radius: 4px; padding: 8px 12px; width: 100%; font-size: 12px; font-weight: 500; cursor: pointer; margin-top: 4px; }
+    .btn:hover { background: #1557b0; }
+    .btn:disabled { background: #ccc; cursor: not-allowed; }
+    .hint { font-size: 11px; color: #666; margin-top: 6px; line-height: 1.4; }
+  </style>
+</head>
+<body>
+  <h3>
+    <span>Naver Assistant Gemini Bridge</span>
+    <span id="badgeOverall" class="badge badge-info">13.2.3-r3</span>
+  </h3>
+
+  <!-- 1. Runtime State -->
+  <div class="sec">
+    <div class="sec-title">1. Gemini Tab Runtime</div>
+    <div class="row"><span class="label">Gemini 탭:</span><span id="txtGeminiTabs" class="val">-</span></div>
+    <div class="row"><span class="label">Content Runtime:</span><span id="txtContentBuild" class="val">13.2.3-r3</span></div>
+    <div class="row"><span class="label">Runtime Ping:</span><span id="txtRuntimePing" class="val">-</span></div>
+  </div>
+
+  <!-- 2. Local Bridge & LNA Transport -->
+  <div class="sec">
+    <div class="sec-title">2. Local Bridge (LNA Transport)</div>
+    <div class="row"><span class="label">Python Bridge:</span><span id="txtBridgeTarget" class="val">127.0.0.1:43127</span></div>
+    <div class="row"><span class="label">Loopback Permission:</span><span id="txtLoopbackPerm" class="val">-</span></div>
+    <div class="row"><span class="label">Foreground Direct HTTP:</span><span id="txtDirectProbe" class="val">-</span></div>
+  </div>
+
+  <!-- 3. Heartbeat Status -->
+  <div class="sec">
+    <div class="sec-title">3. Bridge Heartbeat Status</div>
+    <div class="row"><span class="label">Status:</span><span id="txtHeartbeatStatus" class="val">-</span></div>
+    <div class="row"><span class="label">Heartbeat Age:</span><span id="txtHeartbeatAge" class="val">-</span></div>
+  </div>
+
+  <button id="btnRecover" class="btn">로컬 브리지 연결 허용 및 자동 복구</button>
+  <div class="hint">Chrome 142+ Local Network Access(LNA) 정책에 따라 팝업에서 직접 127.0.0.1 연결 권한을 확인하고 Gemini 탭을 동기화합니다.</div>
+
+  <script src="popup.js"></script>
+</body>
+</html>

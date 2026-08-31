@@ -19,7 +19,7 @@ const EDITOR_SELECTORS = [
 const RESPONSE_SELECTORS = 'model-response';
 let runtimeContract = {
   extensionVersion: '13.2.3',
-  runtimeBuild: '13.2.3-r2',
+  runtimeBuild: '13.2.3-r3',
   protocolVersion: 3,
   bridgeSchemaVersion: 2
 };

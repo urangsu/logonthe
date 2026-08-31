@@ -24,7 +24,11 @@ async function bridgeFetch(path, method = 'GET', body = null) {
     if (!response.ok) throw new Error(data.error || `http_${response.status}`);
     return data;
   } catch (error) {
-    const isNetwork = /fetch|connect|network|econnrefused/i.test(String(error?.message || error));
+    const msg = String(error?.message || error);
+    if (/permission|blocked|denied|security/i.test(msg)) {
+      throw new Error('local_network_access_blocked');
+    }
+    const isNetwork = /fetch|connect|network|econnrefused/i.test(msg);
     if (isNetwork) {
       throw new Error('loopback_bridge_unreachable');
     }

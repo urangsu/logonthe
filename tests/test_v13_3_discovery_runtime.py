@@ -171,7 +171,7 @@ class TestV133DiscoveryAndRuntime(unittest.TestCase):
         """runtime_contract.json과 manifest.json 및 Python loader 일치 검증"""
         contract = load_runtime_contract()
         self.assertEqual(contract.extension_version, "13.2.3")
-        self.assertEqual(contract.runtime_build, "13.2.3-r2")
+        self.assertEqual(contract.runtime_build, "13.2.3-r3")
         self.assertEqual(contract.protocol_version, 3)
         self.assertEqual(contract.bridge_schema_version, 2)
 
@@ -185,6 +185,16 @@ class TestV133DiscoveryAndRuntime(unittest.TestCase):
         with patch("os.path.exists", return_value=False):
             with self.assertRaises(RuntimeContractError):
                 load_runtime_contract()
+
+    def test_disc_009_popup_direct_foreground_probe_static_check(self):
+        """popup.js가 background를 거치지 않고 foreground에서 직접 /v1/status를 fetch하는지 정적 검증"""
+        popup_js_path = os.path.join(WORKSPACE_DIR, "browser_extension", "popup.js")
+        with open(popup_js_path, "r", encoding="utf-8") as f:
+            content = f.read()
+
+        self.assertIn("fetch(`${BASE}/v1/status`", content)
+        self.assertIn("directForegroundProbe()", content)
+        self.assertIn("btnRecover", content)
 
     def test_session_001_and_002_page_closed_retries_with_new_page(self):
         exc = Exception("Target page, context or browser has been closed")
