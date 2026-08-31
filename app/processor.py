@@ -59,8 +59,10 @@ class PostProcessor:
         stop_event: Optional[threading.Event] = None,
         pause_event: Optional[threading.Event] = None,
         gemini_extension_bridge: Optional[GeminiExtensionBridge] = None,
+        session: Optional[Any] = None,
     ):
         self.config = config
+        self.session = session
         self.like_enabled = like_enabled
         self.comment_enabled = comment_enabled
         self.comment_template = comment_template
@@ -121,8 +123,12 @@ class PostProcessor:
         except StopRequestedException:
             raise
         except Exception as e:
-            context = getattr(detail_page, "context", None)
-            failure_kind = classify_playwright_failure(e, page=detail_page, context=context)
+            if self.session is not None and hasattr(self.session, "classify_failure"):
+                failure_kind = self.session.classify_failure(e, page=detail_page)
+            else:
+                context = getattr(detail_page, "context", None)
+                failure_kind = classify_playwright_failure(e, page=detail_page, context=context)
+
             if failure_kind in (BrowserFailureKind.CONTEXT_CLOSED, BrowserFailureKind.BROWSER_DISCONNECTED):
                 logger.log(f"💥 [POST] 브라우저/컨텍스트 종료 감지 ({failure_kind.value}): {e}", "ERROR")
                 raise BrowserDisconnectedError(f"브라우저 또는 컨텍스트가 종료되었습니다: {e}")

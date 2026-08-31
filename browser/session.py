@@ -292,6 +292,10 @@ class BrowserSession:
             self._context_closed = True
             return False
 
+    def classify_failure(self, exc: Exception, page: Optional[Page] = None):
+        from app.errors import classify_playwright_failure
+        return classify_playwright_failure(exc, page=page, context=self.context, session=self)
+
     def _attach_page_instrumentation(self, page: Page, role: str):
         try:
             page.on("close", lambda p: logger.log(f"[SESSION][PAGE_CLOSED] role={role} url={getattr(p, 'url', '')} expected={self._is_closing}"))

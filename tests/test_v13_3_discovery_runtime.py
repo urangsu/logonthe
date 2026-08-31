@@ -17,7 +17,7 @@ from app.errors import (
 from naver.discovery.query_pool import QueryRotator, QuerySpec
 from naver.discovery.topic_filter import DiscoveryTopicFilter
 from naver.sources import RecommendationFeedSource, TargetedSearchFeedSource
-from services.runtime_contract import load_runtime_contract, WORKSPACE_DIR
+from services.runtime_contract import load_runtime_contract, RuntimeContractError, WORKSPACE_DIR
 
 
 class TestV133DiscoveryAndRuntime(unittest.TestCase):
@@ -28,21 +28,53 @@ class TestV133DiscoveryAndRuntime(unittest.TestCase):
         self.assertIn(spec.category, ["FOOD", "CAFE"])
         self.assertEqual(rotator.current_query, spec.query)
 
-    def test_disc_001b_targeted_search_controller_contract_integration(self):
-        """FeedController -> TARGETED_SEARCH -> TargetedSearchFeedSource integration check"""
-        page = MagicMock()
-        source = TargetedSearchFeedSource(
-            page,
-            max_items=10,
-            stop_event=threading.Event(),
-            enabled_categories=["FOOD", "CAFE"],
-            custom_queries=["맛집"],
-            posts_per_query=3
+    def test_disc_001b_single_query_advance_on_quota(self):
+        """posts_per_query=2일 때 1개 발견시 유지, 2개 발견시 정확히 1칸 이동 검증 (더블 스킵 방지)"""
+        rotator = QueryRotator(
+            enabled_categories=["FOOD"],
+            custom_queries=["쿼리1", "쿼리2", "쿼리3"],
+            posts_per_query=2
         )
-        self.assertEqual(source.max_items, 10)
-        self.assertFalse(source.is_exhausted())
-        self.assertTrue(hasattr(source, "load_more"))
-        self.assertTrue(hasattr(source, "discover_posts"))
+        rotator.specs = [
+            QuerySpec("FOOD", "쿼리1"),
+            QuerySpec("FOOD", "쿼리2"),
+            QuerySpec("FOOD", "쿼리3"),
+        ]
+        rotator._current_index = 0
+        rotator._current_query_post_count = 0
+
+        self.assertEqual(rotator.current_query, "쿼리1")
+        # 1st post found -> stays on 쿼리1
+        should_switch = rotator.record_post_found()
+        self.assertFalse(should_switch)
+        self.assertEqual(rotator.current_query, "쿼리1")
+
+        # 2nd post found -> advances exactly to 쿼리2, NEVER to 쿼리3!
+        should_switch = rotator.record_post_found()
+        self.assertTrue(should_switch)
+        self.assertEqual(rotator.current_query, "쿼리2")
+
+    def test_disc_001c_load_more_advances_query_when_no_new_unique_cards(self):
+        """스크롤 후 새 유니크 카드가 없으면 다음 검색어로 이동"""
+        page = MagicMock()
+        rotator = QueryRotator(
+            enabled_categories=["FOOD"],
+            custom_queries=["쿼리A", "쿼리B"],
+            posts_per_query=2
+        )
+        rotator.specs = [
+            QuerySpec("FOOD", "쿼리A"),
+            QuerySpec("FOOD", "쿼리B"),
+        ]
+        rotator._current_index = 0
+
+        source = TargetedSearchFeedSource(page, rotator=rotator)
+        source._get_card_fingerprints = MagicMock(return_value={"https://m.blog.naver.com/user/1"})
+
+        # load_more executes scroll but fingerprints are identical (no new cards)
+        with patch.object(source, "_switch_to_next_query") as mock_switch:
+            source.load_more()
+            mock_switch.assert_called_once()
 
     def test_disc_002_same_blog_second_post_skipped(self):
         page = MagicMock()
@@ -147,6 +179,12 @@ class TestV133DiscoveryAndRuntime(unittest.TestCase):
         with open(manifest_path, "r", encoding="utf-8") as f:
             manifest = json.load(f)
         self.assertEqual(manifest["version"], contract.extension_version)
+
+    def test_disc_008_runtime_contract_fail_closed_on_missing(self):
+        """runtime_contract.json 파일 누락시 RuntimeContractError 발생 검증 (Fail-Closed)"""
+        with patch("os.path.exists", return_value=False):
+            with self.assertRaises(RuntimeContractError):
+                load_runtime_contract()
 
     def test_session_001_and_002_page_closed_retries_with_new_page(self):
         exc = Exception("Target page, context or browser has been closed")

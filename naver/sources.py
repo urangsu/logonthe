@@ -169,9 +169,11 @@ class RecommendationFeedSource(FeedSource):
                 if verification and verification.get("verified"):
                     logger.log(f"✅ [SOURCE] 탐색 탭에서 '[{click_result.get('text')}]' 필터 버튼 클릭 및 활성화 확인 완료")
                 else:
-                    logger.log(f"⚠️ [SOURCE] 탐색 탭 카테고리 버튼('{self.preferred_category}') 클릭됨 (선택 상태 미확인: category_filter_unverified)", "WARNING")
+                    logger.log(f"⚠️ [SOURCE] 탐색 탭 카테고리 버튼('{self.preferred_category}') 클릭됨 (선택 상태 미확인: category_filter_unverified). 원치 않는 주제 수집 방지를 위해 추천 피드 탐색을 안전하게 종료합니다.", "WARNING")
+                    self._exhausted = True
             else:
-                logger.log(f"ℹ️ [SOURCE] 탐색 탭 카테고리 버튼('{self.preferred_category}') 미발견 (전체 탐색 모드 유지)")
+                logger.log(f"⚠️ [SOURCE] 탐색 탭 카테고리 버튼('{self.preferred_category}') 미발견 (안전 종료: category_tab_not_found)", "WARNING")
+                self._exhausted = True
         except Exception as e:
             kind = classify_playwright_failure(e, page=self.page, context=getattr(self.page, "context", None))
             if kind in (BrowserFailureKind.CONTEXT_CLOSED, BrowserFailureKind.BROWSER_DISCONNECTED):

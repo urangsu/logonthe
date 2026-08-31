@@ -192,6 +192,7 @@ class FeedController:
                 stop_event=self.stop_event,
                 pause_event=self.pause_event,
                 gemini_extension_bridge=self.gemini_extension_bridge,
+                session=self.session,
             )
 
             seen_candidate_keys: Set[str] = set()

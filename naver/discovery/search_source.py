@@ -43,6 +43,7 @@ class TargetedSearchFeedSource:
                 posts_per_query=posts_per_query,
             )
 
+        self.scanned_keys: Set[str] = set()
         self.seen_keys: Set[str] = set()
         self.seen_blogs: Set[str] = set()
         self._exhausted = False
@@ -67,10 +68,20 @@ class TargetedSearchFeedSource:
             logger.log(f"[DISCOVERY] 검색 페이지 로드 안내: {e}", "WARNING")
 
     def _switch_to_next_query(self):
-        """할당량 도달 시 다음 검색어로 자동 이동"""
+        """할당량 도달 또는 카드 소진 시 다음 검색어로 전환"""
+        if self.rotator.is_cycle_completed():
+            logger.log("🏁 [DISCOVERY] 모든 관심주제 검색어 풀을 1회 이상 탐색 완료했습니다.")
+            self._exhausted = True
         next_q = self.rotator.next_query()
         logger.log(f"🔄 [DISCOVERY] 다음 검색어로 순환 이동: '{next_q}' (카테고리: {self.rotator.current_category})")
         self._navigate_to_query(next_q)
+
+    def _get_card_fingerprints(self) -> Set[str]:
+        try:
+            links = self.page.locator("a[href*='blog.naver.com/']").all()
+            return {l.get_attribute("href") or "" for l in links if l.get_attribute("href")}
+        except Exception:
+            return set()
 
     def discover_posts(self) -> List[FeedPost]:
         discovered = []
@@ -149,6 +160,7 @@ class TargetedSearchFeedSource:
                 if not post:
                     continue
 
+                self.scanned_keys.add(post.key)
                 cards_parsed += 1
 
                 # 5. 세션 중복 체크 (포스트 및 동일 블로거 중복 방지)
@@ -185,10 +197,11 @@ class TargetedSearchFeedSource:
                 discovered.append(post)
                 logger.log(f"  [DISCOVERY] 추천 글 발굴: '{post.title[:32]}...' ({post.blog_id})")
 
-                # 검색어별 포스트 할당량 도달 시 쿼리 순환
+                # 검색어별 포스트 할당량 도달 시 쿼리 순환 (record_post_found 내부에서 이미 next_query 완료)
                 should_switch = self.rotator.record_post_found()
                 if should_switch:
-                    self._switch_to_next_query()
+                    logger.log(f"🔄 [DISCOVERY] 검색어 할당량 도달 -> 다음 검색어로 이동: '{self.rotator.current_query}' (카테고리: {self.rotator.current_category})")
+                    self._navigate_to_query(self.rotator.current_query)
                     break
 
             except Exception as e:
@@ -200,7 +213,7 @@ class TargetedSearchFeedSource:
 
         logger.log(
             f"[DISCOVERY_SUMMARY] query=\"{self.rotator.current_query}\" "
-            f"seen={cards_seen} parsed={cards_parsed} allowed={len(discovered)} "
+            f"scannedUnique={len(self.scanned_keys)} seen={cards_seen} parsed={cards_parsed} allowed={len(discovered)} "
             f"topicBlocked={cards_topic_blocked} sameBlog={cards_same_blog} domError={card_dom_errors}"
         )
 
@@ -211,22 +224,15 @@ class TargetedSearchFeedSource:
         if self._exhausted:
             return False
         try:
+            before_fingerprints = self._get_card_fingerprints()
             self.page.evaluate("window.scrollBy(0, 1000)")
             interruptible_wait(self.stop_event, 1.2)
-            card_selectors = [
-                ".api_subject_bx .bx",
-                "li.bx",
-                ".view_wrap",
-                ".total_wrap",
-                ".fds-comps-feed-item",
-                ".detail_box"
-            ]
-            has_cards = False
-            for sel in card_selectors:
-                if self.page.locator(sel).count() > 0:
-                    has_cards = True
-                    break
-            if not has_cards:
+            after_fingerprints = self._get_card_fingerprints()
+
+            new_unique = after_fingerprints - before_fingerprints
+            if not new_unique:
+                # 스크롤 후에도 새 유니크 카드가 없으면 다음 검색어로 이동
+                logger.log(f"ℹ️ [DISCOVERY] 현재 검색어('{self.rotator.current_query}')에 새 결과 없음 -> 다음 검색어 이동")
                 self._switch_to_next_query()
             return True
         except Exception as e:

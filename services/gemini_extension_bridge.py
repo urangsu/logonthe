@@ -177,8 +177,8 @@ class GeminiExtensionBridge:
 
             identity_ok = (
                 self._content_build == self._expected_build_id
-                and self._protocol_version == 3
-                and self._bridge_schema_version == 2
+                and self._protocol_version == self._protocol_version_expected
+                and self._bridge_schema_version == self._bridge_schema_version_expected
             )
             if not identity_ok:
                 return GeminiPreflight(

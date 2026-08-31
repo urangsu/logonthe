@@ -93,6 +93,8 @@ class QueryRotator:
 
         self._current_index = 0
         self._current_query_post_count = 0
+        self._visited_query_indices: Set[int] = {0}
+        self._total_cycles = 0
 
     @property
     def current_spec(self) -> QuerySpec:
@@ -123,4 +125,12 @@ class QueryRotator:
         """강제로 다음 쿼리로 전환"""
         self._current_index += 1
         self._current_query_post_count = 0
+        idx = self._current_index % len(self.specs)
+        self._visited_query_indices.add(idx)
+        if len(self._visited_query_indices) >= len(self.specs):
+            self._total_cycles += 1
         return self.current_query
+
+    def is_cycle_completed(self) -> bool:
+        """전체 검색어 풀을 최소 1회 이상 순환 완료했는지 여부"""
+        return self._total_cycles >= 1 or len(self._visited_query_indices) >= len(self.specs)
