@@ -95,7 +95,7 @@ class FeedController:
 
         if comment_enabled and gemini_web_enabled and gemini_browser_mode == "extension_existing_chrome":
             if self.gemini_extension_bridge:
-                preflight = self.gemini_extension_bridge.await_ready(timeout=3.0, stop_event=self.stop_event)
+                preflight = self.gemini_extension_bridge.await_ready(timeout=6.0, stop_event=self.stop_event)
                 if not preflight.ready:
                     self.state_mgr.update(new_state=FeedState.ERROR, message=f"Gemini 확장 연결 실패: {preflight.status}")
                     logger.log(
