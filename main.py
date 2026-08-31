@@ -6,10 +6,12 @@ if BASE_DIR not in sys.path:
     sys.path.insert(0, BASE_DIR)
 
 from ui.main_window import MainWindow
+from ui.log_clipboard_support import install_log_clipboard_support
 
 
 def main():
     app = MainWindow()
+    install_log_clipboard_support(app)
     app.mainloop()
 
 
