@@ -15,10 +15,10 @@ from services.gemini_extension_bridge import (
 
 class GeminiExtensionBridgeTests(unittest.TestCase):
     def test_preflight_requires_fresh_ready_heartbeat(self):
-        bridge = GeminiExtensionBridge(expected_extension_version="13.2.3", expected_build_id="13.2.3-r1")
+        bridge = GeminiExtensionBridge(expected_extension_version="13.2.3", expected_build_id="13.2.3-r2")
         self.assertFalse(bridge.preflight().ready)
         self.assertEqual(bridge.preflight().status, "heartbeat_never_received")
-        bridge.record_heartbeat("ready", "Gemini", "https://gemini.google.com/app", "13.2.3", "13.2.3-r1", 3, 2)
+        bridge.record_heartbeat("ready", "Gemini", "https://gemini.google.com/app", "13.2.3", "13.2.3-r2", 3, 2)
         self.assertTrue(bridge.preflight().ready)
         self.assertEqual(bridge.preflight().status, "ready")
 
@@ -38,7 +38,7 @@ class GeminiExtensionBridgeTests(unittest.TestCase):
 
     def test_gem_conn_003_heartbeat_stale(self):
         bridge = GeminiExtensionBridge()
-        bridge.record_heartbeat("ready", "Gemini", "https://gemini.google.com/app", "13.2.3", "13.2.3-r1", 3, 2)
+        bridge.record_heartbeat("ready", "Gemini", "https://gemini.google.com/app", "13.2.3", "13.2.3-r2", 3, 2)
         bridge._heartbeat_at = time.time() - 20.0
         pf = bridge.preflight()
         self.assertFalse(pf.ready)
@@ -46,38 +46,38 @@ class GeminiExtensionBridgeTests(unittest.TestCase):
 
     def test_gem_conn_004_extension_version_mismatch(self):
         bridge = GeminiExtensionBridge(expected_extension_version="13.2.3")
-        bridge.record_heartbeat("ready", "Gemini", "https://gemini.google.com/app", "13.2.0", "13.2.3-r1", 3, 2)
+        bridge.record_heartbeat("ready", "Gemini", "https://gemini.google.com/app", "13.2.0", "13.2.3-r2", 3, 2)
         pf = bridge.preflight()
         self.assertFalse(pf.ready)
         self.assertEqual(pf.status, "extension_version_mismatch")
 
     def test_gem_conn_005_extension_identity_mismatch(self):
-        bridge = GeminiExtensionBridge(expected_extension_version="13.2.3", expected_build_id="13.2.3-r1")
+        bridge = GeminiExtensionBridge(expected_extension_version="13.2.3", expected_build_id="13.2.3-r2")
         bridge.record_heartbeat("ready", "Gemini", "https://gemini.google.com/app", "13.2.3", "wrong-build", 3, 2)
         pf = bridge.preflight()
         self.assertFalse(pf.ready)
         self.assertEqual(pf.status, "extension_identity_mismatch")
 
     def test_gem_conn_006_auth_required(self):
-        bridge = GeminiExtensionBridge(expected_extension_version="13.2.3", expected_build_id="13.2.3-r1")
-        bridge.record_heartbeat("auth_required", "Gemini", "https://gemini.google.com/app", "13.2.3", "13.2.3-r1", 3, 2)
+        bridge = GeminiExtensionBridge(expected_extension_version="13.2.3", expected_build_id="13.2.3-r2")
+        bridge.record_heartbeat("auth_required", "Gemini", "https://gemini.google.com/app", "13.2.3", "13.2.3-r2", 3, 2)
         pf = bridge.preflight()
         self.assertFalse(pf.ready)
         self.assertEqual(pf.status, "auth_required")
 
     def test_gem_conn_007_dom_unsupported(self):
-        bridge = GeminiExtensionBridge(expected_extension_version="13.2.3", expected_build_id="13.2.3-r1")
-        bridge.record_heartbeat("dom_unsupported", "Gemini", "https://gemini.google.com/app", "13.2.3", "13.2.3-r1", 3, 2)
+        bridge = GeminiExtensionBridge(expected_extension_version="13.2.3", expected_build_id="13.2.3-r2")
+        bridge.record_heartbeat("dom_unsupported", "Gemini", "https://gemini.google.com/app", "13.2.3", "13.2.3-r2", 3, 2)
         pf = bridge.preflight()
         self.assertFalse(pf.ready)
         self.assertEqual(pf.status, "dom_unsupported")
 
     def test_gem_conn_008_await_ready_grace_success(self):
-        bridge = GeminiExtensionBridge(expected_extension_version="13.2.3", expected_build_id="13.2.3-r1")
+        bridge = GeminiExtensionBridge(expected_extension_version="13.2.3", expected_build_id="13.2.3-r2")
 
         def delayed_heartbeat():
             time.sleep(0.2)
-            bridge.record_heartbeat("ready", "Gemini", "https://gemini.google.com/app", "13.2.3", "13.2.3-r1", 3, 2)
+            bridge.record_heartbeat("ready", "Gemini", "https://gemini.google.com/app", "13.2.3", "13.2.3-r2", 3, 2)
 
         threading.Thread(target=delayed_heartbeat, daemon=True).start()
         pf = bridge.await_ready(timeout=1.0)

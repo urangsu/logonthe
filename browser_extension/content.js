@@ -1,3 +1,15 @@
+// Clean up existing content script runtime if present in this tab
+if (globalThis.__NFA_GEMINI_RUNTIME__ && typeof globalThis.__NFA_GEMINI_RUNTIME__.stop === 'function') {
+  try {
+    globalThis.__NFA_GEMINI_RUNTIME__.stop();
+  } catch (_) {}
+}
+
+const INSTANCE_ID = Math.random().toString(36).slice(2, 10);
+let isStopped = false;
+let tickTimer = null;
+const eventCleanups = [];
+
 const EDITOR_SELECTORS = [
   'rich-textarea div[contenteditable="true"]',
   'div.ql-editor[contenteditable="true"]',
@@ -7,7 +19,7 @@ const EDITOR_SELECTORS = [
 const RESPONSE_SELECTORS = 'model-response';
 let runtimeContract = {
   extensionVersion: '13.2.3',
-  runtimeBuild: '13.2.3-r1',
+  runtimeBuild: '13.2.3-r2',
   protocolVersion: 3,
   bridgeSchemaVersion: 2
 };
@@ -21,6 +33,9 @@ try {
         protocolVersion: res.data.protocolVersion || runtimeContract.protocolVersion,
         bridgeSchemaVersion: res.data.bridgeSchemaVersion || runtimeContract.bridgeSchemaVersion
       };
+      if (globalThis.__NFA_GEMINI_RUNTIME__) {
+        globalThis.__NFA_GEMINI_RUNTIME__.build = runtimeContract.runtimeBuild;
+      }
     }
   });
 } catch (_) {}
@@ -29,7 +44,34 @@ let lastRequestId = null;
 let busy = false;
 let lastBridgeFailLog = 0;
 
+function stopRuntime() {
+  if (isStopped) return;
+  isStopped = true;
+  if (tickTimer) {
+    clearInterval(tickTimer);
+    tickTimer = null;
+  }
+  while (eventCleanups.length > 0) {
+    const cleanup = eventCleanups.pop();
+    try { cleanup(); } catch (_) {}
+  }
+  if (globalThis.__NFA_GEMINI_RUNTIME__?.instanceId === INSTANCE_ID) {
+    delete globalThis.__NFA_GEMINI_RUNTIME__;
+  }
+}
+
+function checkExtensionInvalidated(err) {
+  const msg = String(err?.message || err || '');
+  if (msg.includes('Extension context invalidated')) {
+    stopRuntime();
+    return true;
+  }
+  return false;
+}
+
 function logBridgeFail(stage, err) {
+  if (isStopped) return;
+  if (checkExtensionInvalidated(err)) return;
   const now = Date.now();
   if (now - lastBridgeFailLog > 5000) {
     lastBridgeFailLog = now;
@@ -63,16 +105,27 @@ function pageStatus() {
 }
 
 function bridgeFetch(path, method = 'GET', body = null) {
+  if (isStopped) return Promise.reject(new Error('runtime_stopped'));
   return new Promise((resolve, reject) => {
-    chrome.runtime.sendMessage({ type: 'bridgeFetch', path, method, body }, response => {
-      if (chrome.runtime.lastError) return reject(chrome.runtime.lastError);
-      if (!response?.ok) return reject(new Error(response?.error || 'bridge_error'));
-      resolve(response.data);
-    });
+    try {
+      chrome.runtime.sendMessage({ type: 'bridgeFetch', path, method, body }, response => {
+        if (chrome.runtime.lastError) {
+          const err = chrome.runtime.lastError;
+          if (checkExtensionInvalidated(err)) return reject(new Error('Extension context invalidated'));
+          return reject(err);
+        }
+        if (!response?.ok) return reject(new Error(response?.error || 'bridge_error'));
+        resolve(response.data);
+      });
+    } catch (e) {
+      if (checkExtensionInvalidated(e)) return reject(new Error('Extension context invalidated'));
+      reject(e);
+    }
   });
 }
 
 async function heartbeat() {
+  if (isStopped) return;
   try {
     await bridgeFetch('/v1/heartbeat', 'POST', {
       status: pageStatus(),
@@ -85,7 +138,9 @@ async function heartbeat() {
       bridgeSchemaVersion: runtimeContract.bridgeSchemaVersion
     });
   } catch (err) {
-    logBridgeFail('heartbeat', err);
+    if (!checkExtensionInvalidated(err)) {
+      logBridgeFail('heartbeat', err);
+    }
     throw err;
   }
 }
@@ -119,35 +174,49 @@ function findSendControl() {
       b.getAttribute('data-tooltip'),
       b.getAttribute('title'),
       b.innerText
-    ].filter(Boolean).join(' ');
-    return /보내기|전송|메시지 보내기|send message|send/i.test(label);
+    ].join(' ').toLowerCase();
+    return /보내기|전송|send|submit/i.test(label) || b.querySelector('mat-icon[data-mat-icon-name="send"], .send-button-icon');
   });
   return button || null;
 }
 
+function sendPrompt() {
+  const button = findSendControl();
+  if (button && !button.disabled && button.getAttribute('aria-disabled') !== 'true') {
+    button.click();
+    return true;
+  }
+  const el = editor();
+  if (el) {
+    el.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', code: 'Enter', keyCode: 13, which: 13, bubbles: true }));
+    return true;
+  }
+  return false;
+}
+
 function responseNodes() {
-  const primary = [...document.querySelectorAll('model-response')];
-  return primary.length ? primary : [...document.querySelectorAll('div.response-container')];
+  return [...document.querySelectorAll(RESPONSE_SELECTORS)].filter(visible);
 }
 
 function latestResponseText() {
   const nodes = responseNodes();
   if (!nodes.length) return '';
-  const last = nodes[nodes.length - 1];
-  const content = last.querySelector('message-content, div.markdown, div.model-response-text, .response-body-inner') || last;
-  return (content.innerText || '').trim();
+  const latest = nodes[nodes.length - 1];
+  const content = latest.querySelector('message-content, div.markdown, div.model-response-text, .response-body-inner') || latest;
+  return normalizeText(content.innerText || content.textContent);
 }
 
 function generationActive() {
-  const stopButton = [...document.querySelectorAll('button, [role="button"]')].find(b => {
-    const label = [b.getAttribute('aria-label'), b.innerText].filter(Boolean).join(' ');
-    return /답변 중지|생성 중지|중지|stop/i.test(label);
+  const stopButton = [...document.querySelectorAll('button, [role="button"]')].filter(visible).find(b => {
+    const label = (b.getAttribute('aria-label') || b.innerText || '').toLowerCase();
+    return /중지|stop/i.test(label);
   });
-  return Boolean(stopButton && visible(stopButton));
+  return Boolean(stopButton || document.querySelector('.generating, .loading, mat-progress-bar, [aria-busy="true"]'));
 }
 
 async function postResult(command, status, text = '', error = '') {
-  return await bridgeFetch('/v1/result', 'POST', {
+  if (isStopped) return;
+  return bridgeFetch('/v1/result', 'POST', {
     requestId: command.requestId,
     postKey: command.postKey,
     navigationVersion: command.navigationVersion,
@@ -158,30 +227,24 @@ async function postResult(command, status, text = '', error = '') {
 }
 
 async function execute(command) {
+  if (isStopped) return;
   busy = true;
   const initialNodes = responseNodes();
-  const target = editor();
-  if (!target) {
+  const input = editor();
+  if (!input) {
     busy = false;
-    return await postResult(command, 'dom_unsupported', '', 'editor_not_found');
+    return await postResult(command, 'dom_unsupported', '', 'Gemini 입력창을 찾지 못했습니다.');
   }
-  const textSet = setEditorText(target, command.prompt);
-  if (!textSet) {
-    busy = false;
-    return await postResult(command, 'failed', '', 'editor_text_set_failed');
-  }
+
+  setEditorText(input, command.prompt);
   await new Promise(resolve => setTimeout(resolve, 300));
-  const sendButton = findSendControl();
-  if (!sendButton) {
-    busy = false;
-    return await postResult(command, 'failed', '', 'send_button_not_found');
-  }
-  sendButton.click();
+  sendPrompt();
+
   const deadline = Date.now() + Math.min(65000, Math.max(10000, (command.deadlineAt - Date.now() / 1000) * 1000));
   let stableSince = null;
   let previous = '';
   try {
-    while (Date.now() < deadline) {
+    while (Date.now() < deadline && !isStopped) {
       const newNodes = responseNodes().slice(initialNodes.length);
       const current = newNodes.length ? latestResponseText() : '';
       if (current && current !== previous) {
@@ -201,19 +264,24 @@ async function execute(command) {
       }
       await new Promise(resolve => setTimeout(resolve, 350));
     }
-    await postResult(command, 'timeout', '', 'command_deadline_exceeded');
+    if (!isStopped) {
+      await postResult(command, 'timeout', '', 'command_deadline_exceeded');
+    }
   } catch (error) {
-    logBridgeFail('execute', error);
-    await postResult(command, 'failed', '', String(error.message || error)).catch(() => {});
+    if (!checkExtensionInvalidated(error)) {
+      logBridgeFail('execute', error);
+      await postResult(command, 'failed', '', String(error.message || error)).catch(() => {});
+    }
   } finally {
     busy = false;
   }
 }
 
 async function tick() {
+  if (isStopped) return;
   try {
     await heartbeat();
-    if (busy || pageStatus() !== 'ready') return;
+    if (isStopped || busy || pageStatus() !== 'ready') return;
     const data = await bridgeFetch('/v1/command');
     const command = data.command;
     if (!command || command.requestId === lastRequestId) return;
@@ -222,16 +290,56 @@ async function tick() {
     lastRequestId = command.requestId;
     await execute(command);
   } catch (err) {
-    logBridgeFail('tick', err);
+    if (!checkExtensionInvalidated(err)) {
+      logBridgeFail('tick', err);
+    }
   }
 }
 
-setInterval(tick, 1000);
-document.addEventListener('visibilitychange', () => {
-  if (document.visibilityState === 'visible') {
-    tick();
+// Register ping message handler
+const messageListener = (message, _sender, sendResponse) => {
+  if (isStopped) return false;
+  if (message.type === 'NFA_RUNTIME_PING') {
+    sendResponse({
+      ok: true,
+      alive: true,
+      build: runtimeContract.runtimeBuild,
+      version: runtimeContract.extensionVersion,
+      instanceId: INSTANCE_ID,
+      status: pageStatus()
+    });
+    return true;
   }
+  return false;
+};
+
+chrome.runtime.onMessage.addListener(messageListener);
+eventCleanups.push(() => {
+  try {
+    chrome.runtime.onMessage.removeListener(messageListener);
+  } catch (_) {}
 });
+
+// Setup tick intervals and visibility listeners
+tickTimer = setInterval(tick, 1000);
+
+const onVisibilityChange = () => {
+  if (document.visibilityState === 'visible') tick();
+};
+document.addEventListener('visibilitychange', onVisibilityChange);
+eventCleanups.push(() => document.removeEventListener('visibilitychange', onVisibilityChange));
+
 window.addEventListener('focus', tick);
+eventCleanups.push(() => window.removeEventListener('focus', tick));
+
 window.addEventListener('pageshow', tick);
+eventCleanups.push(() => window.removeEventListener('pageshow', tick));
+
+globalThis.__NFA_GEMINI_RUNTIME__ = {
+  build: runtimeContract.runtimeBuild,
+  instanceId: INSTANCE_ID,
+  stop: stopRuntime,
+  ping: () => ({ alive: !isStopped, build: runtimeContract.runtimeBuild, instanceId: INSTANCE_ID })
+};
+
 tick();

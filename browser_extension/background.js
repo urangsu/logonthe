@@ -14,33 +14,37 @@ async function getRuntimeContract() {
 }
 
 async function bridgeFetch(path, method = 'GET', body = null) {
-  const response = await fetch(`${BASE}${path}`, {
-    method,
-    headers: { 'Content-Type': 'application/json' },
-    body: body ? JSON.stringify(body) : undefined
-  });
-  const data = await response.json();
-  if (!response.ok) throw new Error(data.error || `http_${response.status}`);
-  return data;
+  try {
+    const response = await fetch(`${BASE}${path}`, {
+      method,
+      headers: { 'Content-Type': 'application/json' },
+      body: body ? JSON.stringify(body) : undefined
+    });
+    const data = await response.json();
+    if (!response.ok) throw new Error(data.error || `http_${response.status}`);
+    return data;
+  } catch (error) {
+    const isNetwork = /fetch|connect|network|econnrefused/i.test(String(error?.message || error));
+    if (isNetwork) {
+      throw new Error('loopback_bridge_unreachable');
+    }
+    throw error;
+  }
 }
 
-async function getInjectedBuild(tabId) {
-  const results = await chrome.scripting.executeScript({
-    target: { tabId },
-    world: 'ISOLATED',
-    func: () => globalThis.__NAVER_ASSISTANT_GEMINI_RUNTIME_BUILD__ || ''
-  });
-  return results?.[0]?.result || '';
-}
-
-async function markInjectedBuild(tabId, build) {
-  await chrome.scripting.executeScript({
-    target: { tabId },
-    world: 'ISOLATED',
-    func: value => {
-      globalThis.__NAVER_ASSISTANT_GEMINI_RUNTIME_BUILD__ = value;
-    },
-    args: [build]
+async function pingRuntime(tabId) {
+  return new Promise(resolve => {
+    try {
+      chrome.tabs.sendMessage(tabId, { type: 'NFA_RUNTIME_PING' }, response => {
+        if (chrome.runtime.lastError || !response?.alive) {
+          resolve({ ok: false, error: chrome.runtime.lastError?.message || 'no_response' });
+        } else {
+          resolve({ ok: true, build: response.build, status: response.status, instanceId: response.instanceId });
+        }
+      });
+    } catch (e) {
+      resolve({ ok: false, error: String(e?.message || e) });
+    }
   });
 }
 
@@ -50,21 +54,26 @@ async function ensureGeminiRuntime(tabId) {
 
   const task = (async () => {
     const contract = await getRuntimeContract();
-    let currentBuild = '';
-    try {
-      currentBuild = await getInjectedBuild(tabId);
-    } catch (_) {}
-
-    if (currentBuild === contract.runtimeBuild) {
-      return { ok: true, status: 'already_loaded', build: currentBuild };
+    // 1. Check if an active, valid content runtime is responding to ping
+    const ping = await pingRuntime(tabId);
+    if (ping.ok && ping.build === contract.runtimeBuild) {
+      return { ok: true, status: 'already_loaded', build: ping.build };
     }
 
+    // 2. Ping failed or outdated build -> inject fresh content.js
     await chrome.scripting.executeScript({
       target: { tabId },
       files: ['content.js']
     });
-    await markInjectedBuild(tabId, contract.runtimeBuild);
-    return { ok: true, status: 'injected', build: contract.runtimeBuild };
+
+    // 3. Verify injection via live ping
+    await new Promise(resolve => setTimeout(resolve, 300));
+    const verify = await pingRuntime(tabId);
+    if (verify.ok) {
+      return { ok: true, status: 'injected', build: verify.build };
+    } else {
+      return { ok: false, status: 'injected_unverified', error: verify.error };
+    }
   })().catch(error => ({ ok: false, status: 'inject_failed', error: String(error?.message || error) }))
     .finally(() => injectionInFlight.delete(tabId));
 
@@ -73,7 +82,7 @@ async function ensureGeminiRuntime(tabId) {
 }
 
 async function ensureAllGeminiTabs() {
-  const tabs = await chrome.tabs.query({ url: 'https://gemini.google.com/*' });
+  const tabs = await chrome.tabs.query({ url: '*://gemini.google.com/*' });
   const results = [];
   for (const tab of tabs) {
     if (typeof tab.id !== 'number') continue;
@@ -88,7 +97,7 @@ async function diagnose() {
     return { ok: false, status: 'gemini_tab_not_found', injection };
   }
 
-  await new Promise(resolve => setTimeout(resolve, 1200));
+  await new Promise(resolve => setTimeout(resolve, 1000));
   try {
     const bridge = await bridgeFetch('/v1/status');
     return { ok: true, status: bridge.status || 'unknown', bridge, injection };
@@ -117,8 +126,7 @@ chrome.tabs.onUpdated.addListener((tabId, changeInfo, tab) => {
   }
 });
 
-// Developer-mode extension reload also starts the service worker. Re-inject
-// into Gemini tabs that were already open before the reload.
+// Re-inject into Gemini tabs on service worker wake
 ensureAllGeminiTabs().catch(() => {});
 
 chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
@@ -129,11 +137,17 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
     return true;
   }
 
-  if (message?.type === 'ensureGeminiRuntime') {
+  if (message?.type === 'ensureGeminiRuntime' || message?.type === 'reconnectGemini') {
     const tabId = sender.tab?.id;
-    ensureGeminiRuntime(tabId)
-      .then(data => sendResponse(data))
-      .catch(error => sendResponse({ ok: false, status: 'inject_failed', error: String(error?.message || error) }));
+    if (tabId) {
+      ensureGeminiRuntime(tabId)
+        .then(data => sendResponse(data))
+        .catch(error => sendResponse({ ok: false, status: 'inject_failed', error: String(error?.message || error) }));
+    } else {
+      ensureAllGeminiTabs()
+        .then(data => sendResponse({ ok: true, data }))
+        .catch(error => sendResponse({ ok: false, status: 'inject_failed', error: String(error?.message || error) }));
+    }
     return true;
   }
 
