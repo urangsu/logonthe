@@ -83,6 +83,9 @@ class GeminiPreflight:
     heartbeat_age_ms: int = 0
 
 
+from services.runtime_contract import load_runtime_contract
+
+
 class GeminiExtensionBridge:
     HEARTBEAT_TTL = 12.0
     COMMAND_TTL = 90.0
@@ -90,9 +93,10 @@ class GeminiExtensionBridge:
     def __init__(
         self,
         token: Optional[str] = None,
-        expected_extension_version: Optional[str] = "13.2.3",
-        expected_build_id: str = "13.2.3-r1"
+        expected_extension_version: Optional[str] = None,
+        expected_build_id: Optional[str] = None
     ):
+        contract = load_runtime_contract()
         self._condition = threading.Condition()
         self._command: Optional[GeminiCommand] = None
         self._command_state = "idle"
@@ -107,8 +111,10 @@ class GeminiExtensionBridge:
         self._content_build = ""
         self._protocol_version = 0
         self._bridge_schema_version = 0
-        self._expected_extension_version = expected_extension_version
-        self._expected_build_id = expected_build_id
+        self._expected_extension_version = expected_extension_version or contract.extension_version
+        self._expected_build_id = expected_build_id or contract.runtime_build
+        self._protocol_version_expected = contract.protocol_version
+        self._bridge_schema_version_expected = contract.bridge_schema_version
         self.bridge_server_started = True
         self.bridge_server_error = ""
 

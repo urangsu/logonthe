@@ -13,7 +13,8 @@ class BrowserFailureKind(Enum):
 def classify_playwright_failure(
     exc: Exception,
     page: Optional[Any] = None,
-    context: Optional[Any] = None
+    context: Optional[Any] = None,
+    session: Optional[Any] = None
 ) -> BrowserFailureKind:
     """
     Playwright 예외 및 브라우저 세션 상태를 종합하여 실패 유형을 정밀 분류
@@ -21,22 +22,25 @@ def classify_playwright_failure(
     """
     msg = str(exc).lower()
 
+    if session is not None and hasattr(session, "is_context_alive"):
+        if not session.is_context_alive():
+            return BrowserFailureKind.CONTEXT_CLOSED
+
+    if "connection closed" in msg or "target closed" in msg or "disconnected" in msg:
+        return BrowserFailureKind.BROWSER_DISCONNECTED
+
     if "target page, context or browser has been closed" in msg or "browser has been closed" in msg or "context has been closed" in msg:
         if context is not None:
             try:
                 _ = context.pages
-            except Exception:
-                return BrowserFailureKind.CONTEXT_CLOSED
-        if page is not None:
-            try:
-                if page.is_closed():
+                if page is not None and getattr(page, "is_closed", lambda: False)():
                     return BrowserFailureKind.PAGE_CLOSED
+                return BrowserFailureKind.CONTEXT_CLOSED
             except Exception:
                 return BrowserFailureKind.CONTEXT_CLOSED
+        if page is not None and getattr(page, "is_closed", lambda: False)():
+            return BrowserFailureKind.PAGE_CLOSED
         return BrowserFailureKind.CONTEXT_CLOSED
-
-    if "connection closed" in msg or "target closed" in msg or "disconnected" in msg:
-        return BrowserFailureKind.BROWSER_DISCONNECTED
 
     if "timeout" in msg:
         return BrowserFailureKind.NAVIGATION_TIMEOUT

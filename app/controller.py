@@ -196,7 +196,9 @@ class FeedController:
 
             seen_candidate_keys: Set[str] = set()
             attempted_post_keys: Set[str] = set()
-            completed_count = 0
+            like_success_count = 0
+            comment_submitted_count = 0
+            skipped_count = 0
             failed_count = 0
             scroll_attempts = 0
             max_candidate_scan = max_items * 5
@@ -268,7 +270,14 @@ class FeedController:
                     try:
                         result = processor.process(detail_page, post, action_plan=action_plan)
                         self.history.record_result(result)
-                        completed_count += 1
+                        if result.like_result.action_taken or result.like_result.state_after == LikeState.LIKED:
+                            like_success_count += 1
+                        if result.comment_result.status == CommentSubmitState.SUBMITTED:
+                            comment_submitted_count += 1
+                        elif result.comment_result.status == CommentSubmitState.SKIPPED:
+                            skipped_count += 1
+                        if result.like_result.error or result.comment_result.status == CommentSubmitState.FAILED:
+                            failed_count += 1
                     except StopRequestedException:
                         final_close_reason = "user_stop"
                         raise
@@ -282,7 +291,14 @@ class FeedController:
                                 detail_page = self.session.get_detail_page()
                                 result = processor.process(detail_page, post, action_plan=action_plan)
                                 self.history.record_result(result)
-                                completed_count += 1
+                                if result.like_result.action_taken or result.like_result.state_after == LikeState.LIKED:
+                                    like_success_count += 1
+                                if result.comment_result.status == CommentSubmitState.SUBMITTED:
+                                    comment_submitted_count += 1
+                                elif result.comment_result.status == CommentSubmitState.SKIPPED:
+                                    skipped_count += 1
+                                if result.like_result.error or result.comment_result.status == CommentSubmitState.FAILED:
+                                    failed_count += 1
                             except (StopRequestedException, FatalSessionError):
                                 raise
                             except Exception as rpe2:
@@ -326,7 +342,11 @@ class FeedController:
                 final_close_reason = "user_stop"
             else:
                 self.state_mgr.update(new_state=FeedState.COMPLETED, message=f"작업 완료! (총 {len(attempted_post_keys)}개 처리)")
-                logger.log(f"✅ [ASSISTANT] 전체 피드 작업 완료! (총 {len(attempted_post_keys)}개 진입, 성공: {completed_count}개, 실패: {failed_count}개)")
+                logger.log(
+                    f"✅ [ASSISTANT] 전체 피드 작업 완료! (진입: {len(attempted_post_keys)}개, "
+                    f"공감 성공: {like_success_count}개, 댓글 등록: {comment_submitted_count}개, "
+                    f"건너뜀: {skipped_count}개, 실패: {failed_count}개)"
+                )
                 final_close_reason = "completed"
 
         except StopRequestedException:

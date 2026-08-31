@@ -1,6 +1,8 @@
 import unittest
 from unittest.mock import MagicMock, patch, PropertyMock
 import threading
+import json
+import os
 
 from app.models import (
     FeedPost, FeedSourceType, PostProcessResult, LikeProcessResult, CommentProcessResult,
@@ -14,8 +16,8 @@ from app.errors import (
 )
 from naver.discovery.query_pool import QueryRotator, QuerySpec
 from naver.discovery.topic_filter import DiscoveryTopicFilter
-from naver.sources import RecommendationFeedSource
-from naver.discovery.search_source import TargetedSearchFeedSource
+from naver.sources import RecommendationFeedSource, TargetedSearchFeedSource
+from services.runtime_contract import load_runtime_contract, WORKSPACE_DIR
 
 
 class TestV133DiscoveryAndRuntime(unittest.TestCase):
@@ -26,9 +28,24 @@ class TestV133DiscoveryAndRuntime(unittest.TestCase):
         self.assertIn(spec.category, ["FOOD", "CAFE"])
         self.assertEqual(rotator.current_query, spec.query)
 
+    def test_disc_001b_targeted_search_controller_contract_integration(self):
+        """FeedController -> TARGETED_SEARCH -> TargetedSearchFeedSource integration check"""
+        page = MagicMock()
+        source = TargetedSearchFeedSource(
+            page,
+            max_items=10,
+            stop_event=threading.Event(),
+            enabled_categories=["FOOD", "CAFE"],
+            custom_queries=["맛집"],
+            posts_per_query=3
+        )
+        self.assertEqual(source.max_items, 10)
+        self.assertFalse(source.is_exhausted())
+        self.assertTrue(hasattr(source, "load_more"))
+        self.assertTrue(hasattr(source, "discover_posts"))
+
     def test_disc_002_same_blog_second_post_skipped(self):
         page = MagicMock()
-        # Mocking cards
         card1 = MagicMock()
         card1.locator.return_value.first.get_attribute.return_value = "https://m.blog.naver.com/same_author/101"
         card1.locator.return_value.first.count.return_value = 1
@@ -70,7 +87,6 @@ class TestV133DiscoveryAndRuntime(unittest.TestCase):
         }.get(k, default)
 
         history = MagicMock()
-        # user1/1 is already liked and commented (idempotent)
         history.is_liked.side_effect = lambda key: key == "user1:1"
         history.is_comment_submitted.side_effect = lambda key: key == "user1:1"
 
@@ -86,19 +102,58 @@ class TestV133DiscoveryAndRuntime(unittest.TestCase):
             mock_session = mock_session_cls.return_value
             mock_session.context = MagicMock()
             mock_processor = mock_proc_cls.return_value
-            mock_processor.process.return_value = MagicMock()
+            mock_res = MagicMock()
+            mock_res.like_result.action_taken = True
+            mock_res.like_result.error = ""
+            mock_res.comment_result.status = CommentSubmitState.SUBMITTED
+            mock_processor.process.return_value = mock_res
 
             controller.run()
 
             # user1:1 was skipped, so user2:2 and user3:3 were processed (total 2 processed)
             self.assertEqual(mock_processor.process.call_count, 2)
 
+    def test_disc_005_expected_category_without_weak_positive_is_blocked(self):
+        """FOOD 검색어 결과에 전혀 엉뚱한 패션 선글라스 글이 삽입된 경우 차단 검증"""
+        decision = DiscoveryTopicFilter.evaluate(
+            "명품 선글라스 신상품 착용 후기",
+            "백화점에서 직접 사서 써봤어요",
+            stage="card",
+            expected_category="FOOD"
+        )
+        self.assertFalse(decision.allowed)
+        self.assertEqual(decision.reason_code, "not_target_category")
+
+    def test_disc_006_expected_category_with_weak_positive_is_allowed(self):
+        """FOOD 검색어 결과에 약한 음식 관련 단서가 있는 경우 통과"""
+        decision = DiscoveryTopicFilter.evaluate(
+            "광화문 직장인 점심 기록",
+            "오늘 점심 메뉴로 든든한 밥 한끼 먹었습니다",
+            stage="card",
+            expected_category="FOOD"
+        )
+        self.assertTrue(decision.allowed)
+        self.assertEqual(decision.detected_category, "FOOD")
+
+    def test_disc_007_runtime_contract_source_of_truth(self):
+        """runtime_contract.json과 manifest.json 및 Python loader 일치 검증"""
+        contract = load_runtime_contract()
+        self.assertEqual(contract.extension_version, "13.2.3")
+        self.assertEqual(contract.runtime_build, "13.2.3-r1")
+        self.assertEqual(contract.protocol_version, 3)
+        self.assertEqual(contract.bridge_schema_version, 2)
+
+        manifest_path = os.path.join(WORKSPACE_DIR, "browser_extension", "manifest.json")
+        with open(manifest_path, "r", encoding="utf-8") as f:
+            manifest = json.load(f)
+        self.assertEqual(manifest["version"], contract.extension_version)
+
     def test_session_001_and_002_page_closed_retries_with_new_page(self):
         exc = Exception("Target page, context or browser has been closed")
         page = MagicMock()
         page.is_closed.return_value = True
         context = MagicMock()
-        context.pages = [MagicMock()] # Context is still alive
+        context.pages = [MagicMock()]
 
         kind = classify_playwright_failure(exc, page=page, context=context)
         self.assertEqual(kind, BrowserFailureKind.PAGE_CLOSED)

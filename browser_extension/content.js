@@ -5,10 +5,26 @@ const EDITOR_SELECTORS = [
   'textarea'
 ];
 const RESPONSE_SELECTORS = 'model-response';
-const EXTENSION_VERSION = '13.2.3';
-const CONTENT_BUILD = '13.2.3-r1';
-const PROTOCOL_VERSION = 3;
-const BRIDGE_SCHEMA_VERSION = 2;
+let runtimeContract = {
+  extensionVersion: '13.2.3',
+  runtimeBuild: '13.2.3-r1',
+  protocolVersion: 3,
+  bridgeSchemaVersion: 2
+};
+
+try {
+  chrome.runtime.sendMessage({ type: "getRuntimeContract" }, (res) => {
+    if (res && res.ok && res.data) {
+      runtimeContract = {
+        extensionVersion: res.data.extensionVersion || runtimeContract.extensionVersion,
+        runtimeBuild: res.data.runtimeBuild || runtimeContract.runtimeBuild,
+        protocolVersion: res.data.protocolVersion || runtimeContract.protocolVersion,
+        bridgeSchemaVersion: res.data.bridgeSchemaVersion || runtimeContract.bridgeSchemaVersion
+      };
+    }
+  });
+} catch (_) {}
+
 let lastRequestId = null;
 let busy = false;
 let lastBridgeFailLog = 0;
@@ -62,11 +78,11 @@ async function heartbeat() {
       status: pageStatus(),
       title: document.title,
       url: location.href,
-      extensionVersion: EXTENSION_VERSION,
-      contentBuild: CONTENT_BUILD,
-      buildId: CONTENT_BUILD,
-      protocolVersion: PROTOCOL_VERSION,
-      bridgeSchemaVersion: BRIDGE_SCHEMA_VERSION
+      extensionVersion: runtimeContract.extensionVersion,
+      contentBuild: runtimeContract.runtimeBuild,
+      buildId: runtimeContract.runtimeBuild,
+      protocolVersion: runtimeContract.protocolVersion,
+      bridgeSchemaVersion: runtimeContract.bridgeSchemaVersion
     });
   } catch (err) {
     logBridgeFail('heartbeat', err);
@@ -201,7 +217,7 @@ async function tick() {
     const data = await bridgeFetch('/v1/command');
     const command = data.command;
     if (!command || command.requestId === lastRequestId) return;
-    const claim = await bridgeFetch('/v1/claim', 'POST', { requestId: command.requestId, claimant: CONTENT_BUILD });
+    const claim = await bridgeFetch('/v1/claim', 'POST', { requestId: command.requestId, claimant: runtimeContract.runtimeBuild });
     if (!claim.claimed) return;
     lastRequestId = command.requestId;
     await execute(command);

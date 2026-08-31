@@ -1,6 +1,16 @@
 const BASE = "http://127.0.0.1:43127";
 
 chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
+  if (message.type === "getRuntimeContract") {
+    (async () => {
+      const url = chrome.runtime.getURL("runtime_contract.json");
+      const res = await fetch(url);
+      const data = await res.json();
+      sendResponse({ ok: true, data });
+    })().catch(error => sendResponse({ ok: false, error: String(error.message || error) }));
+    return true;
+  }
+
   if (message.type !== "bridgeFetch") return false;
   (async () => {
     const response = await fetch(`${BASE}${message.path}`, {

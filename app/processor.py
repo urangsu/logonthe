@@ -150,13 +150,14 @@ class PostProcessor:
                 stage="detail",
             )
             if not topic_decision.allowed:
+                topic_reason = topic_decision.blocked_category or topic_decision.reason_code or "unknown"
                 logger.log(
-                    f"  [TOPIC_FILTER] detail/{topic_decision.blocked_category} "
+                    f"  [TOPIC_FILTER] detail/{topic_reason} "
                     f"evidence={list(topic_decision.evidence)} title=\"{detail_context.title or post.title or ''}\""
                 )
-                result.like_result.error = f"topic_blocked:{topic_decision.blocked_category}"
+                result.like_result.error = f"topic_blocked:{topic_reason}"
                 result.comment_result.status = CommentSubmitState.SKIPPED
-                result.comment_result.error = f"topic_blocked:{topic_decision.blocked_category}"
+                result.comment_result.error = f"topic_blocked:{topic_reason}"
                 return result
 
         # 2. 공감(하트) 처리 (Re-ordered Like Pipeline: State -> Popularity Guard -> Transaction)

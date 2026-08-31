@@ -1,29 +1,31 @@
-from typing import List, Protocol, Set, Optional
+from typing import List, Optional, Set
+import threading
 from playwright.sync_api import Page
 from app.models import FeedPost, FeedSourceType
-from naver.url_utils import extract_canonical_post
+from app.errors import classify_playwright_failure, BrowserFailureKind, BrowserDisconnectedError
 from naver.resolver import MobileDOMResolver
-from browser.session import interruptible_wait
+from naver.url_utils import extract_canonical_post
+from services.pacing import interruptible_wait
 from src.logger import logger
-import threading
 
 
-class FeedSource(Protocol):
-    def open(self) -> None:
-        ...
+class FeedSource:
+    """피드 소스 인터페이스"""
+    def open(self):
+        raise NotImplementedError
 
     def discover_posts(self) -> List[FeedPost]:
-        ...
+        raise NotImplementedError
 
     def load_more(self) -> bool:
-        ...
+        raise NotImplementedError
 
     def is_exhausted(self) -> bool:
-        ...
+        raise NotImplementedError
 
 
-class NeighborFeedSource:
-    """모바일 이웃 새글 피드 (FeedList.naver) 탐색 소스"""
+class NeighborFeedSource(FeedSource):
+    """모바일 이웃 새글 피드 소스"""
     URL = "https://m.blog.naver.com/FeedList.naver"
 
     def __init__(self, page: Page, max_items: int = 20, stop_event: Optional[threading.Event] = None):
@@ -39,22 +41,30 @@ class NeighborFeedSource:
             self.page.goto(self.URL, wait_until="domcontentloaded", timeout=20000)
             interruptible_wait(self.stop_event, 1.5)
         except Exception as e:
+            kind = classify_playwright_failure(e, page=self.page, context=getattr(self.page, "context", None))
+            if kind in (BrowserFailureKind.CONTEXT_CLOSED, BrowserFailureKind.BROWSER_DISCONNECTED):
+                raise BrowserDisconnectedError(f"이웃 피드 접속 중 브라우저 종료 감지: {e}")
             logger.log(f"[SOURCE] 피드 페이지 로드 안내: {e}", "WARNING")
 
     def discover_posts(self) -> List[FeedPost]:
-        """현재 화면에 렌더링된 피드 카드들로부터 새로운 canonical FeedPost 수집"""
         discovered = []
-        cards = MobileDOMResolver.get_feed_cards(self.page)
-        card_count = cards.count()
+        try:
+            cards = MobileDOMResolver.get_feed_cards(self.page)
+            card_count = cards.count()
+        except Exception as e:
+            kind = classify_playwright_failure(e, page=self.page, context=getattr(self.page, "context", None))
+            if kind in (BrowserFailureKind.CONTEXT_CLOSED, BrowserFailureKind.BROWSER_DISCONNECTED):
+                raise BrowserDisconnectedError(f"이웃 피드 탐색 중 브라우저 종료 감지: {e}")
+            return discovered
 
         for idx in range(card_count):
             if self.stop_event and self.stop_event.is_set():
                 break
 
-            card = cards.nth(idx)
             try:
+                card = cards.nth(idx)
                 link_el = MobileDOMResolver.get_card_post_link(card)
-                if link_el.count() == 0:
+                if not link_el or link_el.count() == 0:
                     continue
 
                 raw_href = link_el.get_attribute("href")
@@ -68,7 +78,10 @@ class NeighborFeedSource:
                 if post and post.key not in self.seen_keys:
                     self.seen_keys.add(post.key)
                     discovered.append(post)
-            except Exception:
+            except Exception as e:
+                kind = classify_playwright_failure(e, page=self.page, context=getattr(self.page, "context", None))
+                if kind in (BrowserFailureKind.CONTEXT_CLOSED, BrowserFailureKind.BROWSER_DISCONNECTED):
+                    raise BrowserDisconnectedError(f"이웃 피드 카드 파싱 중 브라우저 종료 감지: {e}")
                 continue
 
         return discovered
@@ -82,15 +95,18 @@ class NeighborFeedSource:
             self.page.mouse.wheel(0, 900)
             interruptible_wait(self.stop_event, 1.0)
             return True
-        except Exception:
+        except Exception as e:
+            kind = classify_playwright_failure(e, page=self.page, context=getattr(self.page, "context", None))
+            if kind in (BrowserFailureKind.CONTEXT_CLOSED, BrowserFailureKind.BROWSER_DISCONNECTED):
+                raise BrowserDisconnectedError(f"이웃 피드 스크롤 중 브라우저 종료 감지: {e}")
             return False
 
     def is_exhausted(self) -> bool:
         return self._exhausted or len(self.seen_keys) >= self.max_items
 
 
-class RecommendationFeedSource:
-    """모바일 탐색 추천 피드 (Recommendation.naver) 탐색 소스 - 푸드/라이프 카테고리 필터 선택 및 검증"""
+class RecommendationFeedSource(FeedSource):
+    """모바일 탐색 추천 피드 (Recommendation.naver) 탐색 소스 - 푸드/라이프 카테고리 필터 선택 및 실질적 검증"""
     URL = "https://m.blog.naver.com/Recommendation.naver"
 
     def __init__(self, page: Page, max_items: int = 20, stop_event: Optional[threading.Event] = None, preferred_category: str = "푸드"):
@@ -108,7 +124,10 @@ class RecommendationFeedSource:
             self.page.goto(self.URL, wait_until="domcontentloaded", timeout=20000)
             interruptible_wait(self.stop_event, 1.5)
 
-            # 탐색 탭 상단의 카테고리 필터 중 interactive element만 탐색 후 클릭 및 상태 검증
+            # 1. 클릭 전 카드 지문 채취
+            before_cards = self.page.evaluate("() => Array.from(document.querySelectorAll('.view_wrap, .fds-comps-feed-item, .bx')).map(e => (e.textContent || '').slice(0, 30))")
+
+            # 2. 카테고리 탭 탐색 후 클릭
             click_result = self.page.evaluate("""(targetCategory) => {
                 const shown = el => !!el && !!el.getClientRects().length && getComputedStyle(el).visibility !== 'hidden';
                 const interactiveCandidates = Array.from(document.querySelectorAll('button, a, [role=tab], li[role=tab], div[role=button]')).filter(shown);
@@ -119,36 +138,56 @@ class RecommendationFeedSource:
                 });
 
                 if (!target) return { status: "not_found" };
-
-                const beforeActive = target.getAttribute('aria-selected') === 'true' || /active|on|selected/.test(target.className);
                 target.click();
-
-                // 클릭 후 상태 확인
-                const afterActive = target.getAttribute('aria-selected') === 'true' || /active|on|selected/.test(target.className);
-                const text = target.textContent.trim();
-
                 return {
                     status: "clicked",
-                    text: text,
-                    verified: afterActive || !beforeActive
+                    text: target.textContent.trim()
                 };
             }""", self.preferred_category)
 
             if click_result and click_result.get("status") == "clicked":
-                if click_result.get("verified"):
+                interruptible_wait(self.stop_event, 1.2)
+                # 3. 클릭 후 실제 active/aria-selected 상태 또는 카드 목록 변화 검증
+                verification = self.page.evaluate("""(args) => {
+                    const { targetCategory, beforeCards } = args;
+                    const shown = el => !!el && !!el.getClientRects().length && getComputedStyle(el).visibility !== 'hidden';
+                    const interactiveCandidates = Array.from(document.querySelectorAll('button, a, [role=tab], li[role=tab], div[role=button]')).filter(shown);
+                    const target = interactiveCandidates.find(el => {
+                        const text = el.textContent.trim();
+                        return new RegExp(targetCategory).test(text) && !/전체/.test(text) && text.length <= 15;
+                    });
+                    const afterActive = target ? (target.getAttribute('aria-selected') === 'true' || /active|on|selected/.test(target.className)) : false;
+                    const afterCards = Array.from(document.querySelectorAll('.view_wrap, .fds-comps-feed-item, .bx')).map(e => (e.textContent || '').slice(0, 30));
+                    const cardsChanged = JSON.stringify(beforeCards) !== JSON.stringify(afterCards);
+                    return {
+                        active: afterActive,
+                        cardsChanged: cardsChanged,
+                        verified: afterActive || cardsChanged
+                    };
+                }""", {"targetCategory": self.preferred_category, "beforeCards": before_cards})
+
+                if verification and verification.get("verified"):
                     logger.log(f"✅ [SOURCE] 탐색 탭에서 '[{click_result.get('text')}]' 필터 버튼 클릭 및 활성화 확인 완료")
                 else:
                     logger.log(f"⚠️ [SOURCE] 탐색 탭 카테고리 버튼('{self.preferred_category}') 클릭됨 (선택 상태 미확인: category_filter_unverified)", "WARNING")
-                interruptible_wait(self.stop_event, 1.5)
             else:
                 logger.log(f"ℹ️ [SOURCE] 탐색 탭 카테고리 버튼('{self.preferred_category}') 미발견 (전체 탐색 모드 유지)")
         except Exception as e:
+            kind = classify_playwright_failure(e, page=self.page, context=getattr(self.page, "context", None))
+            if kind in (BrowserFailureKind.CONTEXT_CLOSED, BrowserFailureKind.BROWSER_DISCONNECTED):
+                raise BrowserDisconnectedError(f"추천 피드 접속 중 브라우저 종료 감지: {e}")
             logger.log(f"[SOURCE] 추천 페이지 로드 안내: {e}", "WARNING")
 
     def discover_posts(self) -> List[FeedPost]:
         discovered = []
-        cards = MobileDOMResolver.get_feed_cards(self.page)
-        card_count = cards.count()
+        try:
+            cards = MobileDOMResolver.get_feed_cards(self.page)
+            card_count = cards.count()
+        except Exception as e:
+            kind = classify_playwright_failure(e, page=self.page, context=getattr(self.page, "context", None))
+            if kind in (BrowserFailureKind.CONTEXT_CLOSED, BrowserFailureKind.BROWSER_DISCONNECTED):
+                raise BrowserDisconnectedError(f"추천 피드 카드 탐색 중 브라우저 종료 감지: {e}")
+            return discovered
 
         cards_seen = card_count
         cards_parsed = 0
@@ -162,10 +201,10 @@ class RecommendationFeedSource:
             if self.stop_event and self.stop_event.is_set():
                 break
 
-            card = cards.nth(idx)
             try:
+                card = cards.nth(idx)
                 link_el = MobileDOMResolver.get_card_post_link(card)
-                if link_el.count() == 0:
+                if not link_el or link_el.count() == 0:
                     continue
 
                 raw_href = link_el.get_attribute("href")
@@ -205,7 +244,10 @@ class RecommendationFeedSource:
                     self.seen_keys.add(post.key)
                     self.seen_blogs.add(post.blog_id)
                     discovered.append(post)
-            except Exception:
+            except Exception as e:
+                kind = classify_playwright_failure(e, page=self.page, context=getattr(self.page, "context", None))
+                if kind in (BrowserFailureKind.CONTEXT_CLOSED, BrowserFailureKind.BROWSER_DISCONNECTED):
+                    raise BrowserDisconnectedError(f"추천 피드 카드 파싱 중 브라우저 종료 감지: {e}")
                 card_dom_errors += 1
                 continue
 
@@ -224,14 +266,17 @@ class RecommendationFeedSource:
             self.page.mouse.wheel(0, 900)
             interruptible_wait(self.stop_event, 1.0)
             return True
-        except Exception:
+        except Exception as e:
+            kind = classify_playwright_failure(e, page=self.page, context=getattr(self.page, "context", None))
+            if kind in (BrowserFailureKind.CONTEXT_CLOSED, BrowserFailureKind.BROWSER_DISCONNECTED):
+                raise BrowserDisconnectedError(f"추천 피드 스크롤 중 브라우저 종료 감지: {e}")
             return False
 
     def is_exhausted(self) -> bool:
         return self._exhausted or len(self.seen_keys) >= self.max_items
 
 
-class DirectUrlSource:
+class DirectUrlSource(FeedSource):
     """사용자가 직접 입력한 URL 목록 소스"""
     def __init__(self, raw_urls: List[str]):
         self.raw_urls = raw_urls
@@ -263,5 +308,5 @@ class DirectUrlSource:
         return True
 
 
-# Alias/Re-export TargetedSearchFeedSource for convenience
+# Re-export TargetedSearchFeedSource
 from naver.discovery.search_source import TargetedSearchFeedSource

@@ -3,6 +3,7 @@ import urllib.parse
 from playwright.sync_api import Page
 import threading
 from app.models import FeedPost, FeedSourceType
+from app.errors import classify_playwright_failure, BrowserFailureKind, BrowserDisconnectedError
 from naver.url_utils import extract_canonical_post
 from naver.discovery.query_pool import QueryRotator
 from naver.discovery.topic_filter import DiscoveryTopicFilter
@@ -16,20 +17,31 @@ class TargetedSearchFeedSource:
     - QueryRotator에 정의된 생활형 검색어 풀을 순환하며 네이버 블로그 검색 결과를 수집
     - 동일 블로거 중복 방지 (1세션 1블로그 1글)
     - Positive Category + Contextual Negative DiscoveryTopicFilter 통과 글만 선별
+    - FeedSource 프로토콜 (open, discover_posts, load_more, is_exhausted) 100% 준수
     """
     SEARCH_BASE_URL = "https://m.search.naver.com/search.naver?where=m_blog&sm=mtb_jum&query="
 
     def __init__(
         self,
         page: Page,
-        rotator: QueryRotator,
         max_items: int = 20,
-        stop_event: Optional[threading.Event] = None
+        stop_event: Optional[threading.Event] = None,
+        enabled_categories: Optional[List[str]] = None,
+        custom_queries: Optional[List[str]] = None,
+        posts_per_query: int = 3,
+        rotator: Optional[QueryRotator] = None,
     ):
         self.page = page
-        self.rotator = rotator
         self.max_items = max_items
         self.stop_event = stop_event
+        if rotator is not None:
+            self.rotator = rotator
+        else:
+            self.rotator = QueryRotator(
+                enabled_categories=enabled_categories,
+                custom_queries=custom_queries,
+                posts_per_query=posts_per_query,
+            )
 
         self.seen_keys: Set[str] = set()
         self.seen_blogs: Set[str] = set()
@@ -49,6 +61,9 @@ class TargetedSearchFeedSource:
             self.page.goto(self._current_query_url, wait_until="domcontentloaded", timeout=20000)
             interruptible_wait(self.stop_event, 1.5)
         except Exception as e:
+            kind = classify_playwright_failure(e, page=self.page, context=getattr(self.page, "context", None))
+            if kind in (BrowserFailureKind.CONTEXT_CLOSED, BrowserFailureKind.BROWSER_DISCONNECTED):
+                raise BrowserDisconnectedError(f"검색 페이지 이동 중 브라우저 종료 감지: {e}")
             logger.log(f"[DISCOVERY] 검색 페이지 로드 안내: {e}", "WARNING")
 
     def _switch_to_next_query(self):
@@ -79,18 +94,31 @@ class TargetedSearchFeedSource:
         ]
 
         cards = None
-        for sel in card_selectors:
-            loc = self.page.locator(sel)
-            if loc.count() > 0:
-                cards = loc
-                break
+        try:
+            for sel in card_selectors:
+                loc = self.page.locator(sel)
+                if loc.count() > 0:
+                    cards = loc
+                    break
+        except Exception as e:
+            kind = classify_playwright_failure(e, page=self.page, context=getattr(self.page, "context", None))
+            if kind in (BrowserFailureKind.CONTEXT_CLOSED, BrowserFailureKind.BROWSER_DISCONNECTED):
+                raise BrowserDisconnectedError(f"카드 검색 중 브라우저 세션 종료 감지: {e}")
+            cards = None
 
         if not cards or cards.count() == 0:
             logger.log("ℹ️ [DISCOVERY] 검색 결과 카드 없음 -> 다음 검색어로 전환")
             self._switch_to_next_query()
             return discovered
 
-        card_count = cards.count()
+        try:
+            card_count = cards.count()
+        except Exception as e:
+            kind = classify_playwright_failure(e, page=self.page, context=getattr(self.page, "context", None))
+            if kind in (BrowserFailureKind.CONTEXT_CLOSED, BrowserFailureKind.BROWSER_DISCONNECTED):
+                raise BrowserDisconnectedError(f"카드 카운트 중 브라우저 세션 종료 감지: {e}")
+            return discovered
+
         cards_seen = card_count
 
         for idx in range(card_count):
@@ -163,7 +191,10 @@ class TargetedSearchFeedSource:
                     self._switch_to_next_query()
                     break
 
-            except Exception:
+            except Exception as e:
+                kind = classify_playwright_failure(e, page=self.page, context=getattr(self.page, "context", None))
+                if kind in (BrowserFailureKind.CONTEXT_CLOSED, BrowserFailureKind.BROWSER_DISCONNECTED):
+                    raise BrowserDisconnectedError(f"카드 파싱 중 브라우저 세션 종료 감지: {e}")
                 card_dom_errors += 1
                 continue
 
@@ -175,15 +206,35 @@ class TargetedSearchFeedSource:
 
         return discovered
 
-    def scroll_and_load_more(self) -> int:
-        """더보기 스크롤 또는 다음 검색어 순환"""
+    def load_more(self) -> bool:
+        """더보기 스크롤 또는 다음 검색어로 순환하여 추가 글 로드"""
+        if self._exhausted:
+            return False
         try:
             self.page.evaluate("window.scrollBy(0, 1000)")
             interruptible_wait(self.stop_event, 1.2)
-            new_cards = self.page.locator(".api_subject_bx .bx, li.bx, .view_wrap").count()
-            if new_cards == 0:
+            card_selectors = [
+                ".api_subject_bx .bx",
+                "li.bx",
+                ".view_wrap",
+                ".total_wrap",
+                ".fds-comps-feed-item",
+                ".detail_box"
+            ]
+            has_cards = False
+            for sel in card_selectors:
+                if self.page.locator(sel).count() > 0:
+                    has_cards = True
+                    break
+            if not has_cards:
                 self._switch_to_next_query()
-            return new_cards
-        except Exception:
+            return True
+        except Exception as e:
+            kind = classify_playwright_failure(e, page=self.page, context=getattr(self.page, "context", None))
+            if kind in (BrowserFailureKind.CONTEXT_CLOSED, BrowserFailureKind.BROWSER_DISCONNECTED):
+                raise BrowserDisconnectedError(f"스크롤 중 브라우저 세션 종료 감지: {e}")
             self._switch_to_next_query()
-            return 0
+            return False
+
+    def is_exhausted(self) -> bool:
+        return self._exhausted

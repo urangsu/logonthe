@@ -11,5 +11,9 @@
     "matches": ["https://gemini.google.com/*"],
     "js": ["content.js"],
     "run_at": "document_idle"
+  }],
+  "web_accessible_resources": [{
+    "resources": ["runtime_contract.json"],
+    "matches": ["https://gemini.google.com/*"]
   }]
 }

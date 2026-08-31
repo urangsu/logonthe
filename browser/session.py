@@ -249,6 +249,7 @@ class BrowserSession:
         os.makedirs(self.user_data_dir, exist_ok=True)
         self._is_closing = False
         self._closing_reason = "active"
+        self._context_closed = False
         logger.log(f"[SESSION] 브라우저 세션 시작 중... (프로필: {self.user_data_dir})")
 
         try:
@@ -266,8 +267,12 @@ class BrowserSession:
                 ]
             )
 
+            def _on_context_close():
+                self._context_closed = True
+                logger.log(f"[SESSION][CONTEXT_CLOSED] reason={self._closing_reason} expected={self._is_closing}")
+
             try:
-                self.context.on("close", lambda: logger.log(f"[SESSION][CONTEXT_CLOSED] reason={self._closing_reason} expected={self._is_closing}"))
+                self.context.on("close", _on_context_close)
             except Exception:
                 pass
 
@@ -276,6 +281,16 @@ class BrowserSession:
         except Exception as e:
             self.close(reason="startup_failed")
             raise e
+
+    def is_context_alive(self) -> bool:
+        if self._context_closed or not self.context:
+            return False
+        try:
+            _ = self.context.pages
+            return True
+        except Exception:
+            self._context_closed = True
+            return False
 
     def _attach_page_instrumentation(self, page: Page, role: str):
         try:

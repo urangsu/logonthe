@@ -224,6 +224,24 @@ class DiscoveryTopicFilter:
         return None, ()
 
     @classmethod
+    def _has_weak_lifestyle_evidence(cls, text: str, expected_category: str) -> tuple[bool, tuple[str, ...]]:
+        patterns = {
+            "FOOD": [r"맛집", r"식당", r"음식", r"메뉴", r"밥", r"요리", r"고기", r"국", r"찌개", r"술", r"한끼", r"배달", r"포장", r"맛있", r"먹었", r"먹방", r"푸드", r"레시피"],
+            "CAFE": [r"카페", r"커피", r"디저트", r"베이커리", r"빵", r"음료", r"티", r"라떼", r"원두", r"공간", r"인테리어", r"바리스타", r"빙수"],
+            "PARENTING": [r"아이", r"육아", r"아기", r"딸", r"아들", r"맘", r"키즈", r"유아", r"돌", r"어린이", r"유치원", r"출산", r"임신"],
+            "LIVING": [r"살림", r"청소", r"정리", r"인테리어", r"가구", r"소품", r"집", r"꾸미기", r"주방", r"욕실", r"다이소", r"자취"],
+            "TRAVEL": [r"여행", r"나들이", r"숙소", r"호텔", r"펜션", r"바다", r"산", r"드라이브", r"코스", r"명소", r"관광", r"휴가", r"국내", r"해외"],
+            "LIFESTYLE": [r"일상", r"기록", r"하루", r"후기", r"추천", r"주말", r"선물", r"체험", r"소소", r"리뷰", r"공간", r"동네", r"방문"]
+        }
+        cand = patterns.get(expected_category, patterns["LIFESTYLE"])
+        found = []
+        for p in cand:
+            m = re.search(p, text)
+            if m:
+                found.append(m.group(0))
+        return (len(found) > 0, tuple(found))
+
+    @classmethod
     def evaluate(
         cls,
         title: str,
@@ -281,14 +299,25 @@ class DiscoveryTopicFilter:
                     reason_code="expected_category_blocked",
                     stage=stage
                 )
-            return TopicDecision(
-                allowed=True,
-                detected_category=expected_category,
-                confidence="medium",
-                positive_evidence=(expected_category,),
-                reason_code="expected_category_match",
-                stage=stage
-            )
+
+            # expected_category여도 최소한의 라이프스타일/카테고리 약한 긍정 단서가 있어야 카드 단계 통과
+            has_weak, weak_ev = cls._has_weak_lifestyle_evidence(f"{title} {snippet}", expected_category)
+            if has_weak:
+                return TopicDecision(
+                    allowed=True,
+                    detected_category=expected_category,
+                    confidence="medium",
+                    positive_evidence=weak_ev,
+                    reason_code="expected_category_match",
+                    stage=stage
+                )
+            else:
+                return TopicDecision(
+                    allowed=False,
+                    detected_category="UNKNOWN",
+                    reason_code="not_target_category",
+                    stage=stage
+                )
 
         # 6. If not matched to any target lifestyle category:
         if ctx_neg_cat:
