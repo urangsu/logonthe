@@ -140,6 +140,22 @@ class MyBlogRecentPostService:
                         return 0;
                     };
 
+                    const findCard = (a) => {
+                        let node = a;
+                        for (let depth = 0; depth < 7 && node; depth += 1, node = node.parentElement) {
+                            if (node.matches && node.matches('li, article, [data-log-no], [data-logno]')) {
+                                return node;
+                            }
+                            const className = clean(node.className).toLowerCase();
+                            const looksLikeItem = /(post|article|item|card)/.test(className);
+                            const looksLikeContainer = /(list|container|wrapper|wrap|section)/.test(className);
+                            if (looksLikeItem && !looksLikeContainer) {
+                                return node;
+                            }
+                        }
+                        return a.parentElement || a;
+                    };
+
                     const extractPublished = (card) => {
                         if (!card) return { text: '', ms: 0 };
                         const candidates = [];
@@ -200,9 +216,7 @@ class MyBlogRecentPostService:
                         }
                         if (!logNo || !/^\d+$/.test(logNo)) return;
 
-                        const card = a.closest(
-                            "li, article, [class*='post'], [class*='item'], [class*='list']"
-                        ) || a.parentElement || a;
+                        const card = findCard(a);
                         if (isNoticeCard(a, card)) return;
 
                         const titleEl = card.querySelector(
