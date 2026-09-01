@@ -294,6 +294,7 @@
     let lastMatchedSurface = null;
     let lastActualRaw = '';
     let lastActualCanonical = '';
+    let resolvedTarget = null;
 
     while (Date.now() < deadline) {
       if (isStopped || activeExecution?.cancelled) return { ok: false, reason: 'cancelled' };
@@ -306,6 +307,7 @@
         await new Promise(r => setTimeout(r, 100));
         continue;
       }
+      resolvedTarget = currentTarget;
 
       const surfaces = getEditorSurfaces(currentTarget);
       let matchedThisTick = false;
@@ -328,6 +330,7 @@
         } else if (Date.now() - matchStartTime >= 200) {
           return {
             ok: true,
+            target: resolvedTarget,
             surface: lastMatchedSurface,
             actualRaw: lastActualRaw,
             actualCanonical: lastActualCanonical
@@ -342,6 +345,7 @@
 
     return {
       ok: false,
+      target: resolvedTarget,
       reason: 'readback_mismatch',
       surface: lastMatchedSurface || 'none',
       actualRaw: lastActualRaw,
@@ -351,6 +355,10 @@
 
   function responseNodes() {
     return [...document.querySelectorAll(RESPONSE_SELECTORS)].filter(visible);
+  }
+
+  function userQueryNodes() {
+    return [...document.querySelectorAll('.user-message, user-query, [data-test-id="user-query"], .query-text, .user-query-container')].filter(visible);
   }
 
   function generationActive() {
@@ -391,9 +399,17 @@
 
   async function executeCore(command, execState) {
     if (isStopped || execState.cancelled) return { status: 'failed', text: '', error: 'cancelled' };
+
     const initialResponseList = responseNodes();
     const initialResponseSet = new Set(initialResponseList);
-    const initialUserMsgs = document.querySelectorAll('.user-message, user-query, [data-test-id="user-query"], .query-text, .user-query-container').length;
+    const baselineResponseFingerprints = new Set(
+      initialResponseList.map(n => canonicalPromptText(n.innerText || n.textContent || '')).filter(Boolean)
+    );
+    const initialUserQueries = userQueryNodes();
+    const initialUserQuerySet = new Set(initialUserQueries);
+    const baselineUserQueryFingerprints = new Set(
+      initialUserQueries.map(q => canonicalPromptText(q.innerText || q.textContent || '')).filter(Boolean)
+    );
 
     let target = editor();
     if (!target) {
@@ -409,7 +425,10 @@
 
       setEditorText(target, command.prompt);
       readbackResult = await waitForStableReadback(() => target, command.prompt, 1500);
-      if (readbackResult.ok) break;
+      if (readbackResult.ok) {
+        if (readbackResult.target) target = readbackResult.target;
+        break;
+      }
 
       if (attempt === 1) {
         await new Promise(r => setTimeout(r, 200));
@@ -442,6 +461,17 @@
       return { status: 'dom_unsupported', text: '', error: 'prompt_exact_readback_failed' };
     }
 
+    // Pre-send validation: Ensure target editor is connected and still contains canonical prompt
+    if (!target || !target.isConnected) {
+      target = editor();
+    }
+    const finalSurfaces = getEditorSurfaces(target);
+    const finalReadbackOk = finalSurfaces.some(s => canonicalPromptText(s.text) === expectedCanonical);
+    if (!finalReadbackOk) {
+      logSendDiag({ button: null, confirmed: false, boundNode: false });
+      return { status: 'dom_unsupported', text: '', error: 'prompt_editor_changed_before_send' };
+    }
+
     // 1st Send Attempt
     await new Promise(resolve => setTimeout(resolve, 300));
     if (isStopped || execState.cancelled) return { status: 'failed', text: '', error: 'cancelled' };
@@ -454,24 +484,101 @@
       target.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', code: 'Enter', keyCode: 13, which: 13, bubbles: true }));
     }
 
-    // Verify confirmation for up to 5 seconds
+    // Response and User Turn Tracking Variables
+    let currentUserTurn = null;
+    let targetResponseNode = null;
+
+    function bindResponseNode(node, evidence) {
+      if (!node || targetResponseNode) return targetResponseNode;
+      targetResponseNode = node;
+      console.log('[GEMINI][RESPONSE_BOUND]', JSON.stringify({
+        rid: command.requestId,
+        evidence: evidence,
+        hasUserTurnAnchor: Boolean(currentUserTurn),
+        nodeTag: node.tagName
+      }));
+      return targetResponseNode;
+    }
+
+    function findNewUserQuery() {
+      const currentQueries = userQueryNodes();
+      const exactPromptMatch = currentQueries.find(q => canonicalPromptText(q.innerText || q.textContent || '') === expectedCanonical);
+      if (exactPromptMatch) return exactPromptMatch;
+
+      const novelQuery = currentQueries.find(q => {
+        const qCanonical = canonicalPromptText(q.innerText || q.textContent || '');
+        return qCanonical && !baselineUserQueryFingerprints.has(qCanonical);
+      });
+      if (novelQuery) return novelQuery;
+
+      if (currentQueries.length > initialUserQueries.length) {
+        return currentQueries[currentQueries.length - 1];
+      }
+
+      return null;
+    }
+
+    function findTurnResponseCandidate() {
+      if (!currentUserTurn || !currentUserTurn.isConnected) {
+        const newQuery = findNewUserQuery();
+        if (newQuery) {
+          currentUserTurn = newQuery;
+          console.log('[GEMINI][USER_TURN_BOUND]', JSON.stringify({ rid: command.requestId }));
+        }
+      }
+
+      const currentResponses = responseNodes();
+
+      // Strategy 1: If currentUserTurn exists, search inside turn wrapper
+      if (currentUserTurn && currentUserTurn.isConnected) {
+        const turnWrapper = currentUserTurn.closest('conversation-turn, .conversation-turn, [data-test-id="conversation-turn"], .turn, article, section') || currentUserTurn.parentElement;
+        if (turnWrapper) {
+          const innerResponse = turnWrapper.querySelector(RESPONSE_SELECTORS);
+          if (innerResponse && visible(innerResponse)) {
+            const textCanonical = canonicalPromptText(innerResponse.innerText || innerResponse.textContent || '');
+            if (!baselineResponseFingerprints.has(textCanonical)) {
+              return innerResponse;
+            }
+          }
+        }
+
+        // Strategy 2: Document order following currentUserTurn
+        for (const resp of currentResponses) {
+          const pos = currentUserTurn.compareDocumentPosition(resp);
+          if (pos & Node.DOCUMENT_POSITION_FOLLOWING) {
+            const textCanonical = canonicalPromptText(resp.innerText || resp.textContent || '');
+            if (!baselineResponseFingerprints.has(textCanonical)) {
+              return resp;
+            }
+          }
+        }
+      }
+
+      // Strategy 3: Novel response not matching any baseline response fingerprint
+      for (const resp of currentResponses) {
+        const textCanonical = canonicalPromptText(resp.innerText || resp.textContent || '');
+        if (textCanonical && !baselineResponseFingerprints.has(textCanonical)) {
+          return resp;
+        }
+      }
+
+      return null;
+    }
+
+    // Verify send confirmation for up to 5 seconds
     let confirmed = false;
-    let boundResponseNode = null;
     const checkDeadline = Date.now() + 5000;
 
     while (Date.now() < checkDeadline) {
       if (isStopped || execState.cancelled) return { status: 'failed', text: '', error: 'cancelled' };
 
-      const currentResponses = responseNodes();
-      const newResponseNode = currentResponses.find(node => !initialResponseSet.has(node));
-      const currentUserMsgs = document.querySelectorAll('.user-message, user-query, [data-test-id="user-query"], .query-text, .user-query-container').length;
-
-      if (newResponseNode) {
+      const candidate = findTurnResponseCandidate();
+      if (candidate) {
         confirmed = true;
-        boundResponseNode = newResponseNode;
+        bindResponseNode(candidate, 'send_phase');
         break;
       }
-      if (currentUserMsgs > initialUserMsgs || generationActive()) {
+      if (currentUserTurn || (userQueryNodes().length > initialUserQueries.length) || generationActive()) {
         confirmed = true;
         break;
       }
@@ -480,6 +587,7 @@
 
     // 2nd Send Attempt if not confirmed after 2.5s
     if (!confirmed) {
+      if (!target || !target.isConnected) target = editor();
       const retryCtrl = findSendControl(target);
       if (retryCtrl?.button && !retryCtrl.button.disabled && retryCtrl.button.getAttribute('aria-disabled') !== 'true') {
         selectedBtn = retryCtrl.button;
@@ -491,16 +599,14 @@
       const retryDeadline = Date.now() + 2500;
       while (Date.now() < retryDeadline) {
         if (isStopped || execState.cancelled) return { status: 'failed', text: '', error: 'cancelled' };
-        const currentResponses = responseNodes();
-        const newResponseNode = currentResponses.find(node => !initialResponseSet.has(node));
-        const currentUserMsgs = document.querySelectorAll('.user-message, user-query, [data-test-id="user-query"], .query-text, .user-query-container').length;
 
-        if (newResponseNode) {
+        const candidate = findTurnResponseCandidate();
+        if (candidate) {
           confirmed = true;
-          boundResponseNode = newResponseNode;
+          bindResponseNode(candidate, 'send_phase_retry');
           break;
         }
-        if (currentUserMsgs > initialUserMsgs || generationActive()) {
+        if (currentUserTurn || (userQueryNodes().length > initialUserQueries.length) || generationActive()) {
           confirmed = true;
           break;
         }
@@ -512,7 +618,7 @@
       button: selectedBtn,
       totalCandidates: sendCtrl?.totalCandidates || 0,
       confirmed: confirmed,
-      boundNode: Boolean(boundResponseNode)
+      boundNode: Boolean(targetResponseNode)
     });
 
     if (!confirmed) {
@@ -522,7 +628,6 @@
     const deadline = Math.min(execState.deadlineAt, Date.now() + 65000);
     let stableSince = null;
     let previous = '';
-    let targetResponseNode = boundResponseNode || null;
 
     return new Promise((resolve) => {
       let resolved = false;
@@ -548,11 +653,9 @@
         if (Date.now() > deadline) return finish({ status: 'timeout', text: '', error: 'command_deadline_exceeded' });
 
         if (!targetResponseNode) {
-          const currentNodes = responseNodes();
-          const newNode = currentNodes.find(node => !initialResponseSet.has(node));
-          if (newNode) {
-            targetResponseNode = newNode;
-            console.log('[GEMINI][RESPONSE_BOUND]', Boolean(targetResponseNode));
+          const candidate = findTurnResponseCandidate();
+          if (candidate) {
+            bindResponseNode(candidate, 'observer_phase');
           }
         }
 
