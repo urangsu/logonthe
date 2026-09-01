@@ -143,7 +143,7 @@ class GeminiBusyRecoveryContractTests(unittest.TestCase):
 
     def test_case_6_http_v1_status_explicit_camelcase_contract(self):
         """⑥ /v1/status HTTP 엔드포인트가 명시적 camelCase JSON 계약을 준수하는지 검증"""
-        bridge = GeminiExtensionBridge(expected_extension_version="13.2.3", expected_build_id="13.2.3-r6")
+        bridge = GeminiExtensionBridge(expected_extension_version="13.2.3", expected_build_id="13.2.3-r7")
         cmd = GeminiCommand.create("post:status_check", 1, "prompt_text")
         bridge.publish(cmd)
 
@@ -176,7 +176,7 @@ class GeminiBusyRecoveryContractTests(unittest.TestCase):
 
     def test_case_7_background_reconciliation_keeps_active_request_safe(self):
         """⑦ 정상 active request는 background reconciliation에서 절대 orphan 취소되지 않음"""
-        bridge = GeminiExtensionBridge(expected_extension_version="13.2.3", expected_build_id="13.2.3-r6")
+        bridge = GeminiExtensionBridge(expected_extension_version="13.2.3", expected_build_id="13.2.3-r7")
         cmd = GeminiCommand.create("post:safe", 1, "prompt_text")
         bridge.publish(cmd)
 
@@ -215,6 +215,39 @@ class GeminiBusyRecoveryContractTests(unittest.TestCase):
         self.assertTrue(finish_called)
         self.assertEqual(settled_result["status"], "failed")
         self.assertEqual(settled_result["error"], "cancelled_by_bridge")
+
+    def test_case_9_broken_pipe_leaves_command_pending_for_next_poll(self):
+        """⑨ BrokenPipeError / client abort 발생 시 command가 손실되지 않고 pending 상태로 유지됨"""
+        bridge = GeminiExtensionBridge(expected_extension_version="13.2.3", expected_build_id="13.2.3-r7")
+        cmd = GeminiCommand.create("post:broken_pipe_test", 1, "prompt_broken_pipe")
+        bridge.publish(cmd)
+
+        server = GeminiBridgeHTTPServer(bridge, host="127.0.0.1", port=0)
+        server.start()
+        try:
+            import socket
+            # Simulate client connecting and abruptly closing socket
+            s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+            s.connect(("127.0.0.1", server.port))
+            s.sendall(b"GET /v1/command/wait?timeout=0.5 HTTP/1.1\r\nHost: 127.0.0.1\r\n\r\n")
+            s.close()
+
+            # Command must still be current and pending
+            curr = bridge.current_command()
+            self.assertIsNotNone(curr)
+            self.assertEqual(curr.request_id, cmd.request_id)
+            self.assertEqual(bridge.preflight().command_state, "pending")
+
+            # Next legitimate poll successfully retrieves the command
+            import http.client
+            conn = http.client.HTTPConnection("127.0.0.1", server.port, timeout=2.0)
+            conn.request("GET", "/v1/command/wait?timeout=1.0")
+            resp = conn.getresponse()
+            data = json.loads(resp.read().decode("utf-8"))
+            self.assertEqual(data["command"]["requestId"], cmd.request_id)
+            conn.close()
+        finally:
+            server.stop()
 
 
 if __name__ == "__main__":

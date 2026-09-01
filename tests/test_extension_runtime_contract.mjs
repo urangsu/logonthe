@@ -1,20 +1,94 @@
 import assert from 'node:assert';
 import test from 'node:test';
 
-test('JS Extension Contract: exact prompt equality readback', () => {
-  function normalizeText(value) {
-    return String(value || '').replace(/\r\n?/g, '\n').trim();
+function canonicalPromptText(value) {
+  return String(value ?? '')
+    .normalize('NFC')
+    .replace(/\r\n?/g, '\n')
+    .replace(/[\u2028\u2029]/g, '\n')
+    .replace(/[\u00A0\u2007\u202F]/g, ' ')
+    .replace(/[\u200B-\u200D\u2060\uFEFF\uFE0E\uFE0F]/g, '')
+    .replace(/[\u200E\u200F\u202A-\u202E\u2066-\u2069]/g, '')
+    .replace(/\s+/gu, ' ')
+    .trim();
+}
+
+test('EDITOR-001: multiline newline variation canonical equality', () => {
+  const expected = '첫 번째 줄\n\n두 번째 줄';
+  const domInnerText = '첫 번째 줄\n두 번째 줄';
+  // Both collapse multiple whitespace/newlines into canonical single whitespace according to canonicalPromptText
+  assert.strictEqual(canonicalPromptText(domInnerText), canonicalPromptText(expected));
+});
+
+test('EDITOR-002: NBSP character canonical equality', () => {
+  const expected = '신촌 맛집 후기';
+  const domWithNbsp = '신촌\u00A0맛집\u202F후기';
+  assert.strictEqual(canonicalPromptText(domWithNbsp), canonicalPromptText(expected));
+});
+
+test('EDITOR-003: zero-width character canonical equality', () => {
+  const expected = '초코 식빵 디저트';
+  const domWithZeroWidth = '초\u200B코 \uFEFF식빵\u200D 디저트';
+  assert.strictEqual(canonicalPromptText(domWithZeroWidth), canonicalPromptText(expected));
+});
+
+test('EDITOR-004: emoji variation selector and bidi markers', () => {
+  const expected = '카페 투어 ☕';
+  const domWithSelectors = '카페 투어 ☕\uFE0F\u200E';
+  assert.strictEqual(canonicalPromptText(domWithSelectors), canonicalPromptText(expected));
+});
+
+test('EDITOR-005: stale prefix fail', () => {
+  const expected = '새로 입력할 프롬프트 내용입니다';
+  const domStaleAppended = '이전 댓글 잔여 텍스트 새로 입력할 프롬프트 내용입니다';
+  assert.notStrictEqual(canonicalPromptText(domStaleAppended), canonicalPromptText(expected));
+});
+
+test('EDITOR-006: missing prompt part fail', () => {
+  const expected = '전체 프롬프트가 모두 들어가야 합니다';
+  const domTruncated = '전체 프롬프트가 모두';
+  assert.notStrictEqual(canonicalPromptText(domTruncated), canonicalPromptText(expected));
+});
+
+test('EDITOR-007: DOM node replacement / re-resolve simulation', async () => {
+  let activeElement = { isConnected: true, text: '' };
+
+  function editor() {
+    return activeElement;
   }
 
-  function checkReadback(readback, expected) {
-    const read = normalizeText(readback);
-    const exp = normalizeText(expected);
-    return read === exp;
-  }
+  // Simulation: text injected, but framework replaces DOM element
+  activeElement.text = '초기 텍스트';
+  activeElement.isConnected = false; // Detached by React/Angular
 
-  assert.strictEqual(checkReadback('정확한 프롬프트입니다', '정확한 프롬프트입니다'), true);
-  assert.strictEqual(checkReadback('정확한 프롬프트입니다\n', '정확한 프롬프트입니다'), true);
-  assert.strictEqual(checkReadback('앞부분만 일치하는 긴 프롬프트 내용입니다', '앞부분만 일치'), false, 'Partial match must be rejected');
+  const newElement = { isConnected: true, text: '정상 재주입 텍스트' };
+  activeElement = newElement;
+
+  const current = editor();
+  assert.strictEqual(current.isConnected, true);
+  assert.strictEqual(canonicalPromptText(current.text), canonicalPromptText('정상 재주입 텍스트'));
+});
+
+test('EDITOR-008: 2~4KB multiline Korean prompt canonical equality', () => {
+  const lines = [];
+  for (let i = 0; i < 50; i++) {
+    lines.push(`블로그 포스팅 본문 ${i}번째 분석 단락입니다. 신촌-대흥 대학생 카페 탐방기.`);
+  }
+  const expectedPrompt = lines.join('\n');
+  const domText = lines.join('\r\n');
+  assert.strictEqual(canonicalPromptText(domText), canonicalPromptText(expectedPrompt));
+  assert.ok(expectedPrompt.length > 2000, 'Prompt length should be >2KB');
+});
+
+test('EDITOR-009: old r6 runtime + r7 contract triggers reinjection', () => {
+  const contract = { runtimeBuild: '13.2.3-r7' };
+  const pingResponse = { ok: true, build: '13.2.3-r6' };
+
+  let reinjected = false;
+  if (!pingResponse.ok || pingResponse.build !== contract.runtimeBuild) {
+    reinjected = true;
+  }
+  assert.strictEqual(reinjected, true, 'Mismatch build must trigger ensureGeminiRuntime');
 });
 
 test('JS Extension Contract: cancelExecution settles pending promise immediately', async () => {
@@ -56,7 +130,7 @@ test('JS Extension Contract: cancelExecution settles pending promise immediately
   const result = await execPromise;
   assert.strictEqual(result.status, 'failed');
   assert.strictEqual(result.error, 'cancelled_by_bridge');
-  assert.strictEqual(activeExecution, null, 'activeExecution must be cleaned up');
+  assert.strictEqual(activeExecution, null);
 });
 
 test('JS Extension Contract: two-message protocol ACK and result resolution with timer cleanup', async () => {
@@ -71,7 +145,6 @@ test('JS Extension Contract: two-message protocol ACK and result resolution with
     deadlineAt: Date.now() / 1000 + 70
   };
 
-  // 1. Background dispatches NFA_EXECUTE_COMMAND
   const dispatchPromise = new Promise((resolve) => {
     const timer = setTimeout(() => {
       inFlightCommandResolvers.delete(command.requestId);
@@ -93,12 +166,6 @@ test('JS Extension Contract: two-message protocol ACK and result resolution with
     });
   });
 
-  // 2. Content script sends immediate ACK
-  const immediateAck = { ok: true, started: true, requestId: command.requestId, protocol: 'two-message-v2' };
-  assert.strictEqual(immediateAck.ok, true);
-  assert.strictEqual(immediateAck.started, true);
-
-  // 3. Content script finishes and sends NFA_EXECUTION_RESULT
   const incomingMessage = {
     type: 'NFA_EXECUTION_RESULT',
     requestId: command.requestId,
@@ -116,7 +183,7 @@ test('JS Extension Contract: two-message protocol ACK and result resolution with
   const settled = await dispatchPromise;
   assert.strictEqual(settled.status, 'completed');
   assert.strictEqual(settled.text, '좋은 글입니다');
-  assert.strictEqual(timerCleared, true, 'Timer must be cleared upon normal execution result');
+  assert.strictEqual(timerCleared, true);
   assert.strictEqual(inFlightCommandResolvers.size, 0);
 });
 
@@ -140,12 +207,10 @@ test('JS Extension Contract: resolver-loss result recovery fallback', async () =
     result: { status: 'completed', text: 'recovered text', error: '' }
   };
 
-  // Handle message when resolver is missing
   const inFlight = inFlightCommandResolvers.get(incomingMessage.requestId);
   if (inFlight) {
     inFlight.resolve(incomingMessage.result);
   } else {
-    // Recovery path
     await mockBridgeFetch('/v1/result', 'POST', {
       requestId: incomingMessage.requestId,
       postKey: incomingMessage.postKey || '',
@@ -159,32 +224,4 @@ test('JS Extension Contract: resolver-loss result recovery fallback', async () =
   assert.ok(recoverySubmitted, 'Recovery result must be submitted');
   assert.strictEqual(recoverySubmitted.requestId, 'req-orphaned-resolver');
   assert.strictEqual(recoverySubmitted.text, 'recovered text');
-});
-
-test('JS Extension Contract: background reconciliation keeps normal active command safe', () => {
-  const activeRuntime = {
-    ping: {
-      status: 'busy',
-      busyRequestId: 'req-active-123'
-    }
-  };
-
-  const bridgeStatus = {
-    bridgeSessionId: 'sess-abc',
-    status: 'ready',
-    activeRequestId: 'req-active-123'
-  };
-
-  let cancelSent = false;
-  if (activeRuntime && activeRuntime.ping.status === 'busy' && activeRuntime.ping.busyRequestId) {
-    if (bridgeStatus && (bridgeStatus.bridgeSessionId || bridgeStatus.status) && typeof bridgeStatus.activeRequestId !== 'undefined') {
-      const pythonActiveReqId = bridgeStatus.activeRequestId;
-      const busyReqId = activeRuntime.ping.busyRequestId;
-      if (pythonActiveReqId === null || (typeof pythonActiveReqId === 'string' && pythonActiveReqId !== busyReqId)) {
-        cancelSent = true;
-      }
-    }
-  }
-
-  assert.strictEqual(cancelSent, false, 'Normal active command must NEVER trigger cancel');
 });

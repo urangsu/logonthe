@@ -16,12 +16,13 @@
     'rich-textarea div[contenteditable="true"]',
     'div.ql-editor[contenteditable="true"]',
     'div[role="textbox"][contenteditable="true"]',
+    'div[contenteditable="true"]',
     'textarea'
   ];
   const RESPONSE_SELECTORS = 'model-response';
   let runtimeContract = {
     extensionVersion: '13.2.3',
-    runtimeBuild: '13.2.3-r6',
+    runtimeBuild: '13.2.3-r7',
     protocolVersion: 3,
     bridgeSchemaVersion: 2
   };
@@ -81,64 +82,43 @@
     return false;
   }
 
-  function normalizeText(value) {
-    return String(value || '').replace(/\r\n?/g, '\n').trim();
+  function canonicalPromptText(value) {
+    return String(value ?? '')
+      .normalize('NFC')
+      .replace(/\r\n?/g, '\n')
+      .replace(/[\u2028\u2029]/g, '\n')
+      .replace(/[\u00A0\u2007\u202F]/g, ' ')
+      .replace(/[\u200B-\u200D\u2060\uFEFF\uFE0E\uFE0F]/g, '')
+      .replace(/[\u200E\u200F\u202A-\u202E\u2066-\u2069]/g, '')
+      .replace(/\s+/gu, ' ')
+      .trim();
+  }
+
+  function simpleHash(str) {
+    let hash = 0;
+    for (let i = 0; i < str.length; i++) {
+      hash = (Math.imul(31, hash) + str.charCodeAt(i)) | 0;
+    }
+    return 'h_' + (hash >>> 0).toString(16);
+  }
+
+  function countOccurrences(str, pattern) {
+    const matches = (str || '').match(pattern);
+    return matches ? matches.length : 0;
+  }
+
+  function findFirstMismatchIndex(a, b) {
+    const len = Math.min(a.length, b.length);
+    for (let i = 0; i < len; i++) {
+      if (a[i] !== b[i]) return i;
+    }
+    return a.length !== b.length ? len : -1;
   }
 
   function visible(element) {
-    if (!element) return false;
+    if (!element || !element.isConnected) return false;
     const rect = element.getBoundingClientRect();
-    return rect.width > 15 && rect.height > 15 && getComputedStyle(element).visibility !== 'hidden';
-  }
-
-  function editor() {
-    for (const selector of EDITOR_SELECTORS) {
-      const found = [...document.querySelectorAll(selector)].find(visible);
-      if (found) return found;
-    }
-    return null;
-  }
-
-  function pageStatus() {
-    const body = (document.body?.innerText || '').slice(0, 5000);
-    if (/captcha|로봇이 아닙니다|비정상적인 트래픽/i.test(body)) return 'captcha';
-    if (/accounts\.google\.com/.test(location.href) || /로그인/.test(body) && !editor()) return 'auth_required';
-
-    if (activeExecution) {
-      if (Date.now() > activeExecution.deadlineAt) {
-        cancelExecution(activeExecution.requestId, 'command_deadline_exceeded');
-      } else {
-        return 'busy';
-      }
-    }
-    return editor() ? 'ready' : 'dom_unsupported';
-  }
-
-  function setEditorText(target, text) {
-    target.focus();
-    if (target instanceof HTMLTextAreaElement) {
-      target.value = text;
-    } else {
-      const selection = window.getSelection();
-      const range = document.createRange();
-      range.selectNodeContents(target);
-      selection.removeAllRanges();
-      selection.addRange(range);
-      document.execCommand('insertText', false, text);
-    }
-    target.dispatchEvent(new Event('input', { bubbles: true, cancelable: true }));
-    target.dispatchEvent(new Event('change', { bubbles: true, cancelable: true }));
-    const read = normalizeText(target.innerText || target.value || '');
-    return read === normalizeText(text);
-  }
-
-  function responseNodes() {
-    return [...document.querySelectorAll(RESPONSE_SELECTORS)].filter(visible);
-  }
-
-  function generationActive() {
-    const busySelector = '[aria-busy="true"], [data-is-generating="true"], .loading-dots, .streaming, [aria-label*="중지"], [aria-label*="Stop"]';
-    return Boolean(document.querySelector(busySelector));
+    return rect.width > 15 && rect.height > 15 && getComputedStyle(element).visibility !== 'hidden' && getComputedStyle(element).display !== 'none';
   }
 
   function findComposer(input) {
@@ -199,6 +179,185 @@
     return scored.length > 0 ? { button: scored[0].button, totalCandidates: scored.length } : null;
   }
 
+  function scoreEditorCandidate(el) {
+    if (!el || !el.isConnected) return -1000;
+    if (!visible(el)) return -1000;
+    if (el.getAttribute('aria-hidden') === 'true') return -500;
+    if (el.disabled || el.readOnly || el.getAttribute('aria-disabled') === 'true') return -1000;
+
+    let score = 100;
+    const isContentEditable = el.isContentEditable || el.getAttribute('contenteditable') === 'true';
+
+    if (el.closest('rich-textarea')) score += 500;
+    if (isContentEditable) score += 300;
+    if (el.closest('chat-window, .input-area, .composer, .input-container, form, main')) score += 200;
+
+    const rect = el.getBoundingClientRect();
+    if (rect.top > window.innerHeight * 0.4) score += 150;
+
+    const sendCandidate = findSendControl(el);
+    if (sendCandidate && sendCandidate.button && !sendCandidate.button.disabled) {
+      score += 250;
+    }
+
+    return score;
+  }
+
+  function editor() {
+    const candidates = [];
+    for (const selector of EDITOR_SELECTORS) {
+      const list = document.querySelectorAll(selector);
+      for (const el of list) {
+        const score = scoreEditorCandidate(el);
+        if (score > 0) {
+          candidates.push({ el, score });
+        }
+      }
+    }
+    candidates.sort((a, b) => b.score - a.score);
+    return candidates.length > 0 ? candidates[0].el : null;
+  }
+
+  function getEditorSurfaces(target) {
+    if (!target) return [];
+    if (target instanceof HTMLTextAreaElement || target instanceof HTMLInputElement) {
+      return [{ surface: 'value', text: target.value || '' }];
+    }
+    return [
+      { surface: 'innerText', text: target.innerText || '' },
+      { surface: 'textContent', text: target.textContent || '' }
+    ];
+  }
+
+  function pageStatus() {
+    const body = (document.body?.innerText || '').slice(0, 5000);
+    if (/captcha|로봇이 아닙니다|비정상적인 트래픽/i.test(body)) return 'captcha';
+    if (/accounts\.google\.com/.test(location.href) || /로그인/.test(body) && !editor()) return 'auth_required';
+
+    if (activeExecution) {
+      if (Date.now() > activeExecution.deadlineAt) {
+        cancelExecution(activeExecution.requestId, 'command_deadline_exceeded');
+      } else {
+        return 'busy';
+      }
+    }
+    return editor() ? 'ready' : 'dom_unsupported';
+  }
+
+  function clearEditor(target) {
+    if (!target || !target.isConnected) return;
+    target.focus();
+    if (target instanceof HTMLTextAreaElement || target instanceof HTMLInputElement) {
+      target.value = '';
+      target.dispatchEvent(new Event('input', { bubbles: true, cancelable: true }));
+      target.dispatchEvent(new Event('change', { bubbles: true, cancelable: true }));
+    } else {
+      const selection = window.getSelection();
+      const range = document.createRange();
+      range.selectNodeContents(target);
+      selection.removeAllRanges();
+      selection.addRange(range);
+      try {
+        document.execCommand('delete', false, null);
+      } catch (_) {
+        target.innerHTML = '';
+      }
+      target.dispatchEvent(new Event('input', { bubbles: true, cancelable: true }));
+      target.dispatchEvent(new Event('change', { bubbles: true, cancelable: true }));
+    }
+  }
+
+  function setEditorText(target, text) {
+    clearEditor(target);
+
+    target.focus();
+    if (target instanceof HTMLTextAreaElement || target instanceof HTMLInputElement) {
+      target.value = text;
+      target.dispatchEvent(new Event('input', { bubbles: true, cancelable: true }));
+      target.dispatchEvent(new Event('change', { bubbles: true, cancelable: true }));
+    } else {
+      const selection = window.getSelection();
+      const range = document.createRange();
+      range.selectNodeContents(target);
+      selection.removeAllRanges();
+      selection.addRange(range);
+      document.execCommand('insertText', false, text);
+      target.dispatchEvent(new InputEvent('input', { bubbles: true, cancelable: true, inputType: 'insertText', data: text }));
+      target.dispatchEvent(new Event('change', { bubbles: true, cancelable: true }));
+    }
+  }
+
+  async function waitForStableReadback(getTargetFn, expectedText, maxWaitMs = 1500) {
+    const expectedCanonical = canonicalPromptText(expectedText);
+    const deadline = Date.now() + maxWaitMs;
+    let matchStartTime = null;
+    let lastMatchedSurface = null;
+    let lastActualRaw = '';
+    let lastActualCanonical = '';
+
+    while (Date.now() < deadline) {
+      if (isStopped || activeExecution?.cancelled) return { ok: false, reason: 'cancelled' };
+
+      let currentTarget = getTargetFn();
+      if (!currentTarget || !currentTarget.isConnected) {
+        currentTarget = editor();
+      }
+      if (!currentTarget) {
+        await new Promise(r => setTimeout(r, 100));
+        continue;
+      }
+
+      const surfaces = getEditorSurfaces(currentTarget);
+      let matchedThisTick = false;
+
+      for (const s of surfaces) {
+        const canonicalActual = canonicalPromptText(s.text);
+        lastActualRaw = s.text;
+        lastActualCanonical = canonicalActual;
+
+        if (canonicalActual === expectedCanonical) {
+          matchedThisTick = true;
+          lastMatchedSurface = s.surface;
+          break;
+        }
+      }
+
+      if (matchedThisTick) {
+        if (!matchStartTime) {
+          matchStartTime = Date.now();
+        } else if (Date.now() - matchStartTime >= 200) {
+          return {
+            ok: true,
+            surface: lastMatchedSurface,
+            actualRaw: lastActualRaw,
+            actualCanonical: lastActualCanonical
+          };
+        }
+      } else {
+        matchStartTime = null;
+      }
+
+      await new Promise(r => setTimeout(r, 100));
+    }
+
+    return {
+      ok: false,
+      reason: 'readback_mismatch',
+      surface: lastMatchedSurface || 'none',
+      actualRaw: lastActualRaw,
+      actualCanonical: lastActualCanonical
+    };
+  }
+
+  function responseNodes() {
+    return [...document.querySelectorAll(RESPONSE_SELECTORS)].filter(visible);
+  }
+
+  function generationActive() {
+    const busySelector = '[aria-busy="true"], [data-is-generating="true"], .loading-dots, .streaming, [aria-label*="중지"], [aria-label*="Stop"]';
+    return Boolean(document.querySelector(busySelector));
+  }
+
   async function waitForSendReady(input, timeoutMs = 2500) {
     const deadline = Date.now() + timeoutMs;
     while (Date.now() < deadline) {
@@ -216,106 +375,144 @@
     try {
       const btn = diag.button;
       const meta = {
-        editorReadback: Boolean(diag.readback),
         candidateCount: diag.totalCandidates || 0,
         selectedTag: btn?.tagName || null,
         selectedClass: btn ? String(btn.className || '').slice(0, 50) : null,
         ariaLabel: btn?.getAttribute('aria-label') || null,
         iconText: btn ? (btn.innerText || '').trim().slice(0, 20) : null,
-        touchTarget: Boolean(btn?.querySelector('.mat-mdc-button-touch-target')),
         disabled: Boolean(btn?.disabled),
         ariaDisabled: btn?.getAttribute('aria-disabled') === 'true',
-        sendConfirmed: Boolean(diag.confirmed)
+        sendConfirmed: Boolean(diag.confirmed),
+        boundNode: Boolean(diag.boundNode)
       };
       console.log('[GEMINI][SEND_DIAG]', JSON.stringify(meta));
     } catch (_) {}
   }
 
-  function isSendConfirmed(input, initialNodes, initialUserMsgsCount) {
-    const inputEmpty = !input || !input.innerText || input.innerText.trim() === '' || input.value === '';
-    if (inputEmpty) return true;
-    if (generationActive()) return true;
-    const currentNodes = responseNodes();
-    if (currentNodes.length > initialNodes.length) return true;
-    const currentUserMessages = document.querySelectorAll('.user-message, user-query, [data-test-id="user-query"], .query-text, .user-query-container');
-    if (currentUserMessages.length > initialUserMsgsCount) return true;
-    return false;
-  }
-
   async function executeCore(command, execState) {
     if (isStopped || execState.cancelled) return { status: 'failed', text: '', error: 'cancelled' };
-    const initialNodes = responseNodes();
+    const initialResponseList = responseNodes();
+    const initialResponseSet = new Set(initialResponseList);
     const initialUserMsgs = document.querySelectorAll('.user-message, user-query, [data-test-id="user-query"], .query-text, .user-query-container').length;
-    const input = editor();
-    if (!input) {
+
+    let target = editor();
+    if (!target) {
       return { status: 'dom_unsupported', text: '', error: 'Gemini 입력창을 찾지 못했습니다.' };
     }
 
-    // Exact prompt injection & strict equality readback
-    let isTextSet = setEditorText(input, command.prompt);
-    if (!isTextSet) {
-      await new Promise(r => setTimeout(r, 200));
+    // Canonical prompt injection & stabilized readback (with up to 1 retry on newly resolved editor)
+    let readbackResult = null;
+    for (let attempt = 1; attempt <= 2; attempt++) {
       if (isStopped || execState.cancelled) return { status: 'failed', text: '', error: 'cancelled' };
-      isTextSet = setEditorText(input, command.prompt);
+      if (!target || !target.isConnected) target = editor();
+      if (!target) break;
+
+      setEditorText(target, command.prompt);
+      readbackResult = await waitForStableReadback(() => target, command.prompt, 1500);
+      if (readbackResult.ok) break;
+
+      if (attempt === 1) {
+        await new Promise(r => setTimeout(r, 200));
+        target = editor();
+      }
     }
-    const readbackText = normalizeText(input.innerText || input.value || '');
-    const expectedText = normalizeText(command.prompt);
-    const readbackOk = (readbackText === expectedText);
-    if (!readbackOk) {
-      logSendDiag({ button: null, readback: false, confirmed: false });
+
+    const expectedCanonical = canonicalPromptText(command.prompt);
+    const actualCanonical = readbackResult?.actualCanonical || '';
+    const actualRaw = readbackResult?.actualRaw || '';
+
+    const diagLog = {
+      expectedRawLen: (command.prompt || '').length,
+      actualRawLen: actualRaw.length,
+      expectedCanonicalLen: expectedCanonical.length,
+      actualCanonicalLen: actualCanonical.length,
+      expectedHash: simpleHash(expectedCanonical),
+      actualHash: simpleHash(actualCanonical),
+      firstMismatchIndex: findFirstMismatchIndex(actualCanonical, expectedCanonical),
+      actualSurface: readbackResult?.surface || 'unknown',
+      zeroWidthCount: countOccurrences(actualRaw, /[\u200B-\u200D\u2060\uFEFF\uFE0E\uFE0F]/g),
+      nbspCount: countOccurrences(actualRaw, /[\u00A0\u2007\u202F]/g),
+      newlineCount: countOccurrences(actualRaw, /\n/g),
+      editorConnected: Boolean(target?.isConnected),
+      readbackOk: Boolean(readbackResult?.ok)
+    };
+    console.log('[GEMINI][PROMPT_READBACK_DIAG]', JSON.stringify(diagLog));
+
+    if (!readbackResult?.ok) {
       return { status: 'dom_unsupported', text: '', error: 'prompt_exact_readback_failed' };
     }
 
     // 1st Send Attempt
     await new Promise(resolve => setTimeout(resolve, 300));
     if (isStopped || execState.cancelled) return { status: 'failed', text: '', error: 'cancelled' };
-    const sendCtrl = await waitForSendReady(input, 2500);
+    const sendCtrl = await waitForSendReady(target, 2500);
     let selectedBtn = sendCtrl?.button;
 
     if (selectedBtn && !selectedBtn.disabled && selectedBtn.getAttribute('aria-disabled') !== 'true') {
       selectedBtn.click();
-    } else if (input) {
-      input.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', code: 'Enter', keyCode: 13, which: 13, bubbles: true }));
+    } else if (target && target.isConnected) {
+      target.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', code: 'Enter', keyCode: 13, which: 13, bubbles: true }));
     }
 
-    // Verify confirmation for up to 3 seconds
+    // Verify confirmation for up to 5 seconds
     let confirmed = false;
-    const checkDeadline1 = Date.now() + 3000;
-    while (Date.now() < checkDeadline1) {
+    let boundResponseNode = null;
+    const checkDeadline = Date.now() + 5000;
+
+    while (Date.now() < checkDeadline) {
       if (isStopped || execState.cancelled) return { status: 'failed', text: '', error: 'cancelled' };
-      if (isSendConfirmed(input, initialNodes, initialUserMsgs)) {
+
+      const currentResponses = responseNodes();
+      const newResponseNode = currentResponses.find(node => !initialResponseSet.has(node));
+      const currentUserMsgs = document.querySelectorAll('.user-message, user-query, [data-test-id="user-query"], .query-text, .user-query-container').length;
+
+      if (newResponseNode) {
+        confirmed = true;
+        boundResponseNode = newResponseNode;
+        break;
+      }
+      if (currentUserMsgs > initialUserMsgs || generationActive()) {
         confirmed = true;
         break;
       }
-      await new Promise(r => setTimeout(r, 200));
+      await new Promise(r => setTimeout(r, 150));
     }
 
-    // 2nd Send Attempt if not confirmed
+    // 2nd Send Attempt if not confirmed after 2.5s
     if (!confirmed) {
-      const retryCtrl = findSendControl(input);
+      const retryCtrl = findSendControl(target);
       if (retryCtrl?.button && !retryCtrl.button.disabled && retryCtrl.button.getAttribute('aria-disabled') !== 'true') {
         selectedBtn = retryCtrl.button;
         retryCtrl.button.click();
-      } else if (input) {
-        input.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', code: 'Enter', keyCode: 13, which: 13, bubbles: true }));
+      } else if (target && target.isConnected) {
+        target.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', code: 'Enter', keyCode: 13, which: 13, bubbles: true }));
       }
 
-      const checkDeadline2 = Date.now() + 2000;
-      while (Date.now() < checkDeadline2) {
+      const retryDeadline = Date.now() + 2500;
+      while (Date.now() < retryDeadline) {
         if (isStopped || execState.cancelled) return { status: 'failed', text: '', error: 'cancelled' };
-        if (isSendConfirmed(input, initialNodes, initialUserMsgs)) {
+        const currentResponses = responseNodes();
+        const newResponseNode = currentResponses.find(node => !initialResponseSet.has(node));
+        const currentUserMsgs = document.querySelectorAll('.user-message, user-query, [data-test-id="user-query"], .query-text, .user-query-container').length;
+
+        if (newResponseNode) {
+          confirmed = true;
+          boundResponseNode = newResponseNode;
+          break;
+        }
+        if (currentUserMsgs > initialUserMsgs || generationActive()) {
           confirmed = true;
           break;
         }
-        await new Promise(r => setTimeout(r, 200));
+        await new Promise(r => setTimeout(r, 150));
       }
     }
 
     logSendDiag({
       button: selectedBtn,
-      readback: true,
       totalCandidates: sendCtrl?.totalCandidates || 0,
-      confirmed: confirmed
+      confirmed: confirmed,
+      boundNode: Boolean(boundResponseNode)
     });
 
     if (!confirmed) {
@@ -325,10 +522,10 @@
     const deadline = Math.min(execState.deadlineAt, Date.now() + 65000);
     let stableSince = null;
     let previous = '';
+    let targetResponseNode = boundResponseNode || null;
 
     return new Promise((resolve) => {
       let resolved = false;
-      const marker = `[[CMT:${command.requestId}]]`;
 
       const cleanupObserver = () => {
         try { observer.disconnect(); } catch (_) {}
@@ -350,37 +547,35 @@
         if (execState.cancelled) return finish({ status: 'failed', text: '', error: 'cancelled' });
         if (Date.now() > deadline) return finish({ status: 'timeout', text: '', error: 'command_deadline_exceeded' });
 
-        const currentNodes = responseNodes();
-        const newNodes = currentNodes.slice(initialNodes.length);
-        if (!newNodes.length) return;
+        if (!targetResponseNode) {
+          const currentNodes = responseNodes();
+          const newNode = currentNodes.find(node => !initialResponseSet.has(node));
+          if (newNode) {
+            targetResponseNode = newNode;
+            console.log('[GEMINI][RESPONSE_BOUND]', Boolean(targetResponseNode));
+          }
+        }
 
-        const targetResponseNode = newNodes[newNodes.length - 1];
+        if (!targetResponseNode) return;
+
         const contentEl = targetResponseNode.querySelector('message-content, div.markdown, div.model-response-text, .response-body-inner') || targetResponseNode;
-        const current = normalizeText(contentEl.innerText || contentEl.textContent || '');
+        const current = (contentEl.innerText || contentEl.textContent || '').trim();
 
         if (current && current !== previous) {
           previous = current;
           stableSince = Date.now();
         } else if (current && stableSince && Date.now() - stableSince >= 1600 && !generationActive()) {
-          const correlated = newNodes.find(node => {
-            const inner = node.querySelector('message-content, div.markdown, div.model-response-text, .response-body-inner') || node;
-            return (inner.innerText || '').includes(marker);
-          });
-          if (!correlated) {
-            return finish({ status: 'failed', text: '', error: 'request_marker_missing_in_new_node' });
-          }
-          const correlatedContent = correlated.querySelector('message-content, div.markdown, div.model-response-text, .response-body-inner') || correlated;
-          return finish({ status: 'completed', text: (correlatedContent.innerText || '').trim(), error: '' });
+          return finish({ status: 'completed', text: current, error: '' });
         }
       };
 
-      const targetNode = document.querySelector('chat-history, main, body') || document.body;
+      const targetRoot = document.querySelector('chat-history, main, body') || document.body;
       const observer = new MutationObserver(() => {
         checkOutput();
       });
-      observer.observe(targetNode, { childList: true, subtree: true, characterData: true });
+      observer.observe(targetRoot, { childList: true, subtree: true, characterData: true });
 
-      const checkTimer = setInterval(checkOutput, 300);
+      const checkTimer = setInterval(checkOutput, 250);
       execState.observer = observer;
       execState.timer = checkTimer;
     });
