@@ -3,7 +3,7 @@ import threading
 from dataclasses import dataclass
 from enum import Enum
 from typing import Optional, Tuple
-from browser.session import interruptible_wait
+from browser.session import interruptible_wait, WaitInterruptionReason
 from src.logger import logger
 
 
@@ -20,7 +20,24 @@ class PacingKind(str, Enum):
 class PacingResult:
     kind: PacingKind
     seconds: float
-    interrupted: bool = False
+    reason: WaitInterruptionReason = WaitInterruptionReason.COMPLETED
+
+    @property
+    def interrupted(self) -> bool:
+        """하위 호환성: 작업 중지(STOPPED)인 경우에만 True 반환 (SKIPPED는 다음 작업 계속 진행)"""
+        return self.reason == WaitInterruptionReason.STOPPED
+
+    @property
+    def stopped(self) -> bool:
+        return self.reason == WaitInterruptionReason.STOPPED
+
+    @property
+    def skipped(self) -> bool:
+        return self.reason == WaitInterruptionReason.SKIPPED
+
+    @property
+    def completed(self) -> bool:
+        return self.reason == WaitInterruptionReason.COMPLETED
 
 
 class PacingService:
@@ -56,27 +73,29 @@ class PacingService:
     def wait_action(self) -> PacingResult:
         """글 진입 후 공감 전, 공감 후 댓글 열기 전 등 짧은 UI 동작 사이 대기"""
         if not self.config.get("pacing_enabled", True):
-            return PacingResult(PacingKind.ACTION, 0.0)
+            return PacingResult(PacingKind.ACTION, 0.0, WaitInterruptionReason.COMPLETED)
 
         low, high = self._range("action_delay_min", "action_delay_max", 1.0, 2.5)
         if high <= 0:
-            return PacingResult(PacingKind.ACTION, 0.0)
+            return PacingResult(PacingKind.ACTION, 0.0, WaitInterruptionReason.COMPLETED)
 
         seconds = round(random.uniform(low, high), 2)
-        interrupted = interruptible_wait(self.stop_event, seconds, pause_event=self.pause_event, skip_event=self.skip_event)
-        self.skip_event.clear()
-        return PacingResult(PacingKind.ACTION, seconds, interrupted)
+        reason = interruptible_wait(self.stop_event, seconds, pause_event=self.pause_event, skip_event=self.skip_event)
+        if reason == WaitInterruptionReason.SKIPPED:
+            self.skip_event.clear()
+        return PacingResult(PacingKind.ACTION, seconds, reason)
 
     def _wait_named(self, kind: PacingKind, min_key: str, max_key: str, default_min: float, default_max: float) -> PacingResult:
         if not self.config.get("pacing_enabled", True):
-            return PacingResult(kind, 0.0)
+            return PacingResult(kind, 0.0, WaitInterruptionReason.COMPLETED)
         low, high = self._range(min_key, max_key, default_min, default_max)
         if high <= 0:
-            return PacingResult(kind, 0.0)
+            return PacingResult(kind, 0.0, WaitInterruptionReason.COMPLETED)
         seconds = round(random.uniform(low, high), 2)
-        interrupted = interruptible_wait(self.stop_event, seconds, pause_event=self.pause_event, skip_event=self.skip_event)
-        self.skip_event.clear()
-        return PacingResult(kind, seconds, interrupted)
+        reason = interruptible_wait(self.stop_event, seconds, pause_event=self.pause_event, skip_event=self.skip_event)
+        if reason == WaitInterruptionReason.SKIPPED:
+            self.skip_event.clear()
+        return PacingResult(kind, seconds, reason)
 
     def wait_page_settle(self) -> PacingResult:
         return self._wait_named(PacingKind.PAGE_SETTLE, "page_settle_min", "page_settle_max", 1.0, 2.0)
@@ -90,11 +109,11 @@ class PacingService:
     def wait_next_post(self) -> PacingResult:
         """한 글 처리가 완료된 후 다음 글로 이동하기 전 대기"""
         if not self.config.get("pacing_enabled", True):
-            return PacingResult(PacingKind.NEXT_POST, 0.0)
+            return PacingResult(PacingKind.NEXT_POST, 0.0, WaitInterruptionReason.COMPLETED)
 
         low, high = self._range("next_post_delay_min", "next_post_delay_max", 2.0, 5.0)
         if high <= 0:
-            return PacingResult(PacingKind.NEXT_POST, 0.0)
+            return PacingResult(PacingKind.NEXT_POST, 0.0, WaitInterruptionReason.COMPLETED)
 
         seconds = round(random.uniform(low, high), 2)
         if self.state_manager:
@@ -102,9 +121,10 @@ class PacingService:
             self.state_manager.update(new_state=FeedState.PACING, message=f"다음 글로 이동 전 대기 중... ({seconds:.1f}초)")
 
         logger.log(f"[PACING] 다음 글 진입 전 {seconds:.1f}초 대기...")
-        interrupted = interruptible_wait(self.stop_event, seconds, pause_event=self.pause_event, skip_event=self.skip_event)
-        self.skip_event.clear()
-        return PacingResult(PacingKind.NEXT_POST, seconds, interrupted)
+        reason = interruptible_wait(self.stop_event, seconds, pause_event=self.pause_event, skip_event=self.skip_event)
+        if reason == WaitInterruptionReason.SKIPPED:
+            self.skip_event.clear()
+        return PacingResult(PacingKind.NEXT_POST, seconds, reason)
 
     def maybe_pause(self) -> Optional[PacingResult]:
         """일정 확률로 발생하는 안전한 긴 휴지(Pause)"""
@@ -127,10 +147,11 @@ class PacingService:
             self.state_manager.update(new_state=FeedState.PAUSED, message=f"잠시 쉬는 중... ({seconds:.1f}초)")
 
         logger.log(f"☕ [PAUSE] 작업 간격 조정을 위해 {seconds:.1f}초 동안 잠시 대기합니다.")
-        interrupted = interruptible_wait(self.stop_event, seconds, pause_event=self.pause_event, skip_event=self.skip_event)
-        self.skip_event.clear()
-        return PacingResult(PacingKind.PAUSE, seconds, interrupted)
+        reason = interruptible_wait(self.stop_event, seconds, pause_event=self.pause_event, skip_event=self.skip_event)
+        if reason == WaitInterruptionReason.SKIPPED:
+            self.skip_event.clear()
+        return PacingResult(PacingKind.PAUSE, seconds, reason)
 
     def reset(self) -> None:
         """세션 종료 또는 리셋 시 상태 초기화"""
-        pass
+        self.skip_event.clear()

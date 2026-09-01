@@ -94,8 +94,19 @@ class QueryRotator:
                 else:
                     other_specs.append(spec)
 
-        # 맛집 쿼리를 큐 전면에 우선 배치
-        self.specs = food_specs + other_specs
+        # 맛집 2 : 기타 카테고리 1 비율로 부드럽게 인터리빙 (맛집 최우선 유지 및 다양성 확보)
+        interleaved: List[QuerySpec] = []
+        fi, oi = 0, 0
+        while fi < len(food_specs) or oi < len(other_specs):
+            for _ in range(2):
+                if fi < len(food_specs):
+                    interleaved.append(food_specs[fi])
+                    fi += 1
+            if oi < len(other_specs):
+                interleaved.append(other_specs[oi])
+                oi += 1
+
+        self.specs = interleaved if interleaved else (food_specs + other_specs)
 
         if not self.specs:
             self.specs = [

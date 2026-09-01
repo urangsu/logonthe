@@ -123,44 +123,45 @@ async function findActiveGeminiRuntime() {
   return null;
 }
 
-async function runTransportCycle() {
+async function startHeartbeatLoop() {
+  while (true) {
+    try {
+      const contract = await getRuntimeContract();
+      const activeRuntime = await findActiveGeminiRuntime();
+      const now = Date.now();
+      const heartbeatPayload = {
+        status: activeRuntime ? (activeRuntime.ping.status || 'ready') : 'gemini_tab_not_found',
+        transportAlive: true,
+        runtimeAlive: Boolean(activeRuntime),
+        runtimeStatus: activeRuntime ? activeRuntime.ping.status : 'disconnected',
+        title: activeRuntime?.ping.title || 'Google Gemini',
+        url: activeRuntime?.ping.url || 'https://gemini.google.com/app',
+        extensionVersion: contract.extensionVersion,
+        contentBuild: contract.runtimeBuild,
+        buildId: contract.runtimeBuild,
+        protocolVersion: contract.protocolVersion,
+        bridgeSchemaVersion: contract.bridgeSchemaVersion,
+        consumerId: 'background-r4',
+        lastRuntimePingAt: now
+      };
+      await bridgeFetch('/v1/heartbeat', 'POST', heartbeatPayload, 5000);
+      lastHeartbeatSentAt = now;
+    } catch (_) {}
+    await new Promise(r => setTimeout(r, 10000));
+  }
+}
+
+async function runCommandCycle() {
   const contract = await getRuntimeContract();
   const activeRuntime = await findActiveGeminiRuntime();
 
-  // 1. Send Heartbeat to Python Bridge Server
-  const now = Date.now();
-  const heartbeatPayload = {
-    status: activeRuntime ? (activeRuntime.ping.status || 'ready') : 'gemini_tab_not_found',
-    transportAlive: true,
-    runtimeAlive: Boolean(activeRuntime),
-    runtimeStatus: activeRuntime ? activeRuntime.ping.status : 'disconnected',
-    title: activeRuntime?.ping.title || 'Google Gemini',
-    url: activeRuntime?.ping.url || 'https://gemini.google.com/app',
-    extensionVersion: contract.extensionVersion,
-    contentBuild: contract.runtimeBuild,
-    buildId: contract.runtimeBuild,
-    protocolVersion: contract.protocolVersion,
-    bridgeSchemaVersion: contract.bridgeSchemaVersion,
-    consumerId: 'background-r4',
-    lastRuntimePingAt: now
-  };
-
-  try {
-    await bridgeFetch('/v1/heartbeat', 'POST', heartbeatPayload, 5000);
-    lastHeartbeatSentAt = now;
-  } catch (hbErr) {
-    // If bridge is unreachable / not running, wait and return
-    await new Promise(r => setTimeout(r, 2500));
-    return;
-  }
-
   if (!activeRuntime || activeRuntime.ping.status !== 'ready') {
-    // If Gemini tab is missing or in auth/unsupported state, wait and return
+    // If Gemini tab is missing or not ready, wait and retry
     await new Promise(r => setTimeout(r, 2000));
     return;
   }
 
-  // 2. Long-poll for next command (up to 15s wait on bridge server)
+  // 1. Long-poll for next command (up to 15s wait on bridge server)
   let cmdData = null;
   try {
     cmdData = await bridgeFetch('/v1/command/wait?timeout=15', 'GET', null, 20000);
@@ -173,7 +174,7 @@ async function runTransportCycle() {
     return;
   }
 
-  // 3. Claim command
+  // 2. Claim command
   try {
     const claim = await bridgeFetch('/v1/claim', 'POST', {
       requestId: command.requestId,
@@ -186,7 +187,7 @@ async function runTransportCycle() {
     return;
   }
 
-  // 4. Dispatch NFA_EXECUTE_COMMAND to Gemini Content Script
+  // 3. Dispatch NFA_EXECUTE_COMMAND to Gemini Content Script
   let execResult = null;
   try {
     execResult = await new Promise((resolve) => {
@@ -210,7 +211,7 @@ async function runTransportCycle() {
     execResult = { status: 'failed', text: '', error: String(e?.message || e) };
   }
 
-  // 5. Submit execution result to Python
+  // 4. Submit execution result to Python
   try {
     await bridgeFetch('/v1/result', 'POST', {
       requestId: command.requestId,
@@ -228,9 +229,10 @@ async function runTransportCycle() {
 async function startTransportEngine() {
   if (isTransportLoopRunning) return;
   isTransportLoopRunning = true;
+  startHeartbeatLoop();
   while (true) {
     try {
-      await runTransportCycle();
+      await runCommandCycle();
     } catch (e) {
       await new Promise(r => setTimeout(r, 2000));
     }

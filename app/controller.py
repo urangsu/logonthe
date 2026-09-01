@@ -45,6 +45,7 @@ class FeedController:
         command_bridge: Optional[ClipboardCommandBridge] = None,
         pause_event: Optional[threading.Event] = None,
         gemini_extension_bridge: Optional[GeminiExtensionBridge] = None,
+        skip_event: Optional[threading.Event] = None,
     ):
         self.config_service = config
         if hasattr(config, "load") and callable(getattr(config, "load")):
@@ -55,11 +56,25 @@ class FeedController:
         self.state_mgr = state_mgr
         self.stop_event = stop_event
         self.pause_event = pause_event
+        self.skip_event = skip_event or threading.Event()
         self.command_bridge = command_bridge or ClipboardCommandBridge()
         self.gemini_extension_bridge = gemini_extension_bridge
         self.session: Optional[BrowserSession] = None
-        self.pacing = PacingService(self.config)
+        self.pacing = PacingService(
+            self.config,
+            stop_event=self.stop_event,
+            state_manager=self.state_mgr,
+            pause_event=self.pause_event,
+            skip_event=self.skip_event,
+        )
         self._thread: Optional[threading.Thread] = None
+
+    def request_skip_current_post(self):
+        """현재 처리 중인 글을 건너뛰고 다음 글로 즉시 이동"""
+        self.skip_event.set()
+        self.pacing.interrupt()
+        if self.command_bridge:
+            self.command_bridge.send_skip_post()
 
     def run(self):
         self._run()
@@ -214,6 +229,7 @@ class FeedController:
                 session=self.session,
                 on_like_committed=self.history.record_like_checkpoint,
                 on_comment_committed=self.history.record_comment_checkpoint,
+                skip_event=self.skip_event,
             )
 
             seen_candidate_keys: Set[str] = set()
@@ -349,14 +365,18 @@ class FeedController:
 
                     # 4. 다음 글로 넘어가기 전 Pacing 대기 및 Random Pause
                     p_res = self.pacing.wait_next_post()
-                    if p_res.interrupted or self.stop_event.is_set():
+                    if p_res.stopped or (self.stop_event and self.stop_event.is_set()):
                         final_close_reason = "user_stop"
                         break
+                    if p_res.skipped:
+                        logger.log("  ⏭️ [PACING] 사용자가 다음 글 진입 전 대기를 건너뛰었습니다.")
 
                     p_pause = self.pacing.maybe_pause()
-                    if p_pause and p_pause.interrupted or self.stop_event.is_set():
+                    if p_pause and (p_pause.stopped or (self.stop_event and self.stop_event.is_set())):
                         final_close_reason = "user_stop"
                         break
+                    if p_pause and p_pause.skipped:
+                        logger.log("  ⏭️ [PACING] 사용자가 휴식 대기를 건너뛰었습니다.")
 
             if self.stop_event.is_set():
                 self.state_mgr.update(new_state=FeedState.STOPPED, message="사용자에 의해 작업이 중지되었습니다.")

@@ -198,8 +198,16 @@ class TestCommentPipelineContract(unittest.TestCase):
         mock_extract.return_value = MagicMock(title="테스트 포스팅", excerpt="제주 서귀포 맛집 다녀온 후기입니다.")
 
         from services.clipboard_bridge import ClipboardCommandBridge
+        import threading
+        import time
+
         bridge = ClipboardCommandBridge()
-        bridge.send_skip_post()
+
+        def trigger_skip():
+            time.sleep(0.05)
+            bridge.send_skip_post()
+
+        threading.Thread(target=trigger_skip, daemon=True).start()
 
         processor = PostProcessor(
             self.config,

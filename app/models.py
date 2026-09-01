@@ -60,6 +60,7 @@ class WorkerCommandType(str, Enum):
 class WorkerCommand:
     kind: WorkerCommandType
     text: str = ""
+    post_key: str = ""
 
 
 @dataclass

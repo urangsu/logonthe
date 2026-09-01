@@ -85,6 +85,9 @@ class UserStopRequestedError(FatalSessionError):
     pass
 
 
+StopRequestedException = UserStopRequestedError
+
+
 class RecoverablePostError(BotError):
     """개별 게시글 단위에서 발생한 복구 가능한 예외 (해당 글만 건너뛰고 다음 글로 진행)"""
     def __init__(self, message: str, post_key: str = "", reason: str = "error"):

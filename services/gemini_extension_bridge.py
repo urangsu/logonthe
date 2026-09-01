@@ -332,7 +332,13 @@ class GeminiExtensionBridge:
             self._condition.notify_all()
             return True, "accepted"
 
-    def wait_for_result(self, command: GeminiCommand, timeout: Optional[float] = None, stop_event=None) -> Optional[GeminiResult]:
+    def wait_for_result(
+        self,
+        command: GeminiCommand,
+        timeout: Optional[float] = None,
+        stop_event: Optional[threading.Event] = None,
+        skip_event: Optional[threading.Event] = None
+    ) -> Optional[GeminiResult]:
         timeout = float(timeout) if timeout is not None else max(0.0, command.deadline_at - time.time())
         deadline_at = command.deadline_at or (time.time() + timeout)
         deadline = min(time.monotonic() + timeout, time.monotonic() + max(0.0, deadline_at - time.time()))
@@ -342,6 +348,9 @@ class GeminiExtensionBridge:
                 if result:
                     return result
                 if stop_event and stop_event.is_set():
+                    return None
+                if skip_event and skip_event.is_set():
+                    logger.log(f"[GEMINI][WAIT_RESULT] skip_event 감지 -> 결과 대기 즉시 중단 (rid={command.request_id})")
                     return None
                 remaining = deadline - time.monotonic()
                 if remaining <= 0:

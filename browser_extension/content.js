@@ -125,8 +125,20 @@
     return button || null;
   }
 
-  function sendPrompt() {
-    const button = findSendControl();
+  async function waitForSendReady(timeoutMs = 2500) {
+    const deadline = Date.now() + timeoutMs;
+    while (Date.now() < deadline) {
+      const button = findSendControl();
+      if (button && !button.disabled && button.getAttribute('aria-disabled') !== 'true') {
+        return button;
+      }
+      await new Promise(r => setTimeout(r, 100));
+    }
+    return findSendControl();
+  }
+
+  async function sendPrompt() {
+    const button = await waitForSendReady(2500);
     if (button && !button.disabled && button.getAttribute('aria-disabled') !== 'true') {
       button.click();
       return true;
@@ -134,6 +146,8 @@
     const el = editor();
     if (el) {
       el.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', code: 'Enter', keyCode: 13, which: 13, bubbles: true }));
+      el.dispatchEvent(new KeyboardEvent('keypress', { key: 'Enter', code: 'Enter', keyCode: 13, which: 13, bubbles: true }));
+      el.dispatchEvent(new KeyboardEvent('keyup', { key: 'Enter', code: 'Enter', keyCode: 13, which: 13, bubbles: true }));
       return true;
     }
     return false;
@@ -169,9 +183,41 @@
       return { status: 'dom_unsupported', text: '', error: 'Gemini 입력창을 찾지 못했습니다.' };
     }
 
-    setEditorText(input, command.prompt);
+    let isTextSet = setEditorText(input, command.prompt);
+    if (!isTextSet) {
+      await new Promise(r => setTimeout(r, 200));
+      isTextSet = setEditorText(input, command.prompt);
+    }
+    if (!isTextSet) {
+      const readback = normalizeText(input.innerText || input.value);
+      if (!readback.includes(normalizeText(command.prompt).slice(0, 30))) {
+        busy = false;
+        return { status: 'dom_unsupported', text: '', error: 'prompt_exact_readback_failed' };
+      }
+    }
+
     await new Promise(resolve => setTimeout(resolve, 300));
-    sendPrompt();
+    await sendPrompt();
+
+    // Verify submit occurred (input cleared, or generating started, or new node created within 3s)
+    let submitConfirmed = false;
+    const submitDeadline = Date.now() + 3500;
+    while (Date.now() < submitDeadline) {
+      const currentVal = normalizeText(input.innerText || input.value);
+      const isGenerating = generationActive();
+      const currentNodes = responseNodes();
+      if (!currentVal || isGenerating || currentNodes.length > initialNodes.length) {
+        submitConfirmed = true;
+        break;
+      }
+      await new Promise(r => setTimeout(r, 200));
+    }
+
+    if (!submitConfirmed) {
+      // Secondary fallback click
+      const sendBtn = findSendControl();
+      if (sendBtn) sendBtn.click();
+    }
 
     const deadline = Date.now() + Math.min(65000, Math.max(10000, (command.deadlineAt - Date.now() / 1000) * 1000));
     let stableSince = null;

@@ -165,38 +165,84 @@ def ensure_page_alive(page: Optional[Page]):
             raise
 
 
+from enum import Enum
+
+
+class WaitInterruptionReason(str, Enum):
+    COMPLETED = "completed"
+    STOPPED = "stopped"
+    SKIPPED = "skipped"
+
+    def __bool__(self) -> bool:
+        return self != WaitInterruptionReason.COMPLETED
+
+    @property
+    def stopped(self) -> bool:
+        return self == WaitInterruptionReason.STOPPED
+
+    @property
+    def skipped(self) -> bool:
+        return self == WaitInterruptionReason.SKIPPED
+
+    @property
+    def completed(self) -> bool:
+        return self == WaitInterruptionReason.COMPLETED
+
+
 def interruptible_wait(
     stop_event: Optional[threading.Event],
     seconds: float,
     step: float = 0.1,
     pause_event: Optional[threading.Event] = None,
     skip_event: Optional[threading.Event] = None
-) -> bool:
-    """stop_event, pause_event, skip_event 신호를 즉각 감지하며 주어진 시간만큼 대기 (중지 또는 건너뛰기 시 True 반환)"""
-    if (stop_event and stop_event.is_set()) or (skip_event and skip_event.is_set()):
-        return True
+) -> WaitInterruptionReason:
+    """
+    stop_event, pause_event, skip_event 신호를 즉각 감지하며 주어진 시간만큼 대기
+    - stop_event 감지 시: WaitInterruptionReason.STOPPED
+    - skip_event 감지 시: WaitInterruptionReason.SKIPPED
+    - 정상 시간 완료 시: WaitInterruptionReason.COMPLETED
+    """
+    if stop_event and stop_event.is_set():
+        return WaitInterruptionReason.STOPPED
+    if skip_event and skip_event.is_set():
+        return WaitInterruptionReason.SKIPPED
 
     # 일시정지 상태 대기
     while pause_event and pause_event.is_set():
-        if (stop_event and stop_event.is_set()) or (skip_event and skip_event.is_set()):
-            return True
+        if stop_event and stop_event.is_set():
+            return WaitInterruptionReason.STOPPED
+        if skip_event and skip_event.is_set():
+            return WaitInterruptionReason.SKIPPED
         time.sleep(step)
 
     if seconds <= 0:
-        return bool((stop_event and stop_event.is_set()) or (skip_event and skip_event.is_set()))
+        if stop_event and stop_event.is_set():
+            return WaitInterruptionReason.STOPPED
+        if skip_event and skip_event.is_set():
+            return WaitInterruptionReason.SKIPPED
+        return WaitInterruptionReason.COMPLETED
 
     elapsed = 0.0
     while elapsed < seconds:
-        if (stop_event and stop_event.is_set()) or (skip_event and skip_event.is_set()):
-            return True
+        if stop_event and stop_event.is_set():
+            return WaitInterruptionReason.STOPPED
+        if skip_event and skip_event.is_set():
+            return WaitInterruptionReason.SKIPPED
         while pause_event and pause_event.is_set():
-            if (stop_event and stop_event.is_set()) or (skip_event and skip_event.is_set()):
-                return True
+            if stop_event and stop_event.is_set():
+                return WaitInterruptionReason.STOPPED
+            if skip_event and skip_event.is_set():
+                return WaitInterruptionReason.SKIPPED
             time.sleep(step)
         sleep_dur = min(step, seconds - elapsed)
         time.sleep(sleep_dur)
         elapsed += sleep_dur
-    return bool((stop_event and stop_event.is_set()) or (skip_event and skip_event.is_set()))
+
+    if stop_event and stop_event.is_set():
+        return WaitInterruptionReason.STOPPED
+    if skip_event and skip_event.is_set():
+        return WaitInterruptionReason.SKIPPED
+    return WaitInterruptionReason.COMPLETED
 
 
 class BrowserSession:

@@ -64,6 +64,7 @@ class PostProcessor:
         session: Optional[Any] = None,
         on_like_committed: Optional[Callable[[FeedPost, LikeProcessResult], None]] = None,
         on_comment_committed: Optional[Callable[[FeedPost, CommentProcessResult], None]] = None,
+        skip_event: Optional[threading.Event] = None,
     ):
         self.config = config
         self.session = session
@@ -84,6 +85,7 @@ class PostProcessor:
         self.state_mgr = state_manager
         self.stop_event = stop_event
         self.pause_event = pause_event
+        self.skip_event = skip_event
         self.gemini_extension_bridge = gemini_extension_bridge
         self.on_like_committed = on_like_committed
         self.on_comment_committed = on_comment_committed
@@ -105,6 +107,11 @@ class PostProcessor:
         self.navigation_version += 1
         navigation_version = self.navigation_version
 
+        if self.skip_event:
+            self.skip_event.clear()
+        if self.command_bridge:
+            self.command_bridge.clear_skips()
+
         if self.stop_event and self.stop_event.is_set():
             raise StopRequestedException("작업 중지 요청됨")
 
@@ -122,8 +129,16 @@ class PostProcessor:
             detail_page.goto(post.url, wait_until="domcontentloaded", timeout=25000)
             if self.pacing:
                 settle = self.pacing.wait_page_settle()
-                if settle.interrupted:
+                if settle.stopped or (self.stop_event and self.stop_event.is_set()):
                     raise StopRequestedException("작업 중지 요청됨")
+                if settle.skipped or (self.skip_event and self.skip_event.is_set()):
+                    logger.log("  ⏭️ [USER] 페이지 진입 대기 중 다음 글로 건너뛰기 요청됨.")
+                    result.like_result.error = "user_skipped"
+                    result.comment_result.status = CommentSubmitState.SKIPPED
+                    result.comment_result.error = "user_skipped"
+                    if self.state_mgr:
+                        self.state_mgr.update(new_state=FeedState.SKIPPING, inc_skip=True)
+                    return result
             else:
                 interruptible_wait(self.stop_event, 1.0)
         except StopRequestedException:
@@ -179,8 +194,16 @@ class PostProcessor:
             # cancellable and never bypasses the state/confidence checks below.
             if self.pacing:
                 p_res = self.pacing.wait_pre_like()
-                if p_res.interrupted:
+                if p_res.stopped or (self.stop_event and self.stop_event.is_set()):
                     raise StopRequestedException("작업 중지 요청됨")
+                if p_res.skipped or (self.skip_event and self.skip_event.is_set()):
+                    logger.log("  ⏭️ [USER] 공감 대기 중 다음 글로 건너뛰기 요청됨 (스킵).")
+                    result.like_result.error = "user_skipped"
+                    result.comment_result.status = CommentSubmitState.SKIPPED
+                    result.comment_result.error = "user_skipped"
+                    if self.state_mgr:
+                        self.state_mgr.update(new_state=FeedState.SKIPPING, inc_skip=True)
+                    return result
             if self.state_mgr:
                 self.state_mgr.update(new_state=FeedState.CHECKING_LIKE, message="공감 상태 및 조건 확인 중...")
 
@@ -234,8 +257,13 @@ class PostProcessor:
         # 액션 사이 Pacing 대기
         if self.pacing:
             p_res = self.pacing.wait_post_like() if effective_like else self.pacing.wait_action()
-            if p_res.interrupted:
+            if p_res.stopped or (self.stop_event and self.stop_event.is_set()):
                 raise StopRequestedException("작업 중지 요청됨")
+            if p_res.skipped or (self.skip_event and self.skip_event.is_set()):
+                logger.log("  ⏭️ [USER] 공감 후 대기 중 다음 글로 건너뛰기 요청됨 (댓글 단계 스킵).")
+                result.comment_result.status = CommentSubmitState.SKIPPED
+                result.comment_result.error = "user_skipped"
+                return result
 
         # 3. 댓글 처리 (댓글창 오픈 -> 서버 중복 확인 -> 초안 생성 -> 입력 -> 승인)
         if effective_comment:
@@ -344,7 +372,18 @@ class PostProcessor:
                                     extension_result = self.gemini_extension_bridge.wait_for_result(
                                         command,
                                         stop_event=self.stop_event,
+                                        skip_event=self.skip_event,
                                     )
+                                    if self.skip_event and self.skip_event.is_set():
+                                        logger.log("  ⏭️ [USER] Gemini 생성 중 다음 글로 바로 넘어가기 요청됨 (스킵).")
+                                        result.comment_result = CommentProcessResult(
+                                            status=CommentSubmitState.SKIPPED,
+                                            error="user_skipped_during_gemini_generation",
+                                        )
+                                        if self.state_mgr:
+                                            self.state_mgr.update(new_state=FeedState.SKIPPING, inc_skip=True)
+                                        return result
+
                                     if extension_result and extension_result.status == GeminiResultStatus.COMPLETED:
                                         logger.log(
                                             f"[GEMINI][CORRELATED] rid={request_id} post={post.key} nav={navigation_version}"
@@ -516,7 +555,12 @@ class PostProcessor:
                         )
 
                         action = CommentInteractionService.wait_for_user_action(
-                            detail_page, self.stop_event, command_bridge=self.command_bridge, preset=preset
+                            detail_page,
+                            self.stop_event,
+                            command_bridge=self.command_bridge,
+                            preset=preset,
+                            skip_event=self.skip_event,
+                            post_key=post.key
                         )
 
                         if action == UserAction.STOP:

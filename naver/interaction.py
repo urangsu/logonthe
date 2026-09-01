@@ -260,11 +260,16 @@ class CommentInteractionService:
         page: Page,
         stop_event: Optional[threading.Event] = None,
         command_bridge: Optional[ClipboardCommandBridge] = None,
-        preset: str = "community"
+        preset: str = "community",
+        skip_event: Optional[threading.Event] = None,
+        post_key: str = ""
     ) -> UserAction:
         while True:
             if stop_event and stop_event.is_set():
                 return UserAction.STOP
+            if skip_event and skip_event.is_set():
+                logger.log("  ⏭️ [USER] skip_event 감지: 현재 글 작성을 건너뛰고 다음 글로 이동합니다.")
+                return UserAction.SKIP
 
             ensure_page_alive(page)
 
@@ -273,8 +278,9 @@ class CommentInteractionService:
                 cmd = command_bridge.pop_command()
                 if cmd:
                     if cmd.kind in (WorkerCommandType.SKIP_POST, WorkerCommandType.GEMINI_SKIP_POST):
-                        logger.log("  ⏭️ [USER] 다음 글로 바로 넘어가기 요청을 수신했습니다 (스킵).")
-                        return UserAction.SKIP
+                        if not cmd.post_key or not post_key or cmd.post_key == post_key:
+                            logger.log("  ⏭️ [USER] 다음 글로 바로 넘어가기 요청을 수신했습니다 (스킵).")
+                            return UserAction.SKIP
                     elif cmd.kind == WorkerCommandType.APPLY_CLIPBOARD_COMMENT:
                         from services.comments.community_rhythm import FinalQualityGate
                         gate_res = FinalQualityGate.validate_final_text(cmd.text, preset=preset, source="clipboard")

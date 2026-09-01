@@ -19,12 +19,12 @@ class ClipboardCommandBridge:
     def send_gemini_retry(self):
         self._queue.put(WorkerCommand(kind=WorkerCommandType.GEMINI_RETRY))
 
-    def send_gemini_skip_post(self):
-        self._queue.put(WorkerCommand(kind=WorkerCommandType.GEMINI_SKIP_POST))
+    def send_gemini_skip_post(self, post_key: str = ""):
+        self._queue.put(WorkerCommand(kind=WorkerCommandType.GEMINI_SKIP_POST, post_key=post_key))
 
-    def send_skip_post(self):
+    def send_skip_post(self, post_key: str = ""):
         """현재 글 처리를 중단하고 다음 글로 건너뛰도록 명령 전달"""
-        self._queue.put(WorkerCommand(kind=WorkerCommandType.SKIP_POST))
+        self._queue.put(WorkerCommand(kind=WorkerCommandType.SKIP_POST, post_key=post_key))
 
     def send_gemini_use_local_once(self):
         self._queue.put(WorkerCommand(kind=WorkerCommandType.GEMINI_USE_LOCAL_ONCE))
@@ -35,6 +35,19 @@ class ClipboardCommandBridge:
             return self._queue.get_nowait()
         except queue.Empty:
             return None
+
+    def clear_skips(self):
+        """남아있는 stale SKIP 명령 정리"""
+        remaining = []
+        while not self._queue.empty():
+            try:
+                cmd = self._queue.get_nowait()
+                if cmd.kind not in (WorkerCommandType.SKIP_POST, WorkerCommandType.GEMINI_SKIP_POST):
+                    remaining.append(cmd)
+            except queue.Empty:
+                break
+        for item in remaining:
+            self._queue.put(item)
 
     def clear(self):
         """큐 비우기"""

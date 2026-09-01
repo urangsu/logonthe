@@ -962,10 +962,10 @@ class MainWindow(ctk.CTk):
         if not self.worker_thread or not self.worker_thread.is_alive():
             return
         logger.log("⏭️ [USER] 다음 글로 바로 넘어가기 버튼 클릭됨 (현재 글 스킵)")
-        self.command_bridge.send_skip_post()
         if hasattr(self, "current_controller") and self.current_controller:
-            if hasattr(self.current_controller, "pacing"):
-                self.current_controller.pacing.interrupt()
+            self.current_controller.request_skip_current_post()
+        else:
+            self.command_bridge.send_skip_post()
         if self.pause_event and self.pause_event.is_set():
             self.pause_event.clear()
             self.btn_pause.configure(text="⏸️ 일시정지", fg_color="#D97706", hover_color="#B45309")
