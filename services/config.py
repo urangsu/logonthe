@@ -153,7 +153,7 @@ class ConfigService:
         try:
             with os.fdopen(temp_fd, "w", encoding="utf-8") as f:
                 json.dump(data, f, ensure_ascii=False, indent=2)
-            os.replace(temp_path, target_path := self.config_path)
+            os.replace(temp_path, self.config_path)
         except Exception as e:
             if os.path.exists(temp_path):
                 try:
