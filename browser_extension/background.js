@@ -178,6 +178,8 @@ async function startHeartbeatLoop() {
   }
 }
 
+const inFlightCommandResolvers = new Map();
+
 async function runCommandCycle() {
   const contract = await getRuntimeContract();
   const activeRuntime = await findActiveGeminiRuntime();
@@ -216,24 +218,40 @@ async function runCommandCycle() {
 
   // 3. Dispatch NFA_EXECUTE_COMMAND to Gemini Content Script
   let execResult = null;
-  try {
-    execResult = await new Promise((resolve) => {
-      chrome.tabs.sendMessage(
-        activeRuntime.tabId,
-        { type: 'NFA_EXECUTE_COMMAND', command },
-        (res) => {
-          if (chrome.runtime.lastError || !res) {
-            resolve({
-              status: 'failed',
-              text: '',
-              error: chrome.runtime.lastError?.message || 'no_response_from_content'
-            });
-          } else {
-            resolve(res);
-          }
+  const dispatchPromise = new Promise((resolve) => {
+    inFlightCommandResolvers.set(command.requestId, resolve);
+
+    const deadlineMs = typeof command.deadlineAt === 'number' && command.deadlineAt > 1000000000
+      ? (command.deadlineAt * 1000 - Date.now())
+      : (typeof command.deadlineAt === 'number' ? (command.deadlineAt - Date.now() / 1000) * 1000 : 65000);
+    const timeoutMs = Math.min(65000, Math.max(10000, deadlineMs));
+
+    const timer = setTimeout(() => {
+      if (inFlightCommandResolvers.has(command.requestId)) {
+        inFlightCommandResolvers.delete(command.requestId);
+        resolve({ status: 'timeout', text: '', error: 'command_deadline_exceeded' });
+      }
+    }, timeoutMs);
+
+    chrome.tabs.sendMessage(
+      activeRuntime.tabId,
+      { type: 'NFA_EXECUTE_COMMAND', command },
+      (res) => {
+        if (chrome.runtime.lastError || !res?.ok) {
+          clearTimeout(timer);
+          inFlightCommandResolvers.delete(command.requestId);
+          resolve({
+            status: 'failed',
+            text: '',
+            error: chrome.runtime.lastError?.message || 'failed_to_start_command'
+          });
         }
-      );
-    });
+      }
+    );
+  });
+
+  try {
+    execResult = await dispatchPromise;
   } catch (e) {
     execResult = { status: 'failed', text: '', error: String(e?.message || e) };
   }
@@ -330,6 +348,16 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
     diagnose()
       .then(data => sendResponse(data))
       .catch(error => sendResponse({ ok: false, status: 'diagnostic_failed', error: String(error?.message || error) }));
+    return true;
+  }
+
+  if (message?.type === 'NFA_COMMAND_RESULT') {
+    const resolver = inFlightCommandResolvers.get(message.requestId);
+    if (resolver) {
+      inFlightCommandResolvers.delete(message.requestId);
+      resolver(message.result);
+    }
+    sendResponse({ ok: true });
     return true;
   }
 

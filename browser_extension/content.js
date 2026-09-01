@@ -441,10 +441,31 @@
     }
 
     if (message.type === 'NFA_EXECUTE_COMMAND') {
+      sendResponse({ ok: true, started: true });
       execute(message.command)
-        .then(result => sendResponse(result))
-        .catch(err => sendResponse({ status: 'failed', text: '', error: String(err?.message || err) }));
-      return true;
+        .then(result => {
+          try {
+            chrome.runtime.sendMessage({
+              type: 'NFA_COMMAND_RESULT',
+              requestId: message.command.requestId,
+              postKey: message.command.postKey,
+              navigationVersion: message.command.navigationVersion,
+              result: result
+            });
+          } catch (_) {}
+        })
+        .catch(err => {
+          try {
+            chrome.runtime.sendMessage({
+              type: 'NFA_COMMAND_RESULT',
+              requestId: message.command.requestId,
+              postKey: message.command.postKey,
+              navigationVersion: message.command.navigationVersion,
+              result: { status: 'failed', text: '', error: String(err?.message || err) }
+            });
+          } catch (_) {}
+        });
+      return false;
     }
 
     return false;
