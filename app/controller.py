@@ -136,7 +136,12 @@ class FeedController:
         # [RUN_CONFIG] 실행 환경 스냅샷 로깅 (이웃 새글/직접입력일 때는 탐색 카테고리/토픽필터 n/a 표시)
         discovery_cats = self.config.get("discovery_categories", ["FOOD", "CAFE", "PARENTING", "LIVING", "TRAVEL", "LIFESTYLE"])
         is_discovery_source = source_type in (FeedSourceType.TARGETED_SEARCH, FeedSourceType.RECOMMENDATION)
-        log_cats = ",".join(discovery_cats) if is_discovery_source else "n/a (neighbor mode)"
+        if source_type == FeedSourceType.RECOMMENDATION:
+            log_cats = "맛집 (fallback=푸드)"
+        elif is_discovery_source:
+            log_cats = ",".join(discovery_cats)
+        else:
+            log_cats = "n/a (neighbor mode)"
         log_topic_filter = str(self.config.get("topic_filter_enabled", True)) if is_discovery_source else "n/a (neighbor mode)"
 
         logger.log(

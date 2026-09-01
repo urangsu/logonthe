@@ -106,14 +106,22 @@ class NeighborFeedSource(FeedSource):
 
 
 class RecommendationFeedSource(FeedSource):
-    """모바일 탐색 추천 피드 (Recommendation.naver) 탐색 소스 - 푸드/라이프 카테고리 필터 선택 및 실질적 검증"""
+    """모바일 탐색 추천 피드 (Recommendation.naver) 탐색 소스 - 맛집 우선(1순위) 및 푸드 fallback 선택/검증"""
     URL = "https://m.blog.naver.com/Recommendation.naver"
 
-    def __init__(self, page: Page, max_items: int = 20, stop_event: Optional[threading.Event] = None, preferred_category: str = "푸드"):
+    def __init__(
+        self,
+        page: Page,
+        max_items: int = 20,
+        stop_event: Optional[threading.Event] = None,
+        preferred_category: str = "맛집",
+        fallback_category: str = "푸드",
+    ):
         self.page = page
         self.max_items = max_items
         self.stop_event = stop_event
         self.preferred_category = preferred_category
+        self.fallback_category = fallback_category
         self.seen_keys: Set[str] = set()
         self.seen_blogs: Set[str] = set()
         self._exhausted = False
@@ -125,54 +133,77 @@ class RecommendationFeedSource(FeedSource):
             interruptible_wait(self.stop_event, 1.5)
 
             # 1. 클릭 전 카드 지문 채취
-            before_cards = self.page.evaluate("() => Array.from(document.querySelectorAll('.view_wrap, .fds-comps-feed-item, .bx')).map(e => (e.textContent || '').slice(0, 30))")
+            before_cards = self.page.evaluate(
+                "() => Array.from(document.querySelectorAll('.view_wrap, .fds-comps-feed-item, .bx')).map(e => (e.textContent || '').slice(0, 30))"
+            )
 
-            # 2. 카테고리 탭 탐색 후 클릭
-            click_result = self.page.evaluate("""(targetCategory) => {
-                const shown = el => !!el && !!el.getClientRects().length && getComputedStyle(el).visibility !== 'hidden';
-                const interactiveCandidates = Array.from(document.querySelectorAll('button, a, [role=tab], li[role=tab], div[role=button]')).filter(shown);
+            # 2. 카테고리 탭 탐색: 1순위 맛집 -> 2순위 푸드 fallback
+            tab_selected = False
+            for cat_target, is_fallback in [(self.preferred_category, False), (self.fallback_category, True)]:
+                if self.stop_event and self.stop_event.is_set():
+                    break
 
-                const target = interactiveCandidates.find(el => {
-                    const text = el.textContent.trim();
-                    return new RegExp(targetCategory).test(text) && !/전체/.test(text) && text.length <= 15;
-                });
-
-                if (!target) return { status: "not_found" };
-                target.click();
-                return {
-                    status: "clicked",
-                    text: target.textContent.trim()
-                };
-            }""", self.preferred_category)
-
-            if click_result and click_result.get("status") == "clicked":
-                interruptible_wait(self.stop_event, 1.2)
-                # 3. 클릭 후 실제 active/aria-selected 상태 또는 카드 목록 변화 검증
-                verification = self.page.evaluate("""(args) => {
-                    const { targetCategory, beforeCards } = args;
+                click_result = self.page.evaluate("""(targetCategory) => {
                     const shown = el => !!el && !!el.getClientRects().length && getComputedStyle(el).visibility !== 'hidden';
                     const interactiveCandidates = Array.from(document.querySelectorAll('button, a, [role=tab], li[role=tab], div[role=button]')).filter(shown);
-                    const target = interactiveCandidates.find(el => {
-                        const text = el.textContent.trim();
-                        return new RegExp(targetCategory).test(text) && !/전체/.test(text) && text.length <= 15;
-                    });
-                    const afterActive = target ? (target.getAttribute('aria-selected') === 'true' || /active|on|selected/.test(target.className)) : false;
-                    const afterCards = Array.from(document.querySelectorAll('.view_wrap, .fds-comps-feed-item, .bx')).map(e => (e.textContent || '').slice(0, 30));
-                    const cardsChanged = JSON.stringify(beforeCards) !== JSON.stringify(afterCards);
-                    return {
-                        active: afterActive,
-                        cardsChanged: cardsChanged,
-                        verified: afterActive || cardsChanged
-                    };
-                }""", {"targetCategory": self.preferred_category, "beforeCards": before_cards})
 
-                if verification and verification.get("verified"):
-                    logger.log(f"✅ [SOURCE] 탐색 탭에서 '[{click_result.get('text')}]' 필터 버튼 클릭 및 활성화 확인 완료")
+                    // 1차: exact text match 우선
+                    let target = interactiveCandidates.find(el => el.textContent.trim() === targetCategory);
+                    // 2차: 포함 관계 (전체 제외, 길이 15자 이하)
+                    if (!target) {
+                        target = interactiveCandidates.find(el => {
+                            const text = el.textContent.trim();
+                            return new RegExp(targetCategory).test(text) && !/전체/.test(text) && text.length <= 15;
+                        });
+                    }
+
+                    if (!target) return { status: "not_found" };
+                    target.click();
+                    return {
+                        status: "clicked",
+                        text: target.textContent.trim()
+                    };
+                }""", cat_target)
+
+                if click_result and click_result.get("status") == "clicked":
+                    interruptible_wait(self.stop_event, 1.2)
+                    # 3. 클릭 후 실제 active/aria-selected 상태 또는 카드 목록 변화 검증
+                    verification = self.page.evaluate("""(args) => {
+                        const { targetCategory, beforeCards } = args;
+                        const shown = el => !!el && !!el.getClientRects().length && getComputedStyle(el).visibility !== 'hidden';
+                        const interactiveCandidates = Array.from(document.querySelectorAll('button, a, [role=tab], li[role=tab], div[role=button]')).filter(shown);
+                        let target = interactiveCandidates.find(el => el.textContent.trim() === targetCategory);
+                        if (!target) {
+                            target = interactiveCandidates.find(el => {
+                                const text = el.textContent.trim();
+                                return new RegExp(targetCategory).test(text) && !/전체/.test(text) && text.length <= 15;
+                            });
+                        }
+                        const afterActive = target ? (target.getAttribute('aria-selected') === 'true' || /active|on|selected/.test(target.className)) : false;
+                        const afterCards = Array.from(document.querySelectorAll('.view_wrap, .fds-comps-feed-item, .bx')).map(e => (e.textContent || '').slice(0, 30));
+                        const cardsChanged = JSON.stringify(beforeCards) !== JSON.stringify(afterCards);
+                        return {
+                            active: afterActive,
+                            cardsChanged: cardsChanged,
+                            verified: afterActive || cardsChanged
+                        };
+                    }""", {"targetCategory": cat_target, "beforeCards": before_cards})
+
+                    if verification and verification.get("verified"):
+                        mode_label = f"category={cat_target}" if not is_fallback else f"fallback={cat_target}"
+                        logger.log(f"✅ [SOURCE] 탐색 탭에서 '[{click_result.get('text')}]' 필터 버튼 클릭 및 활성화 확인 완료 ({mode_label})")
+                        tab_selected = True
+                        break
+                    else:
+                        logger.log(f"⚠️ [SOURCE] 탐색 탭 카테고리 버튼('{cat_target}') 클릭되었으나 선택 상태 미검증 -> fallback 시도", "WARNING")
                 else:
-                    logger.log(f"⚠️ [SOURCE] 탐색 탭 카테고리 버튼('{self.preferred_category}') 클릭됨 (선택 상태 미확인: category_filter_unverified). 원치 않는 주제 수집 방지를 위해 추천 피드 탐색을 안전하게 종료합니다.", "WARNING")
-                    self._exhausted = True
-            else:
-                logger.log(f"⚠️ [SOURCE] 탐색 탭 카테고리 버튼('{self.preferred_category}') 미발견 (안전 종료: category_tab_not_found)", "WARNING")
+                    logger.log(f"ℹ️ [SOURCE] 탐색 탭 카테고리 '{cat_target}' 미발견 -> 다음 후보 시도")
+
+            if not tab_selected:
+                logger.log(
+                    f"⚠️ [SOURCE] 탐색 탭 카테고리('{self.preferred_category}', fallback='{self.fallback_category}') 모두 미발견 또는 검증 실패 (안전 종료: category_tab_not_found)",
+                    "WARNING",
+                )
                 self._exhausted = True
         except Exception as e:
             kind = classify_playwright_failure(e, page=self.page, context=getattr(self.page, "context", None))

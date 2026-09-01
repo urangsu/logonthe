@@ -252,6 +252,42 @@ class TestV133DiscoveryAndRuntime(unittest.TestCase):
             self.assertEqual(mock_processor.process.call_count, 1)
             mock_session.close.assert_called_with(reason="fatal_error")
 
+    def test_disc_010_recommendation_source_gourmet_priority_and_fallback(self):
+        page = MagicMock()
+
+        # Case 1: 맛집 tab found & verified -> category=맛집
+        page.evaluate.side_effect = [
+            ["card1", "card2"],  # before_cards
+            {"status": "clicked", "text": "맛집"},  # click_result for 맛집
+            {"active": True, "cardsChanged": True, "verified": True},  # verification for 맛집
+        ]
+        source = RecommendationFeedSource(page, max_items=5)
+        self.assertEqual(source.preferred_category, "맛집")
+        self.assertEqual(source.fallback_category, "푸드")
+        source.open()
+        self.assertFalse(source.is_exhausted())
+
+        # Case 2: 맛집 not found -> fallback to 푸드 -> verified
+        page.evaluate.side_effect = [
+            ["card1", "card2"],  # before_cards
+            {"status": "not_found"},  # click_result for 맛집
+            {"status": "clicked", "text": "푸드"},  # click_result for 푸드
+            {"active": True, "cardsChanged": True, "verified": True},  # verification for 푸드
+        ]
+        source_fallback = RecommendationFeedSource(page, max_items=5)
+        source_fallback.open()
+        self.assertFalse(source_fallback.is_exhausted())
+
+        # Case 3: Neither 맛집 nor 푸드 found -> fail closed exhausted
+        page.evaluate.side_effect = [
+            ["card1", "card2"],  # before_cards
+            {"status": "not_found"},  # click_result for 맛집
+            {"status": "not_found"},  # click_result for 푸드
+        ]
+        source_fail = RecommendationFeedSource(page, max_items=5)
+        source_fail.open()
+        self.assertTrue(source_fail.is_exhausted())
+
 
 if __name__ == "__main__":
     unittest.main()
