@@ -74,7 +74,7 @@ DEFAULT_CONFIG_V2: Dict[str, Any] = {
     "auto_prompt_learning_enabled": False,
     "auto_style_apply_enabled": False,
     "my_blog_id": "",
-    "engagement_audit_recent_posts": 5,
+    "engagement_audit_recent_posts": 10,
     # V1.2 keeps the main automated workflow as the default.  The manual
     # helper is an explicit opt-in and never silently replaces the baseline.
     "workflow_mode": "assisted_auto"
@@ -89,6 +89,19 @@ def migrate_workflow_mode(data: Dict[str, Any]) -> Dict[str, Any]:
             migrated["workflow_mode"] = "manual_helper" if bool(migrated["assistant_mode"]) else "assisted_auto"
         else:
             migrated["workflow_mode"] = "assisted_auto"
+    return migrated
+
+
+def migrate_engagement_audit_recent_posts(data: Dict[str, Any]) -> Dict[str, Any]:
+    """기존 기본값 5개를 새 감사 기준 10개로 한 번 승격한다."""
+    migrated = dict(data)
+    try:
+        current = int(migrated.get("engagement_audit_recent_posts", 10) or 10)
+    except (TypeError, ValueError):
+        current = 10
+    if current == 5:
+        current = 10
+    migrated["engagement_audit_recent_posts"] = max(1, current)
     return migrated
 
 
@@ -110,6 +123,7 @@ def migrate_config_v1_to_v2(old_data: Dict[str, Any]) -> Dict[str, Any]:
         cfg["general_suffix"] = old_data["fixed_suffix"]
 
     cfg = migrate_workflow_mode(cfg)
+    cfg = migrate_engagement_audit_recent_posts(cfg)
     cfg["schema_version"] = 2
     # Keep this historical converter truthful. ConfigService.load immediately
     # applies the separate v2 -> v3 migration to the extension bridge.
@@ -139,7 +153,7 @@ class ConfigService:
         try:
             with os.fdopen(temp_fd, "w", encoding="utf-8") as f:
                 json.dump(data, f, ensure_ascii=False, indent=2)
-            os.replace(temp_path, self.config_path)
+            os.replace(temp_path, target_path := self.config_path)
         except Exception as e:
             if os.path.exists(temp_path):
                 try:
@@ -179,7 +193,10 @@ class ConfigService:
             merged = DEFAULT_CONFIG_V2.copy()
             merged.update(loaded)
             merged = migrate_workflow_mode(merged)
-            return merged
+            migrated_audit = migrate_engagement_audit_recent_posts(merged)
+            if migrated_audit != merged:
+                self._atomic_save(migrated_audit)
+            return migrated_audit
         except Exception as e:
             logger.log(f"[CONFIG] 설정 로드 중 예외, 기본값 적용: {e}", "WARNING")
             return DEFAULT_CONFIG_V2.copy()
@@ -189,6 +206,7 @@ class ConfigService:
         merged.update(self.data)
         merged.update(data)
         merged = migrate_workflow_mode(merged)
+        merged = migrate_engagement_audit_recent_posts(merged)
         merged["schema_version"] = 3
         self._atomic_save(merged)
         self.data = merged
@@ -199,6 +217,7 @@ class ConfigService:
         merged.update(self.data)
         merged.update(values)
         merged = migrate_workflow_mode(merged)
+        merged = migrate_engagement_audit_recent_posts(merged)
         merged["schema_version"] = 3
         self._atomic_save(merged)
         self.data = merged
