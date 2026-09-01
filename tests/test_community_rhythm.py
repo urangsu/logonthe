@@ -71,7 +71,22 @@ class TestCommunityRhythmPolicy(unittest.TestCase):
         accepted = FinalQualityGate.validate("차분한 공간 분위기가 편안해서 오래 머물고 싶어져요", preset="calm")
         self.assertTrue(accepted.valid)
 
-    def test_rejects_formal_and_summary_macro_phrases(self):
+    def test_natural_single_soft_phrase_is_allowed(self):
+        """자연스러운 단일 소프트 표현(사진 보니까, 특히 등)은 정상 댓글로 허용"""
+        allowed_natural_cases = (
+            "덮밥 사진 보니까 너무 맛있겠는데요~",
+            "특히 소스가 진해 보여서 너무 맛있겠어요~",
+            "공간 사진 보니까 참 아늑해 보여요",
+            "글 보니까 어떤 느낌인지 알 것 같아요",
+            "인상적인 디저트라 기억에 남네요~",
+        )
+        for text in allowed_natural_cases:
+            with self.subTest(text=text):
+                res = FinalQualityGate.validate(text)
+                self.assertTrue(res.valid, f"Expected {text!r} to be allowed, got error={res.code} matched={res.matched}")
+
+    def test_rejects_formal_hard_macro_and_stacked_soft_phrases(self):
+        """Hard-ban 매크로, 명시적 금지어(대박, 취향저격 등), 2개 이상 중첩된 소프트 표현 차단"""
         phrases = (
             "정말 합니다 참 마음에 들어요",
             "분위기입니다 참 좋아요",
@@ -91,27 +106,16 @@ class TestCommunityRhythmPolicy(unittest.TestCase):
             "먹어보고 싶습니다 다음에요",
             "같습니다 참 자연스러워요",
             "싶습니다 다음에 가고 싶어요",
-            "전체적으로 구성이 참 좋아요",
+            "전체적으로 구성이 좋아서 유익한 정보네요",
             "무엇보다 분위기가 좋아요",
             "한눈에 들어오는 구성이네요 참 보기 좋아요",
             "정리가 잘 되어 보기 편해요",
-            "사진 보니까 더 궁금해져요",
-            "글 보니까 더 궁금해져요",
-            "포스팅 보니까 더 궁금해져요",
             "전반적으로 분위기가 참 좋아요",
-            "특히 공간 분위기가 참 좋아요",
             "따뜻하다는 점이 참 좋아요 그 느낌이",
             "이런 내용이라는 부분이 참 좋아요",
-            "인상적인 공간이라 마음에 들어요",
             "알찬 구성이 참 좋아요",
             "유익한 정보가 많아 좋아요",
             "유용한 정보가 많아 좋아요",
-            "구성이 참 좋아 보여요",
-            "구성도 참 좋아 보여요",
-            "조화가 참 좋아 보여요 정말 자연스러워요",
-            "돋보이는 공간이라 마음에 들어요",
-            "매력적인 분위기가 참 좋아요",
-            "눈길을 끄는 공간이라 좋아요",
             "정성 가득 담긴 구성이 좋아요",
             "깔끔하게 정리되어 보기 좋아요",
             "잘 정리된 내용이라 보기 좋아요",
@@ -124,11 +128,14 @@ class TestCommunityRhythmPolicy(unittest.TestCase):
             "서이추 좋은 하루 보내세요",
             "답방 좋은 하루 보내세요",
             "놀러 와주세요 좋은 하루 보내세요",
+            "대박 취향저격이네요 정말 마음에 들어요",
+            "여기 강추합니다 완전 구매각이네요",
+            "특히 사진 보니까 한눈에 쏙 들어오네요",
         )
         for phrase in phrases:
             with self.subTest(phrase=phrase):
                 result = FinalQualityGate.validate(phrase)
-                self.assertFalse(result.valid)
+                self.assertFalse(result.valid, f"Expected {phrase!r} to be rejected")
                 self.assertIn(result.code, {"formal_register", "banned_macro"})
 
     def test_rejects_laughter_emoticon_emoji_fake_experience_absolute_and_rude(self):

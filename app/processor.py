@@ -394,17 +394,40 @@ class PostProcessor:
                                         )
                                         if gemini_answer:
                                             from services.comments.community_rhythm import FinalQualityGate
-                                            candidate_with_suffix = DraftService.compose_body_and_suffix(gemini_answer, suffix)
-                                            extension_gate = FinalQualityGate.validate_final_text(
-                                                candidate_with_suffix, preset=preset, source="gemini"
+                                            # Step 1: Body validation
+                                            body_gate = FinalQualityGate.validate_final_text(
+                                                gemini_answer, preset=preset, source="gemini_body"
                                             )
-                                            if not extension_gate.valid:
-                                                failure = f"quality_{extension_gate.code}"
+                                            if not body_gate.valid:
+                                                failure = f"quality_body:{body_gate.code}"
                                                 logger.log(
-                                                    f"[GEMINI/EXTENSION] 품질 검사 실패: {extension_gate.code}",
-                                                    "ERROR",
+                                                    f"⚠️ [GEMINI/EXTENSION] 응답 수신 완료되었으나 본문 품질 검사에서 제외됨: "
+                                                    f"[{failure}] matched={body_gate.matched!r} length={body_gate.length} source=gemini_body",
+                                                    "WARNING",
                                                 )
                                                 gemini_answer = None
+                                            else:
+                                                # Step 2: Combined / Suffix validation
+                                                candidate_with_suffix = DraftService.compose_body_and_suffix(gemini_answer, suffix)
+                                                combined_gate = FinalQualityGate.validate_final_text(
+                                                    candidate_with_suffix, preset=preset, source="gemini_suffix"
+                                                )
+                                                if not combined_gate.valid:
+                                                    failure = f"quality_suffix:{combined_gate.code}"
+                                                    logger.log(
+                                                        f"⚠️ [GEMINI/EXTENSION] 응답 수신 완료되었으나 접미사 결합 품질 검사에서 제외됨: "
+                                                        f"[{failure}] matched={combined_gate.matched!r} length={combined_gate.length} source=gemini_suffix",
+                                                        "WARNING",
+                                                    )
+                                                    gemini_answer = None
+                                                else:
+                                                    logger.log(
+                                                        f"✅ [GEMINI/EXTENSION] 품질 검사 통과: "
+                                                        f"length={combined_gate.length} source=gemini"
+                                                    )
+                                        else:
+                                            failure = "empty_cleaned_response"
+                                            logger.log("⚠️ [GEMINI/EXTENSION] 정제 후 응답 본문이 비어있음", "WARNING")
                                     else:
                                         failure = extension_result.status.value if extension_result else "timeout"
                                         failure_detail = extension_result.error if extension_result else "response_timeout"
@@ -426,9 +449,13 @@ class PostProcessor:
                                     )
                                     return result
                                 if self.state_mgr:
+                                    if "quality_" in failure:
+                                        msg = f"Gemini 응답 수신 완료 / 품질검사 제외 ({failure}) - 연결 확인 후 작업 재개"
+                                    else:
+                                        msg = f"Gemini 실패로 일시정지됨 ({failure}) - 연결 복구 후 작업 재개를 누르세요"
                                     self.state_mgr.update(
                                         new_state=FeedState.PAUSED,
-                                        message=f"Gemini 실패로 일시정지됨 ({failure}) - 연결 복구 후 작업 재개를 누르세요",
+                                        message=msg,
                                     )
                                 while self.pause_event is not None and self.pause_event.is_set():
                                     if self.stop_event and self.stop_event.is_set():

@@ -167,43 +167,31 @@ class FinalQualityGate:
         "싶습니다",
     )
 
-    # Sections 11 and 12 of the V13.1 work order: report-like summaries and
-    # reusable macro/opening language are not community comments.
-    AI_SUMMARY_MACRO_PHRASES: ClassVar[Tuple[str, ...]] = (
+    # Hard banned macros: blatant macro / opening boilerplate / hype words
+    HARD_BANNED_MACROS: ClassVar[Tuple[str, ...]] = (
         "전반적으로",
         "전체적으로",
         "무엇보다",
-        "특히",
         "라는 점",
         "라는 부분",
         "다는 점",
         "다는 부분",
-        "특히 인상",
-        "인상적인",
-        "인상적",
-        "알찬",
         "알찬 정보",
-        "유익한",
+        "알찬",
         "유익한 정보",
+        "유익한",
         "유용한 정보",
         "좋은 정보",
-        "구성이",
-        "구성도",
-        "조화가",
-        "정리가 잘 되어",
-        "한눈에",
         "구성이 돋보",
         "돋보",
-        "매력적인",
-        "매력적이네요",
-        "눈길을 끄",
-        "눈길을 끄네요",
-        "정성 가득",
+        "정리가 잘 되어",
+        "깔끔하게 잘 정리",
         "깔끔하게 정리",
         "잘 정리",
         "참고하기 좋",
         "좋은 포스팅",
         "포스팅 잘 봤어요",
+        "포스팅 잘 읽었습니다",
         "오늘도 좋은 하루",
         "제 블로그에도",
         "소통해요",
@@ -215,12 +203,8 @@ class FinalQualityGate:
         "작성자님",
         "도움이 되었습니다",
         "관점이",
-        "깔끔하게 잘 정리",
-        "포스팅 잘 읽었습니다",
         "그중에서도",
-        "사진 보니까",
-        "글 보니까",
-        "포스팅 보니까",
+        "정성 가득",
         "취향저격",
         "취저",
         "못 참죠",
@@ -229,6 +213,23 @@ class FinalQualityGate:
         "방문각",
         "구매각",
     )
+
+    # Soft conversational phrases: permissible standalone, forbidden when stacked (>= 2)
+    SOFT_AI_PHRASES: ClassVar[Tuple[str, ...]] = (
+        "특히",
+        "한눈에",
+        "사진 보니까",
+        "글 보니까",
+        "포스팅 보니까",
+        "매력적",
+        "인상적",
+        "눈길을 끄",
+        "구성이",
+        "구성도",
+        "조화가",
+    )
+
+    AI_SUMMARY_MACRO_PHRASES: ClassVar[Tuple[str, ...]] = HARD_BANNED_MACROS
 
     FAKE_EXPERIENCE_PHRASES: ClassVar[Tuple[str, ...]] = (
         "저도 가봤",
@@ -411,9 +412,13 @@ class FinalQualityGate:
         # merely because a newly added V13.1 root is present. Final text uses
         # the strict public profile above.
         if not legacy:
-            for phrase in cls.AI_SUMMARY_MACRO_PHRASES:
+            for phrase in cls.HARD_BANNED_MACROS:
                 if phrase in normalized:
                     return result(False, "banned_macro", f"summary or macro phrase is forbidden: {phrase}", matched=phrase)
+
+            matched_soft = [p for p in cls.SOFT_AI_PHRASES if p in normalized]
+            if len(matched_soft) >= 2:
+                return result(False, "banned_macro", f"multiple soft AI phrases: {', '.join(matched_soft)}", matched=matched_soft[0])
         for phrase in cls.FAKE_EXPERIENCE_PHRASES:
             if phrase in normalized:
                 return result(False, "fake_experience", f"unverified past experience is forbidden: {phrase}", matched=phrase)
