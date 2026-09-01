@@ -353,6 +353,18 @@
     };
   }
 
+  function extractResponseText(node) {
+    if (!node) return '';
+    const contentEl = node.querySelector('message-content, div.markdown, div.model-response-text, .response-body-inner') || node;
+    return (contentEl.innerText || contentEl.textContent || '').trim();
+  }
+
+  function extractUserQueryText(node) {
+    if (!node) return '';
+    const queryEl = node.querySelector('.query-text, .user-query-text, p, div') || node;
+    return (queryEl.innerText || queryEl.textContent || '').trim();
+  }
+
   function responseNodes() {
     return [...document.querySelectorAll(RESPONSE_SELECTORS)].filter(visible);
   }
@@ -403,12 +415,12 @@
     const initialResponseList = responseNodes();
     const initialResponseSet = new Set(initialResponseList);
     const baselineResponseFingerprints = new Set(
-      initialResponseList.map(n => canonicalPromptText(n.innerText || n.textContent || '')).filter(Boolean)
+      initialResponseList.map(n => canonicalPromptText(extractResponseText(n))).filter(Boolean)
     );
     const initialUserQueries = userQueryNodes();
     const initialUserQuerySet = new Set(initialUserQueries);
     const baselineUserQueryFingerprints = new Set(
-      initialUserQueries.map(q => canonicalPromptText(q.innerText || q.textContent || '')).filter(Boolean)
+      initialUserQueries.map(q => canonicalPromptText(extractUserQueryText(q))).filter(Boolean)
     );
 
     let target = editor();
@@ -502,12 +514,16 @@
 
     function findNewUserQuery() {
       const currentQueries = userQueryNodes();
-      const exactPromptMatch = currentQueries.find(q => canonicalPromptText(q.innerText || q.textContent || '') === expectedCanonical);
+      const exactPromptMatch = currentQueries.find(q => {
+        const qText = canonicalPromptText(extractUserQueryText(q));
+        return qText === expectedCanonical && !initialUserQuerySet.has(q);
+      }) || currentQueries.find(q => canonicalPromptText(extractUserQueryText(q)) === expectedCanonical);
       if (exactPromptMatch) return exactPromptMatch;
 
       const novelQuery = currentQueries.find(q => {
-        const qCanonical = canonicalPromptText(q.innerText || q.textContent || '');
-        return qCanonical && !baselineUserQueryFingerprints.has(qCanonical);
+        if (initialUserQuerySet.has(q)) return false;
+        const qText = canonicalPromptText(extractUserQueryText(q));
+        return qText && !baselineUserQueryFingerprints.has(qText);
       });
       if (novelQuery) return novelQuery;
 
@@ -529,37 +545,32 @@
 
       const currentResponses = responseNodes();
 
-      // Strategy 1: If currentUserTurn exists, search inside turn wrapper
+      // Strategy 1: Find first response strictly following currentUserTurn in document order
       if (currentUserTurn && currentUserTurn.isConnected) {
-        const turnWrapper = currentUserTurn.closest('conversation-turn, .conversation-turn, [data-test-id="conversation-turn"], .turn, article, section') || currentUserTurn.parentElement;
-        if (turnWrapper) {
-          const innerResponse = turnWrapper.querySelector(RESPONSE_SELECTORS);
-          if (innerResponse && visible(innerResponse)) {
-            const textCanonical = canonicalPromptText(innerResponse.innerText || innerResponse.textContent || '');
-            if (!baselineResponseFingerprints.has(textCanonical)) {
-              return innerResponse;
-            }
-          }
-        }
-
-        // Strategy 2: Document order following currentUserTurn
         for (const resp of currentResponses) {
-          const pos = currentUserTurn.compareDocumentPosition(resp);
-          if (pos & Node.DOCUMENT_POSITION_FOLLOWING) {
-            const textCanonical = canonicalPromptText(resp.innerText || resp.textContent || '');
-            if (!baselineResponseFingerprints.has(textCanonical)) {
-              return resp;
-            }
-          }
+          if (!resp || !resp.isConnected) continue;
+          if (initialResponseSet.has(resp)) continue;
+
+          const isFollowing = (currentUserTurn.compareDocumentPosition(resp) & Node.DOCUMENT_POSITION_FOLLOWING) !== 0;
+          if (!isFollowing) continue;
+
+          const textCanonical = canonicalPromptText(extractResponseText(resp));
+          if (textCanonical && baselineResponseFingerprints.has(textCanonical)) continue;
+
+          return resp;
         }
       }
 
-      // Strategy 3: Novel response not matching any baseline response fingerprint
-      for (const resp of currentResponses) {
-        const textCanonical = canonicalPromptText(resp.innerText || resp.textContent || '');
-        if (textCanonical && !baselineResponseFingerprints.has(textCanonical)) {
-          return resp;
-        }
+      // Strategy 2: If user turn not yet bound, search from the latest novel response in reverse order
+      for (let i = currentResponses.length - 1; i >= 0; i--) {
+        const resp = currentResponses[i];
+        if (!resp || !resp.isConnected) continue;
+        if (initialResponseSet.has(resp)) continue;
+
+        const textCanonical = canonicalPromptText(extractResponseText(resp));
+        if (textCanonical && baselineResponseFingerprints.has(textCanonical)) continue;
+
+        return resp;
       }
 
       return null;
@@ -652,7 +663,7 @@
         if (execState.cancelled) return finish({ status: 'failed', text: '', error: 'cancelled' });
         if (Date.now() > deadline) return finish({ status: 'timeout', text: '', error: 'command_deadline_exceeded' });
 
-        if (!targetResponseNode) {
+        if (!targetResponseNode || !targetResponseNode.isConnected) {
           const candidate = findTurnResponseCandidate();
           if (candidate) {
             bindResponseNode(candidate, 'observer_phase');
@@ -661,13 +672,20 @@
 
         if (!targetResponseNode) return;
 
-        const contentEl = targetResponseNode.querySelector('message-content, div.markdown, div.model-response-text, .response-body-inner') || targetResponseNode;
-        const current = (contentEl.innerText || contentEl.textContent || '').trim();
+        const current = extractResponseText(targetResponseNode);
+        if (!current) return;
 
-        if (current && current !== previous) {
+        // CRITICAL GUARD: Never accept text identical to any baseline response
+        const currentCanonical = canonicalPromptText(current);
+        if (baselineResponseFingerprints.has(currentCanonical)) {
+          targetResponseNode = null;
+          return;
+        }
+
+        if (current !== previous) {
           previous = current;
           stableSince = Date.now();
-        } else if (current && stableSince && Date.now() - stableSince >= 1600 && !generationActive()) {
+        } else if (stableSince && Date.now() - stableSince >= 1200 && !generationActive()) {
           return finish({ status: 'completed', text: current, error: '' });
         }
       };
@@ -678,7 +696,7 @@
       });
       observer.observe(targetRoot, { childList: true, subtree: true, characterData: true });
 
-      const checkTimer = setInterval(checkOutput, 250);
+      const checkTimer = setInterval(checkOutput, 200);
       execState.observer = observer;
       execState.timer = checkTimer;
     });

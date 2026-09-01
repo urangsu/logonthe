@@ -166,16 +166,28 @@ class PlaywrightGeminiDOMContractTests(unittest.TestCase):
                   return [...document.querySelectorAll('.user-message, user-query')];
                 }
 
+                function extractResponseText(node) {
+                  if (!node) return '';
+                  const contentEl = node.querySelector('message-content, div.markdown, div.model-response-text, .response-body-inner') || node;
+                  return (contentEl.innerText || contentEl.textContent || '').trim();
+                }
+
+                function extractUserQueryText(node) {
+                  if (!node) return '';
+                  const queryEl = node.querySelector('.query-text, .user-query-text, p, div') || node;
+                  return (queryEl.innerText || queryEl.textContent || '').trim();
+                }
+
                 // 1. Initial State Capture
                 const initialResponseList = responseNodes();
                 const initialResponseSet = new Set(initialResponseList);
                 const baselineResponseFingerprints = new Set(
-                  initialResponseList.map(n => canonicalPromptText(n.innerText || n.textContent || '')).filter(Boolean)
+                  initialResponseList.map(n => canonicalPromptText(extractResponseText(n))).filter(Boolean)
                 );
                 const initialUserQueries = userQueryNodes();
                 const initialUserQuerySet = new Set(initialUserQueries);
                 const baselineUserQueryFingerprints = new Set(
-                  initialUserQueries.map(q => canonicalPromptText(q.innerText || q.textContent || '')).filter(Boolean)
+                  initialUserQueries.map(q => canonicalPromptText(extractUserQueryText(q))).filter(Boolean)
                 );
 
                 // 2. Simulate Virtualization / DOM Rerender of old turns (all nodes replaced with new DOM object instances)
@@ -201,12 +213,16 @@ class PlaywrightGeminiDOMContractTests(unittest.TestCase):
 
                 function findNewUserQuery() {
                   const currentQueries = userQueryNodes();
-                  const exactPromptMatch = currentQueries.find(q => canonicalPromptText(q.innerText || q.textContent || '') === expectedCanonical);
+                  const exactPromptMatch = currentQueries.find(q => {
+                    const qText = canonicalPromptText(extractUserQueryText(q));
+                    return qText === expectedCanonical && !initialUserQuerySet.has(q);
+                  }) || currentQueries.find(q => canonicalPromptText(extractUserQueryText(q)) === expectedCanonical);
                   if (exactPromptMatch) return exactPromptMatch;
 
                   const novelQuery = currentQueries.find(q => {
-                    const qCanonical = canonicalPromptText(q.innerText || q.textContent || '');
-                    return qCanonical && !baselineUserQueryFingerprints.has(qCanonical);
+                    if (initialUserQuerySet.has(q)) return false;
+                    const qText = canonicalPromptText(extractUserQueryText(q));
+                    return qText && !baselineUserQueryFingerprints.has(qText);
                   });
                   if (novelQuery) return novelQuery;
 
@@ -224,41 +240,37 @@ class PlaywrightGeminiDOMContractTests(unittest.TestCase):
 
                   const currentResponses = responseNodes();
                   if (currentUserTurn && currentUserTurn.isConnected) {
-                    const turnWrapper = currentUserTurn.closest('conversation-turn, .turn') || currentUserTurn.parentElement;
-                    if (turnWrapper) {
-                      const innerResponse = turnWrapper.querySelector('model-response');
-                      if (innerResponse) {
-                        const textCanonical = canonicalPromptText(innerResponse.innerText || '');
-                        if (!baselineResponseFingerprints.has(textCanonical)) {
-                          return innerResponse;
-                        }
-                      }
-                    }
-
                     for (const resp of currentResponses) {
-                      const pos = currentUserTurn.compareDocumentPosition(resp);
-                      if (pos & Node.DOCUMENT_POSITION_FOLLOWING) {
-                        const textCanonical = canonicalPromptText(resp.innerText || '');
-                        if (!baselineResponseFingerprints.has(textCanonical)) {
-                          return resp;
-                        }
-                      }
+                      if (!resp || !resp.isConnected) continue;
+                      if (initialResponseSet.has(resp)) continue;
+
+                      const isFollowing = (currentUserTurn.compareDocumentPosition(resp) & Node.DOCUMENT_POSITION_FOLLOWING) !== 0;
+                      if (!isFollowing) continue;
+
+                      const textCanonical = canonicalPromptText(extractResponseText(resp));
+                      if (textCanonical && baselineResponseFingerprints.has(textCanonical)) continue;
+
+                      return resp;
                     }
                   }
 
-                  for (const resp of currentResponses) {
-                    const textCanonical = canonicalPromptText(resp.innerText || '');
-                    if (textCanonical && !baselineResponseFingerprints.has(textCanonical)) {
-                      return resp;
-                    }
+                  for (let i = currentResponses.length - 1; i >= 0; i--) {
+                    const resp = currentResponses[i];
+                    if (!resp || !resp.isConnected) continue;
+                    if (initialResponseSet.has(resp)) continue;
+
+                    const textCanonical = canonicalPromptText(extractResponseText(resp));
+                    if (textCanonical && baselineResponseFingerprints.has(textCanonical)) continue;
+
+                    return resp;
                   }
                   return null;
                 }
 
                 const boundNode = findTurnResponseCandidate();
                 return {
-                  boundNodeText: boundNode ? boundNode.innerText : null,
-                  userTurnText: currentUserTurn ? currentUserTurn.innerText : null
+                  boundNodeText: boundNode ? extractResponseText(boundNode) : null,
+                  userTurnText: currentUserTurn ? extractUserQueryText(currentUserTurn) : null
                 };
             }""")
 
