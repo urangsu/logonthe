@@ -990,3 +990,11 @@ class MainWindow(ctk.CTk):
             self.gemini_bridge_server.stop()
         finally:
             self.destroy()
+
+
+if __name__ == "__main__":
+    from ui.log_clipboard_support import install_log_clipboard_support
+    app = MainWindow()
+    install_log_clipboard_support(app)
+    app.mainloop()
+
