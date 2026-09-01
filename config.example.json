@@ -47,5 +47,6 @@
   "gemini_web_enabled": true,
   "gemini_mode": "new",
   "gemini_custom_url": "https://gemini.google.com/app",
+  "engagement_audit_recent_posts": 10,
   "workflow_mode": "assisted_auto"
 }
