@@ -83,8 +83,10 @@ class CommentEditorAdapter:
 
         try:
             disabled = submit_context["button"].is_disabled()
-        except Exception:
-            disabled = False
+        except Exception as e:
+            logger.log(f"⚠️ [NAVER][EDITOR_SUBMIT_CHECK_ERROR] {e}", "WARNING")
+            logger.log("[NAVER][EDITOR_INPUT_FAIL] stage=internal_state", "ERROR")
+            return False
 
         if disabled:
             logger.log("[NAVER][EDITOR_FRAMEWORK_STATE_NOT_UPDATED] submitEnabled=false", "ERROR")

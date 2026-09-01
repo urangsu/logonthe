@@ -81,6 +81,9 @@ class GeminiPreflight:
     protocol_version: int = 0
     bridge_schema_version: int = 0
     heartbeat_age_ms: int = 0
+    bridge_session_id: str = ""
+    active_request_id: Optional[str] = None
+    command_state: str = "idle"
 
 
 import urllib.parse
@@ -98,10 +101,12 @@ class GeminiExtensionBridge:
         expected_build_id: Optional[str] = None
     ):
         contract = load_runtime_contract()
+        self.bridge_session_id = uuid.uuid4().hex
         self._condition = threading.Condition()
         self._command: Optional[GeminiCommand] = None
         self._command_state = "idle"
         self._command_claimed_by = ""
+        self._active_request_id: Optional[str] = None
         self._results: Dict[str, GeminiResult] = {}
         self._heartbeat_at = 0.0
         self._ever_seen_heartbeat = False
@@ -117,6 +122,10 @@ class GeminiExtensionBridge:
         self._runtime_status = "unknown"
         self._consumer_id = ""
         self._last_runtime_ping_at = 0.0
+        self._last_busy_request_id: Optional[str] = None
+        self._last_busy_since: Optional[float] = None
+        self._last_busy_deadline_at: Optional[float] = None
+        self._cancel_requests: set[str] = set()
         self._expected_extension_version = expected_extension_version or contract.extension_version
         self._expected_build_id = expected_build_id or contract.runtime_build
         self._protocol_version_expected = contract.protocol_version
@@ -137,7 +146,10 @@ class GeminiExtensionBridge:
         runtime_alive: bool = True,
         runtime_status: str = "ready",
         consumer_id: str = "",
-        last_runtime_ping_at: float = 0.0
+        last_runtime_ping_at: float = 0.0,
+        busy_request_id: Optional[str] = None,
+        busy_since: Optional[float] = None,
+        busy_deadline_at: Optional[float] = None
     ) -> None:
         with self._condition:
             self._heartbeat_at = time.time()
@@ -154,7 +166,34 @@ class GeminiExtensionBridge:
             self._runtime_status = str(runtime_status or status)
             self._consumer_id = str(consumer_id or "")
             self._last_runtime_ping_at = float(last_runtime_ping_at or self._heartbeat_at)
+            self._last_busy_request_id = busy_request_id
+            self._last_busy_since = busy_since
+            self._last_busy_deadline_at = busy_deadline_at
             self._condition.notify_all()
+
+    def cancel_command(self, request_id: Optional[str] = None) -> bool:
+        with self._condition:
+            target_rid = request_id or self._active_request_id
+            if target_rid:
+                self._cancel_requests.add(target_rid)
+                if self._command and self._command.request_id == target_rid:
+                    self._command_state = "cancelled"
+                    self._command = None
+                    self._command_claimed_by = ""
+                self._results[target_rid] = GeminiResult(
+                    request_id=target_rid,
+                    post_key="",
+                    navigation_version=0,
+                    status=GeminiResultStatus.FAILED,
+                    text="",
+                    error="cancelled"
+                )
+                if self._active_request_id == target_rid:
+                    self._active_request_id = None
+                logger.log(f"[GEMINI][CANCEL_COMMAND] rid={target_rid}")
+                self._condition.notify_all()
+                return True
+            return False
 
     def preflight(self) -> GeminiPreflight:
         with self._condition:
@@ -163,13 +202,15 @@ class GeminiExtensionBridge:
                 status = "bridge_port_in_use" if "address already in use" in err_lower or "in use" in err_lower else "bridge_server_unavailable"
                 return GeminiPreflight(
                     False, status, "", "", f"Gemini bridge server unavailable: {self.bridge_server_error}",
-                    self._extension_version, self._content_build, self._protocol_version, self._bridge_schema_version, 0
+                    self._extension_version, self._content_build, self._protocol_version, self._bridge_schema_version, 0,
+                    self.bridge_session_id, self._active_request_id, self._command_state
                 )
 
             if not self._ever_seen_heartbeat:
                 return GeminiPreflight(
                     False, "heartbeat_never_received", "", "", "Gemini extension heartbeat never received",
-                    self._extension_version, self._content_build, self._protocol_version, self._bridge_schema_version, 0
+                    self._extension_version, self._content_build, self._protocol_version, self._bridge_schema_version, 0,
+                    self.bridge_session_id, self._active_request_id, self._command_state
                 )
 
             age_sec = time.time() - self._heartbeat_at
@@ -180,7 +221,8 @@ class GeminiExtensionBridge:
                 return GeminiPreflight(
                     False, "heartbeat_stale", self._heartbeat_title, self._heartbeat_url,
                     f"Gemini heartbeat stale (age: {age_sec:.1f}s)",
-                    self._extension_version, self._content_build, self._protocol_version, self._bridge_schema_version, age_ms
+                    self._extension_version, self._content_build, self._protocol_version, self._bridge_schema_version, age_ms,
+                    self.bridge_session_id, self._active_request_id, self._command_state
                 )
 
             version_ok = not self._expected_extension_version or self._extension_version == self._expected_extension_version
@@ -188,7 +230,8 @@ class GeminiExtensionBridge:
                 return GeminiPreflight(
                     False, "extension_version_mismatch", self._heartbeat_title, self._heartbeat_url,
                     f"Extension version mismatch: expected {self._expected_extension_version}, got {self._extension_version}",
-                    self._extension_version, self._content_build, self._protocol_version, self._bridge_schema_version, age_ms
+                    self._extension_version, self._content_build, self._protocol_version, self._bridge_schema_version, age_ms,
+                    self.bridge_session_id, self._active_request_id, self._command_state
                 )
 
             identity_ok = (
@@ -200,52 +243,90 @@ class GeminiExtensionBridge:
                 return GeminiPreflight(
                     False, "extension_identity_mismatch", self._heartbeat_title, self._heartbeat_url,
                     f"Extension runtime identity mismatch: build={self._content_build}, proto={self._protocol_version}, schema={self._bridge_schema_version}",
-                    self._extension_version, self._content_build, self._protocol_version, self._bridge_schema_version, age_ms
+                    self._extension_version, self._content_build, self._protocol_version, self._bridge_schema_version, age_ms,
+                    self.bridge_session_id, self._active_request_id, self._command_state
                 )
 
             if self._heartbeat_status == "auth_required":
                 return GeminiPreflight(
                     False, "auth_required", self._heartbeat_title, self._heartbeat_url,
                     "Gemini login required (auth_required)",
-                    self._extension_version, self._content_build, self._protocol_version, self._bridge_schema_version, age_ms
+                    self._extension_version, self._content_build, self._protocol_version, self._bridge_schema_version, age_ms,
+                    self.bridge_session_id, self._active_request_id, self._command_state
                 )
 
             if self._heartbeat_status == "dom_unsupported":
                 return GeminiPreflight(
                     False, "dom_unsupported", self._heartbeat_title, self._heartbeat_url,
                     "Gemini DOM editor not found or unsupported",
-                    self._extension_version, self._content_build, self._protocol_version, self._bridge_schema_version, age_ms
+                    self._extension_version, self._content_build, self._protocol_version, self._bridge_schema_version, age_ms,
+                    self.bridge_session_id, self._active_request_id, self._command_state
                 )
 
             if self._heartbeat_status == "captcha":
                 return GeminiPreflight(
                     False, "captcha", self._heartbeat_title, self._heartbeat_url,
                     "Gemini captcha detected",
-                    self._extension_version, self._content_build, self._protocol_version, self._bridge_schema_version, age_ms
+                    self._extension_version, self._content_build, self._protocol_version, self._bridge_schema_version, age_ms,
+                    self.bridge_session_id, self._active_request_id, self._command_state
                 )
 
             if self._heartbeat_status == "busy":
-                return GeminiPreflight(
-                    False, "busy", self._heartbeat_title, self._heartbeat_url,
-                    "Gemini generation currently busy",
-                    self._extension_version, self._content_build, self._protocol_version, self._bridge_schema_version, age_ms
-                )
+                # Classify busy into busy_active_command, busy_orphaned, busy_stale_deadline
+                if self._last_busy_deadline_at and time.time() > (self._last_busy_deadline_at / 1000.0 if self._last_busy_deadline_at > 100_000_000_000 else self._last_busy_deadline_at):
+                    return GeminiPreflight(
+                        False, "busy_stale_deadline", self._heartbeat_title, self._heartbeat_url,
+                        "Gemini busy deadline exceeded (busy_stale_deadline)",
+                        self._extension_version, self._content_build, self._protocol_version, self._bridge_schema_version, age_ms,
+                        self.bridge_session_id, self._active_request_id, self._command_state
+                    )
+                if self._last_busy_request_id:
+                    if self._active_request_id and self._active_request_id == self._last_busy_request_id:
+                        return GeminiPreflight(
+                            False, "busy_active_command", self._heartbeat_title, self._heartbeat_url,
+                            f"Gemini currently generating for active command (rid={self._active_request_id})",
+                            self._extension_version, self._content_build, self._protocol_version, self._bridge_schema_version, age_ms,
+                            self.bridge_session_id, self._active_request_id, self._command_state
+                        )
+                    else:
+                        return GeminiPreflight(
+                            False, "busy_orphaned", self._heartbeat_title, self._heartbeat_url,
+                            f"Gemini busy with orphaned request (rid={self._last_busy_request_id})",
+                            self._extension_version, self._content_build, self._protocol_version, self._bridge_schema_version, age_ms,
+                            self.bridge_session_id, self._active_request_id, self._command_state
+                        )
+                elif not self._active_request_id:
+                    return GeminiPreflight(
+                        False, "busy_orphaned", self._heartbeat_title, self._heartbeat_url,
+                        "Gemini busy without active Python request (busy_orphaned)",
+                        self._extension_version, self._content_build, self._protocol_version, self._bridge_schema_version, age_ms,
+                        self.bridge_session_id, self._active_request_id, self._command_state
+                    )
+                else:
+                    return GeminiPreflight(
+                        False, "busy", self._heartbeat_title, self._heartbeat_url,
+                        "Gemini generation currently busy",
+                        self._extension_version, self._content_build, self._protocol_version, self._bridge_schema_version, age_ms,
+                        self.bridge_session_id, self._active_request_id, self._command_state
+                    )
 
             if self._heartbeat_status == GeminiResultStatus.READY.value:
                 return GeminiPreflight(
                     True, "ready", self._heartbeat_title, self._heartbeat_url,
                     "Gemini extension ready",
-                    self._extension_version, self._content_build, self._protocol_version, self._bridge_schema_version, age_ms
+                    self._extension_version, self._content_build, self._protocol_version, self._bridge_schema_version, age_ms,
+                    self.bridge_session_id, self._active_request_id, self._command_state
                 )
 
             return GeminiPreflight(
                 False, self._heartbeat_status, self._heartbeat_title, self._heartbeat_url,
                 f"Gemini extension status: {self._heartbeat_status}",
-                self._extension_version, self._content_build, self._protocol_version, self._bridge_schema_version, age_ms
+                self._extension_version, self._content_build, self._protocol_version, self._bridge_schema_version, age_ms,
+                self.bridge_session_id, self._active_request_id, self._command_state
             )
 
     def await_ready(self, timeout: float = 5.0, stop_event: Optional[threading.Event] = None) -> GeminiPreflight:
-        """피드 작업 시작 시 단기 유예 시간(5초)을 두고 ready 상태를 대기"""
+        """피드 작업 시작 시 단기 유예 시간(5초)을 두고 ready 상태를 대기하며, orphan/stale은 자동 복구"""
         deadline = time.monotonic() + max(0.1, timeout)
         while time.monotonic() < deadline:
             if stop_event and stop_event.is_set():
@@ -253,7 +334,10 @@ class GeminiExtensionBridge:
             pf = self.preflight()
             if pf.ready:
                 return pf
-            time.sleep(0.15)
+            if pf.status in ("busy_orphaned", "busy_stale_deadline"):
+                logger.log(f"⚠️ [GEMINI][RECOVERY] {pf.status} 감지 -> 자동 정리 요청", "WARNING")
+                self.cancel_command(self._last_busy_request_id)
+            time.sleep(0.2)
         return self.preflight()
 
     def publish(self, command: GeminiCommand) -> None:
@@ -261,6 +345,7 @@ class GeminiExtensionBridge:
             self._command = command
             self._command_state = "pending"
             self._command_claimed_by = ""
+            self._active_request_id = command.request_id
             self._results.pop(command.request_id, None)
             logger.log(f"[GEMINI][PUBLISH] rid={command.request_id} post={command.post_key} nav={command.navigation_version}")
             self._condition.notify_all()
@@ -328,6 +413,8 @@ class GeminiExtensionBridge:
             self._command_state = "completed" if result.status == GeminiResultStatus.COMPLETED else "failed"
             self._command = None
             self._command_claimed_by = ""
+            if self._active_request_id == result.request_id:
+                self._active_request_id = None
             logger.log(f"[GEMINI][RESULT] rid={result.request_id} post={result.post_key} nav={result.navigation_version} status={result.status.value}")
             self._condition.notify_all()
             return True, "accepted"
@@ -346,11 +433,16 @@ class GeminiExtensionBridge:
             while True:
                 result = self._results.get(command.request_id)
                 if result:
+                    if self._active_request_id == command.request_id:
+                        self._active_request_id = None
                     return result
                 if stop_event and stop_event.is_set():
+                    logger.log(f"[GEMINI][WAIT_RESULT] stop_event 감지 -> 명령 취소 전송 (rid={command.request_id})")
+                    self.cancel_command(command.request_id)
                     return None
                 if skip_event and skip_event.is_set():
-                    logger.log(f"[GEMINI][WAIT_RESULT] skip_event 감지 -> 결과 대기 즉시 중단 (rid={command.request_id})")
+                    logger.log(f"[GEMINI][WAIT_RESULT] skip_event 감지 -> 명령 취소 전송 (rid={command.request_id})")
+                    self.cancel_command(command.request_id)
                     return None
                 remaining = deadline - time.monotonic()
                 if remaining <= 0:
@@ -446,11 +538,17 @@ class GeminiBridgeHTTPServer:
                         runtime_alive=bool(payload.get("runtimeAlive", True)),
                         runtime_status=str(payload.get("runtimeStatus", payload.get("status", "ready"))),
                         consumer_id=str(payload.get("consumerId", "")),
-                        last_runtime_ping_at=float(payload.get("lastRuntimePingAt", 0.0) or 0.0)
+                        last_runtime_ping_at=float(payload.get("lastRuntimePingAt", 0.0) or 0.0),
+                        busy_request_id=payload.get("busyRequestId"),
+                        busy_since=payload.get("busySince"),
+                        busy_deadline_at=payload.get("busyDeadlineAt")
                     )
                     return self._json(200, {"ok": True})
                 if self.path == "/v1/claim":
                     return self._json(200, {"claimed": bridge.claim_command(str(payload.get("requestId", "")), str(payload.get("claimant", "")))})
+                if self.path == "/v1/cancel":
+                    cancelled = bridge.cancel_command(str(payload.get("requestId", "")))
+                    return self._json(200, {"ok": True, "cancelled": cancelled})
                 if self.path == "/v1/result":
                     accepted, reason = bridge.submit_result(GeminiResult.from_json(payload))
                     return self._json(200, {"ok": True, "accepted": accepted, "reason": reason})

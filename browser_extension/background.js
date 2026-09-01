@@ -56,7 +56,10 @@ async function pingRuntime(tabId) {
             status: response.status,
             instanceId: response.instanceId,
             url: response.url,
-            title: response.title
+            title: response.title,
+            busyRequestId: response.busyRequestId || null,
+            busySince: response.busySince || null,
+            busyDeadlineAt: response.busyDeadlineAt || null
           });
         }
       });
@@ -129,6 +132,27 @@ async function startHeartbeatLoop() {
       const contract = await getRuntimeContract();
       const activeRuntime = await findActiveGeminiRuntime();
       const now = Date.now();
+
+      // Check Python bridge status to reconcile orphaned busy states
+      let bridgeStatus = null;
+      try {
+        bridgeStatus = await bridgeFetch('/v1/status', 'GET', null, 3000);
+      } catch (_) {}
+
+      if (activeRuntime && activeRuntime.ping.status === 'busy') {
+        const pythonActiveReqId = bridgeStatus?.activeRequestId || null;
+        const busyReqId = activeRuntime.ping.busyRequestId;
+        // Reconcile: If Python has no active request, or busyRequestId doesn't match Python activeRequestId
+        if (!pythonActiveReqId || (busyReqId && busyReqId !== pythonActiveReqId)) {
+          try {
+            chrome.tabs.sendMessage(activeRuntime.tabId, {
+              type: 'NFA_CANCEL_COMMAND',
+              requestId: busyReqId
+            }, () => {});
+          } catch (_) {}
+        }
+      }
+
       const heartbeatPayload = {
         status: activeRuntime ? (activeRuntime.ping.status || 'ready') : 'gemini_tab_not_found',
         transportAlive: true,
@@ -141,8 +165,11 @@ async function startHeartbeatLoop() {
         buildId: contract.runtimeBuild,
         protocolVersion: contract.protocolVersion,
         bridgeSchemaVersion: contract.bridgeSchemaVersion,
-        consumerId: 'background-r4',
-        lastRuntimePingAt: now
+        consumerId: 'background-r5',
+        lastRuntimePingAt: now,
+        busyRequestId: activeRuntime?.ping.busyRequestId || null,
+        busySince: activeRuntime?.ping.busySince || null,
+        busyDeadlineAt: activeRuntime?.ping.busyDeadlineAt || null
       };
       await bridgeFetch('/v1/heartbeat', 'POST', heartbeatPayload, 5000);
       lastHeartbeatSentAt = now;

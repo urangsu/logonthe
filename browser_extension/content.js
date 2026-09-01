@@ -42,11 +42,25 @@
     });
   } catch (_) {}
 
-  let busy = false;
+  // Active execution state machine
+  let activeExecution = null;
+
+  function cancelExecution(reqId) {
+    if (!activeExecution) return false;
+    if (!reqId || activeExecution.requestId === reqId) {
+      activeExecution.cancelled = true;
+      try { activeExecution.observer?.disconnect(); } catch (_) {}
+      if (activeExecution.timer) clearInterval(activeExecution.timer);
+      activeExecution = null;
+      return true;
+    }
+    return false;
+  }
 
   function stopRuntime() {
     if (isStopped) return;
     isStopped = true;
+    cancelExecution();
     while (eventCleanups.length > 0) {
       const cleanup = eventCleanups.pop();
       try { cleanup(); } catch (_) {}
@@ -87,7 +101,15 @@
     const body = (document.body?.innerText || '').slice(0, 5000);
     if (/captcha|로봇이 아닙니다|비정상적인 트래픽/i.test(body)) return 'captcha';
     if (/accounts\.google\.com/.test(location.href) || /로그인/.test(body) && !editor()) return 'auth_required';
-    return editor() ? (busy ? 'busy' : 'ready') : 'dom_unsupported';
+
+    if (activeExecution) {
+      if (Date.now() > activeExecution.deadlineAt) {
+        cancelExecution(activeExecution.requestId);
+      } else {
+        return 'busy';
+      }
+    }
+    return editor() ? 'ready' : 'dom_unsupported';
   }
 
   function setEditorText(target, text) {
@@ -101,151 +123,10 @@
       selection.removeAllRanges();
       selection.addRange(range);
       document.execCommand('insertText', false, text);
-      if ((target.innerText || target.textContent || '').trim() !== text.trim()) {
-        target.textContent = text;
-      }
     }
-    target.dispatchEvent(new InputEvent('input', { bubbles: true, inputType: 'insertText', data: text }));
-    target.dispatchEvent(new Event('keyup', { bubbles: true }));
-    target.dispatchEvent(new Event('change', { bubbles: true }));
-    return normalizeText(target.innerText || target.value) === normalizeText(text);
-  }
-
-  function findComposer(input) {
-    if (!input) return null;
-    return input.closest('chat-window, .input-area, .chat-input-container, .input-wrapper, form, main, [role="main"]') || input.parentElement;
-  }
-
-  function scoreSendButton(btn, input, composerRect) {
-    if (!btn || !visible(btn)) return -10000;
-    const isDis = btn.disabled || btn.getAttribute('aria-disabled') === 'true';
-    if (isDis) return -5000;
-
-    const label = [
-      btn.getAttribute('aria-label') || '',
-      btn.getAttribute('data-tooltip') || '',
-      btn.getAttribute('title') || '',
-      btn.innerText || ''
-    ].join(' ').toLowerCase();
-
-    // Explicitly exclude non-send controls: mic, audio, attach, file, plus, add, menu, settings, expand, help
-    if (/마이크|음성|mic|audio|voice|첨부|파일|attach|upload|file|플러스|추가|add|plus|메뉴|menu|설정|settings|확장|expand|help/i.test(label)) {
-      return -10000;
-    }
-
-    let score = 0;
-
-    // 1. Aria label / text matching send
-    if (/보내기|전송|제출|send|submit/i.test(label)) {
-      score += 100;
-    }
-
-    // 2. Icon check (mat-icon, svg, or class)
-    const iconEl = btn.querySelector('mat-icon, svg, [data-icon-name], .send-button-icon');
-    const iconName = [
-      iconEl?.getAttribute('data-mat-icon-name') || '',
-      iconEl?.getAttribute('data-icon-name') || '',
-      iconEl?.textContent || '',
-      btn.querySelector('mat-icon')?.textContent || ''
-    ].join(' ').toLowerCase();
-
-    if (/send|arrow_upward|arrow_up|submit/i.test(iconName) || /send/i.test(btn.className || '')) {
-      score += 80;
-    }
-
-    // 3. Class or test-id
-    const classAndTestId = [btn.className || '', btn.getAttribute('data-test-id') || '', btn.getAttribute('jsname') || ''].join(' ').toLowerCase();
-    if (/send|submit|arrow/i.test(classAndTestId)) {
-      score += 50;
-    }
-
-    // 4. Angular Material touch target presence
-    const hasTouchTarget = Boolean(btn.querySelector('.mat-mdc-button-touch-target, .mdc-button__touch-target'));
-    if (hasTouchTarget) {
-      score += 20;
-    }
-
-    // 5. Position scoring: located in bottom-right relative to input / composer
-    if (input && composerRect) {
-      const btnRect = btn.getBoundingClientRect();
-      const inputRect = input.getBoundingClientRect();
-      if (btnRect.right >= inputRect.right - 80) {
-        score += 30;
-      }
-      if (btnRect.bottom >= inputRect.bottom - 40) {
-        score += 20;
-      }
-    }
-
-    return score;
-  }
-
-  function findSendControl(input) {
-    const targetInput = input || editor();
-    if (!targetInput) return null;
-
-    const composer = findComposer(targetInput);
-    if (!composer) return null;
-
-    const composerRect = composer.getBoundingClientRect();
-
-    // Collect all candidate elements inside composer
-    const elements = [
-      ...composer.querySelectorAll('button, [role="button"], span.mat-mdc-button-touch-target, span.mdc-button__touch-target')
-    ];
-
-    const uniqueButtons = new Set();
-    for (const el of elements) {
-      const btn = el.tagName.toLowerCase() === 'button' ? el : (el.closest('button') || (el.getAttribute('role') === 'button' ? el : null));
-      if (btn && visible(btn)) {
-        uniqueButtons.add(btn);
-      }
-    }
-
-    let bestBtn = null;
-    let bestScore = 0;
-
-    for (const btn of uniqueButtons) {
-      const score = scoreSendButton(btn, targetInput, composerRect);
-      if (score > bestScore) {
-        bestScore = score;
-        bestBtn = btn;
-      }
-    }
-
-    return { button: bestBtn, score: bestScore, totalCandidates: uniqueButtons.size, composer };
-  }
-
-  function logSendDiag(info) {
-    const btn = info.button;
-    const iconEl = btn ? btn.querySelector('mat-icon, svg, [data-icon-name]') : null;
-    const iconText = (iconEl?.getAttribute('data-mat-icon-name') || iconEl?.textContent || '').trim();
-    const diag = {
-      editorReadback: Boolean(info.readback),
-      candidateCount: info.totalCandidates || 0,
-      selectedTag: btn ? btn.tagName : 'NONE',
-      selectedClass: btn ? (btn.className || '').slice(0, 60) : '',
-      ariaLabel: btn ? (btn.getAttribute('aria-label') || '').slice(0, 60) : '',
-      iconText: iconText,
-      touchTarget: Boolean(btn?.querySelector('.mat-mdc-button-touch-target, .mdc-button__touch-target')),
-      disabled: Boolean(btn?.disabled),
-      ariaDisabled: btn?.getAttribute('aria-disabled') === 'true',
-      sendConfirmed: Boolean(info.confirmed)
-    };
-    console.log('[GEMINI][SEND_DIAG]', JSON.stringify(diag));
-    return diag;
-  }
-
-  async function waitForSendReady(input, timeoutMs = 2500) {
-    const deadline = Date.now() + timeoutMs;
-    while (Date.now() < deadline) {
-      const res = findSendControl(input);
-      if (res && res.button && !res.button.disabled && res.button.getAttribute('aria-disabled') !== 'true' && res.score > 0) {
-        return res;
-      }
-      await new Promise(r => setTimeout(r, 100));
-    }
-    return findSendControl(input);
+    target.dispatchEvent(new Event('input', { bubbles: true, cancelable: true }));
+    target.dispatchEvent(new Event('change', { bubbles: true, cancelable: true }));
+    return true;
   }
 
   function responseNodes() {
@@ -253,57 +134,135 @@
   }
 
   function generationActive() {
-    const stopButton = [...document.querySelectorAll('button, [role="button"]')].filter(visible).find(b => {
-      const label = (b.getAttribute('aria-label') || b.innerText || '').toLowerCase();
-      return /중지|stop/i.test(label);
-    });
-    return Boolean(stopButton || document.querySelector('.generating, .loading, mat-progress-bar, [aria-busy="true"]'));
+    const busySelector = '[aria-busy="true"], [data-is-generating="true"], .loading-dots, .streaming, [aria-label*="중지"], [aria-label*="Stop"]';
+    return Boolean(document.querySelector(busySelector));
+  }
+
+  function findComposer(input) {
+    if (!input) return document.body;
+    return input.closest('chat-window, .input-area, .composer, .input-container, form, main') || input.parentElement || document.body;
+  }
+
+  function scoreSendCandidate(el, composer) {
+    if (!el || el.disabled || el.getAttribute('aria-disabled') === 'true') return -1000;
+    const tag = el.tagName.toLowerCase();
+    if (tag !== 'button' && el.getAttribute('role') !== 'button') return -500;
+
+    const ariaLabel = (el.getAttribute('aria-label') || '').toLowerCase();
+    const text = (el.innerText || el.textContent || '').trim().toLowerCase();
+    const className = String(el.className || '').toLowerCase();
+    const testId = (el.getAttribute('data-test-id') || el.getAttribute('data-testid') || '').toLowerCase();
+
+    if (/mic|voice|음성|마이크|audio|첨부|파일|attach|file|plus|추가|설정|help|도움말/.test(ariaLabel + ' ' + className + ' ' + testId)) {
+      return -10000;
+    }
+
+    let score = 0;
+    if (/send|전송|보내기|제출|submit|prompt/.test(ariaLabel)) score += 500;
+    if (/send|arrow_upward|arrow-up|submit/.test(text)) score += 400;
+    if (el.querySelector('mat-icon, [data-mat-icon-name*="send"], [data-mat-icon-name*="arrow"]')) score += 300;
+    if (/send|submit|btn-send/.test(className + ' ' + testId)) score += 250;
+    if (el.querySelector('.mat-mdc-button-touch-target')) score += 150;
+
+    if (composer) {
+      const cRect = composer.getBoundingClientRect();
+      const bRect = el.getBoundingClientRect();
+      if (bRect.right >= cRect.right - 120 && bRect.bottom >= cRect.bottom - 120) {
+        score += 200;
+      }
+    }
+    return score;
+  }
+
+  function findSendControl(input) {
+    const composer = findComposer(input);
+    const rawCandidates = composer.querySelectorAll('button, [role="button"], span.mat-mdc-button-touch-target, mat-icon');
+    const buttonSet = new Set();
+
+    for (const raw of rawCandidates) {
+      if (raw.tagName.toLowerCase() === 'button') {
+        buttonSet.add(raw);
+      } else {
+        const parentBtn = raw.closest('button, [role="button"]');
+        if (parentBtn) buttonSet.add(parentBtn);
+      }
+    }
+
+    const scored = [...buttonSet].map(btn => ({
+      button: btn,
+      score: scoreSendCandidate(btn, composer)
+    })).filter(item => item.score > 0).sort((a, b) => b.score - a.score);
+
+    return scored.length > 0 ? { button: scored[0].button, totalCandidates: scored.length } : null;
+  }
+
+  async function waitForSendReady(input, timeoutMs = 2500) {
+    const deadline = Date.now() + timeoutMs;
+    while (Date.now() < deadline) {
+      if (isStopped || activeExecution?.cancelled) return null;
+      const ctrl = findSendControl(input);
+      if (ctrl && ctrl.button && !ctrl.button.disabled && ctrl.button.getAttribute('aria-disabled') !== 'true') {
+        return ctrl;
+      }
+      await new Promise(r => setTimeout(r, 150));
+    }
+    return findSendControl(input);
+  }
+
+  function logSendDiag(diag) {
+    try {
+      const btn = diag.button;
+      const meta = {
+        editorReadback: Boolean(diag.readback),
+        candidateCount: diag.totalCandidates || 0,
+        selectedTag: btn?.tagName || null,
+        selectedClass: btn ? String(btn.className || '').slice(0, 50) : null,
+        ariaLabel: btn?.getAttribute('aria-label') || null,
+        iconText: btn ? (btn.innerText || '').trim().slice(0, 20) : null,
+        touchTarget: Boolean(btn?.querySelector('.mat-mdc-button-touch-target')),
+        disabled: Boolean(btn?.disabled),
+        ariaDisabled: btn?.getAttribute('aria-disabled') === 'true',
+        sendConfirmed: Boolean(diag.confirmed)
+      };
+      console.log('[GEMINI][SEND_DIAG]', JSON.stringify(meta));
+    } catch (_) {}
   }
 
   function isSendConfirmed(input, initialNodes, initialUserMsgsCount) {
-    // 1. Editor text cleared
-    const currentVal = normalizeText(input?.innerText || input?.value || '');
-    if (!currentVal) return true;
-
-    // 2. Generation active (stop button, progress bar, aria-busy)
+    const inputEmpty = !input || !input.innerText || input.innerText.trim() === '' || input.value === '';
+    if (inputEmpty) return true;
     if (generationActive()) return true;
-
-    // 3. New response node created
     const currentNodes = responseNodes();
     if (currentNodes.length > initialNodes.length) return true;
-
-    // 4. New user message bubble appeared
     const currentUserMessages = document.querySelectorAll('.user-message, user-query, [data-test-id="user-query"], .query-text, .user-query-container');
     if (currentUserMessages.length > initialUserMsgsCount) return true;
-
     return false;
   }
 
-  async function execute(command) {
-    if (isStopped) return { status: 'failed', text: '', error: 'runtime_stopped' };
-    busy = true;
+  async function executeCore(command, execState) {
+    if (isStopped || execState.cancelled) return { status: 'failed', text: '', error: 'cancelled' };
     const initialNodes = responseNodes();
     const initialUserMsgs = document.querySelectorAll('.user-message, user-query, [data-test-id="user-query"], .query-text, .user-query-container').length;
     const input = editor();
     if (!input) {
-      busy = false;
       return { status: 'dom_unsupported', text: '', error: 'Gemini 입력창을 찾지 못했습니다.' };
     }
 
     let isTextSet = setEditorText(input, command.prompt);
     if (!isTextSet) {
       await new Promise(r => setTimeout(r, 200));
+      if (isStopped || execState.cancelled) return { status: 'failed', text: '', error: 'cancelled' };
       isTextSet = setEditorText(input, command.prompt);
     }
     const readbackOk = normalizeText(input.innerText || input.value).includes(normalizeText(command.prompt).slice(0, 30));
     if (!isTextSet && !readbackOk) {
-      busy = false;
       logSendDiag({ button: null, readback: false, confirmed: false });
       return { status: 'dom_unsupported', text: '', error: 'prompt_exact_readback_failed' };
     }
 
-    // 1st Send Attempt: Wait for enabled send control and click
+    // 1st Send Attempt
     await new Promise(resolve => setTimeout(resolve, 300));
+    if (isStopped || execState.cancelled) return { status: 'failed', text: '', error: 'cancelled' };
     const sendCtrl = await waitForSendReady(input, 2500);
     let selectedBtn = sendCtrl?.button;
 
@@ -317,6 +276,7 @@
     let confirmed = false;
     const checkDeadline1 = Date.now() + 3000;
     while (Date.now() < checkDeadline1) {
+      if (isStopped || execState.cancelled) return { status: 'failed', text: '', error: 'cancelled' };
       if (isSendConfirmed(input, initialNodes, initialUserMsgs)) {
         confirmed = true;
         break;
@@ -324,7 +284,7 @@
       await new Promise(r => setTimeout(r, 200));
     }
 
-    // 2nd Send Attempt (1 Retry) if not confirmed
+    // 2nd Send Attempt if not confirmed
     if (!confirmed) {
       const retryCtrl = findSendControl(input);
       if (retryCtrl?.button && !retryCtrl.button.disabled && retryCtrl.button.getAttribute('aria-disabled') !== 'true') {
@@ -336,6 +296,7 @@
 
       const checkDeadline2 = Date.now() + 2000;
       while (Date.now() < checkDeadline2) {
+        if (isStopped || execState.cancelled) return { status: 'failed', text: '', error: 'cancelled' };
         if (isSendConfirmed(input, initialNodes, initialUserMsgs)) {
           confirmed = true;
           break;
@@ -351,13 +312,11 @@
       confirmed: confirmed
     });
 
-    // If still not confirmed, fail-fast immediately (do not wait 70 seconds!)
     if (!confirmed) {
-      busy = false;
       return { status: 'failed', text: '', error: 'send_not_confirmed' };
     }
 
-    const deadline = Date.now() + Math.min(65000, Math.max(10000, (command.deadlineAt - Date.now() / 1000) * 1000));
+    const deadline = Math.min(execState.deadlineAt, Date.now() + 65000);
     let stableSince = null;
     let previous = '';
 
@@ -374,19 +333,18 @@
         if (resolved) return;
         resolved = true;
         cleanupObserver();
-        busy = false;
         resolve(res);
       };
 
       const checkOutput = () => {
         if (isStopped) return finish({ status: 'failed', text: '', error: 'runtime_stopped' });
+        if (execState.cancelled) return finish({ status: 'failed', text: '', error: 'cancelled' });
         if (Date.now() > deadline) return finish({ status: 'timeout', text: '', error: 'command_deadline_exceeded' });
 
         const currentNodes = responseNodes();
         const newNodes = currentNodes.slice(initialNodes.length);
         if (!newNodes.length) return;
 
-        // Bind specifically to the newly created target model-response node
         const targetResponseNode = newNodes[newNodes.length - 1];
         const contentEl = targetResponseNode.querySelector('message-content, div.markdown, div.model-response-text, .response-body-inner') || targetResponseNode;
         const current = normalizeText(contentEl.innerText || contentEl.textContent || '');
@@ -407,7 +365,6 @@
         }
       };
 
-      // MutationObserver watches DOM for streaming updates
       const targetNode = document.querySelector('chat-history, main, body') || document.body;
       const observer = new MutationObserver(() => {
         checkOutput();
@@ -415,7 +372,45 @@
       observer.observe(targetNode, { childList: true, subtree: true, characterData: true });
 
       const checkTimer = setInterval(checkOutput, 300);
+      execState.observer = observer;
+      execState.timer = checkTimer;
     });
+  }
+
+  async function execute(command) {
+    if (isStopped) return { status: 'failed', text: '', error: 'runtime_stopped' };
+    if (activeExecution) {
+      if (Date.now() > activeExecution.deadlineAt) {
+        cancelExecution(activeExecution.requestId);
+      } else {
+        return { status: 'busy', text: '', error: 'runtime_busy' };
+      }
+    }
+
+    const currentReqId = command?.requestId || Math.random().toString(36).slice(2, 10);
+    const deadlineMs = (typeof command?.deadlineAt === 'number' && command.deadlineAt > 1000000000)
+      ? command.deadlineAt * 1000
+      : (Date.now() + 70000);
+
+    const execState = {
+      requestId: currentReqId,
+      startedAt: Date.now(),
+      deadlineAt: deadlineMs,
+      cancelled: false,
+      observer: null,
+      timer: null
+    };
+    activeExecution = execState;
+
+    try {
+      return await executeCore(command, execState);
+    } finally {
+      if (activeExecution?.requestId === currentReqId) {
+        try { activeExecution.observer?.disconnect(); } catch (_) {}
+        if (activeExecution.timer) clearInterval(activeExecution.timer);
+        activeExecution = null;
+      }
+    }
   }
 
   // Register message listeners
@@ -431,8 +426,17 @@
         instanceId: INSTANCE_ID,
         status: pageStatus(),
         url: location.href,
-        title: document.title
+        title: document.title,
+        busyRequestId: activeExecution?.requestId || null,
+        busySince: activeExecution?.startedAt || null,
+        busyDeadlineAt: activeExecution?.deadlineAt || null
       });
+      return true;
+    }
+
+    if (message.type === 'NFA_CANCEL_COMMAND') {
+      const cancelled = cancelExecution(message.requestId);
+      sendResponse({ ok: true, cancelled, status: pageStatus() });
       return true;
     }
 
@@ -457,6 +461,12 @@
     build: runtimeContract.runtimeBuild,
     instanceId: INSTANCE_ID,
     stop: stopRuntime,
-    ping: () => ({ alive: !isStopped, build: runtimeContract.runtimeBuild, instanceId: INSTANCE_ID })
+    cancel: cancelExecution,
+    ping: () => ({
+      alive: !isStopped,
+      build: runtimeContract.runtimeBuild,
+      instanceId: INSTANCE_ID,
+      busyRequestId: activeExecution?.requestId || null
+    })
   };
 })();
