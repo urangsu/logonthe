@@ -53,7 +53,7 @@ def run_smoke():
     contract = load_runtime_contract()
     print(f"  Loaded Runtime Contract SoT: version={contract.extension_version}, build={contract.runtime_build}")
     assert contract.extension_version == "13.2.3"
-    assert contract.runtime_build == "13.2.3-r4"
+    assert contract.runtime_build == "13.2.3-r5"
 
     rotator = QueryRotator(enabled_categories=["FOOD", "CAFE"], posts_per_query=2)
     spec = rotator.current_spec

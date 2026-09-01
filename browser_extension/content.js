@@ -21,7 +21,7 @@
   const RESPONSE_SELECTORS = 'model-response';
   let runtimeContract = {
     extensionVersion: '13.2.3',
-    runtimeBuild: '13.2.3-r4',
+    runtimeBuild: '13.2.3-r5',
     protocolVersion: 3,
     bridgeSchemaVersion: 2
   };
@@ -72,7 +72,7 @@
   function visible(element) {
     if (!element) return false;
     const rect = element.getBoundingClientRect();
-    return rect.width > 20 && rect.height > 15 && getComputedStyle(element).visibility !== 'hidden';
+    return rect.width > 15 && rect.height > 15 && getComputedStyle(element).visibility !== 'hidden';
   }
 
   function editor() {
@@ -111,58 +111,145 @@
     return normalizeText(target.innerText || target.value) === normalizeText(text);
   }
 
-  function findSendControl() {
-    const buttons = [...document.querySelectorAll('button, [role="button"]')].filter(visible);
-    const button = buttons.find(b => {
-      const label = [
-        b.getAttribute('aria-label'),
-        b.getAttribute('data-tooltip'),
-        b.getAttribute('title'),
-        b.innerText
-      ].join(' ').toLowerCase();
-      return /보내기|전송|send|submit/i.test(label) || b.querySelector('mat-icon[data-mat-icon-name="send"], .send-button-icon');
-    });
-    return button || null;
+  function findComposer(input) {
+    if (!input) return null;
+    return input.closest('chat-window, .input-area, .chat-input-container, .input-wrapper, form, main, [role="main"]') || input.parentElement;
   }
 
-  async function waitForSendReady(timeoutMs = 2500) {
+  function scoreSendButton(btn, input, composerRect) {
+    if (!btn || !visible(btn)) return -10000;
+    const isDis = btn.disabled || btn.getAttribute('aria-disabled') === 'true';
+    if (isDis) return -5000;
+
+    const label = [
+      btn.getAttribute('aria-label') || '',
+      btn.getAttribute('data-tooltip') || '',
+      btn.getAttribute('title') || '',
+      btn.innerText || ''
+    ].join(' ').toLowerCase();
+
+    // Explicitly exclude non-send controls: mic, audio, attach, file, plus, add, menu, settings, expand, help
+    if (/마이크|음성|mic|audio|voice|첨부|파일|attach|upload|file|플러스|추가|add|plus|메뉴|menu|설정|settings|확장|expand|help/i.test(label)) {
+      return -10000;
+    }
+
+    let score = 0;
+
+    // 1. Aria label / text matching send
+    if (/보내기|전송|제출|send|submit/i.test(label)) {
+      score += 100;
+    }
+
+    // 2. Icon check (mat-icon, svg, or class)
+    const iconEl = btn.querySelector('mat-icon, svg, [data-icon-name], .send-button-icon');
+    const iconName = [
+      iconEl?.getAttribute('data-mat-icon-name') || '',
+      iconEl?.getAttribute('data-icon-name') || '',
+      iconEl?.textContent || '',
+      btn.querySelector('mat-icon')?.textContent || ''
+    ].join(' ').toLowerCase();
+
+    if (/send|arrow_upward|arrow_up|submit/i.test(iconName) || /send/i.test(btn.className || '')) {
+      score += 80;
+    }
+
+    // 3. Class or test-id
+    const classAndTestId = [btn.className || '', btn.getAttribute('data-test-id') || '', btn.getAttribute('jsname') || ''].join(' ').toLowerCase();
+    if (/send|submit|arrow/i.test(classAndTestId)) {
+      score += 50;
+    }
+
+    // 4. Angular Material touch target presence
+    const hasTouchTarget = Boolean(btn.querySelector('.mat-mdc-button-touch-target, .mdc-button__touch-target'));
+    if (hasTouchTarget) {
+      score += 20;
+    }
+
+    // 5. Position scoring: located in bottom-right relative to input / composer
+    if (input && composerRect) {
+      const btnRect = btn.getBoundingClientRect();
+      const inputRect = input.getBoundingClientRect();
+      if (btnRect.right >= inputRect.right - 80) {
+        score += 30;
+      }
+      if (btnRect.bottom >= inputRect.bottom - 40) {
+        score += 20;
+      }
+    }
+
+    return score;
+  }
+
+  function findSendControl(input) {
+    const targetInput = input || editor();
+    if (!targetInput) return null;
+
+    const composer = findComposer(targetInput);
+    if (!composer) return null;
+
+    const composerRect = composer.getBoundingClientRect();
+
+    // Collect all candidate elements inside composer
+    const elements = [
+      ...composer.querySelectorAll('button, [role="button"], span.mat-mdc-button-touch-target, span.mdc-button__touch-target')
+    ];
+
+    const uniqueButtons = new Set();
+    for (const el of elements) {
+      const btn = el.tagName.toLowerCase() === 'button' ? el : (el.closest('button') || (el.getAttribute('role') === 'button' ? el : null));
+      if (btn && visible(btn)) {
+        uniqueButtons.add(btn);
+      }
+    }
+
+    let bestBtn = null;
+    let bestScore = 0;
+
+    for (const btn of uniqueButtons) {
+      const score = scoreSendButton(btn, targetInput, composerRect);
+      if (score > bestScore) {
+        bestScore = score;
+        bestBtn = btn;
+      }
+    }
+
+    return { button: bestBtn, score: bestScore, totalCandidates: uniqueButtons.size, composer };
+  }
+
+  function logSendDiag(info) {
+    const btn = info.button;
+    const iconEl = btn ? btn.querySelector('mat-icon, svg, [data-icon-name]') : null;
+    const iconText = (iconEl?.getAttribute('data-mat-icon-name') || iconEl?.textContent || '').trim();
+    const diag = {
+      editorReadback: Boolean(info.readback),
+      candidateCount: info.totalCandidates || 0,
+      selectedTag: btn ? btn.tagName : 'NONE',
+      selectedClass: btn ? (btn.className || '').slice(0, 60) : '',
+      ariaLabel: btn ? (btn.getAttribute('aria-label') || '').slice(0, 60) : '',
+      iconText: iconText,
+      touchTarget: Boolean(btn?.querySelector('.mat-mdc-button-touch-target, .mdc-button__touch-target')),
+      disabled: Boolean(btn?.disabled),
+      ariaDisabled: btn?.getAttribute('aria-disabled') === 'true',
+      sendConfirmed: Boolean(info.confirmed)
+    };
+    console.log('[GEMINI][SEND_DIAG]', JSON.stringify(diag));
+    return diag;
+  }
+
+  async function waitForSendReady(input, timeoutMs = 2500) {
     const deadline = Date.now() + timeoutMs;
     while (Date.now() < deadline) {
-      const button = findSendControl();
-      if (button && !button.disabled && button.getAttribute('aria-disabled') !== 'true') {
-        return button;
+      const res = findSendControl(input);
+      if (res && res.button && !res.button.disabled && res.button.getAttribute('aria-disabled') !== 'true' && res.score > 0) {
+        return res;
       }
       await new Promise(r => setTimeout(r, 100));
     }
-    return findSendControl();
-  }
-
-  async function sendPrompt() {
-    const button = await waitForSendReady(2500);
-    if (button && !button.disabled && button.getAttribute('aria-disabled') !== 'true') {
-      button.click();
-      return true;
-    }
-    const el = editor();
-    if (el) {
-      el.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', code: 'Enter', keyCode: 13, which: 13, bubbles: true }));
-      el.dispatchEvent(new KeyboardEvent('keypress', { key: 'Enter', code: 'Enter', keyCode: 13, which: 13, bubbles: true }));
-      el.dispatchEvent(new KeyboardEvent('keyup', { key: 'Enter', code: 'Enter', keyCode: 13, which: 13, bubbles: true }));
-      return true;
-    }
-    return false;
+    return findSendControl(input);
   }
 
   function responseNodes() {
     return [...document.querySelectorAll(RESPONSE_SELECTORS)].filter(visible);
-  }
-
-  function latestResponseText() {
-    const nodes = responseNodes();
-    if (!nodes.length) return '';
-    const latest = nodes[nodes.length - 1];
-    const content = latest.querySelector('message-content, div.markdown, div.model-response-text, .response-body-inner') || latest;
-    return normalizeText(content.innerText || content.textContent);
   }
 
   function generationActive() {
@@ -173,10 +260,30 @@
     return Boolean(stopButton || document.querySelector('.generating, .loading, mat-progress-bar, [aria-busy="true"]'));
   }
 
+  function isSendConfirmed(input, initialNodes, initialUserMsgsCount) {
+    // 1. Editor text cleared
+    const currentVal = normalizeText(input?.innerText || input?.value || '');
+    if (!currentVal) return true;
+
+    // 2. Generation active (stop button, progress bar, aria-busy)
+    if (generationActive()) return true;
+
+    // 3. New response node created
+    const currentNodes = responseNodes();
+    if (currentNodes.length > initialNodes.length) return true;
+
+    // 4. New user message bubble appeared
+    const currentUserMessages = document.querySelectorAll('.user-message, user-query, [data-test-id="user-query"], .query-text, .user-query-container');
+    if (currentUserMessages.length > initialUserMsgsCount) return true;
+
+    return false;
+  }
+
   async function execute(command) {
     if (isStopped) return { status: 'failed', text: '', error: 'runtime_stopped' };
     busy = true;
     const initialNodes = responseNodes();
+    const initialUserMsgs = document.querySelectorAll('.user-message, user-query, [data-test-id="user-query"], .query-text, .user-query-container').length;
     const input = editor();
     if (!input) {
       busy = false;
@@ -188,35 +295,66 @@
       await new Promise(r => setTimeout(r, 200));
       isTextSet = setEditorText(input, command.prompt);
     }
-    if (!isTextSet) {
-      const readback = normalizeText(input.innerText || input.value);
-      if (!readback.includes(normalizeText(command.prompt).slice(0, 30))) {
-        busy = false;
-        return { status: 'dom_unsupported', text: '', error: 'prompt_exact_readback_failed' };
-      }
+    const readbackOk = normalizeText(input.innerText || input.value).includes(normalizeText(command.prompt).slice(0, 30));
+    if (!isTextSet && !readbackOk) {
+      busy = false;
+      logSendDiag({ button: null, readback: false, confirmed: false });
+      return { status: 'dom_unsupported', text: '', error: 'prompt_exact_readback_failed' };
     }
 
+    // 1st Send Attempt: Wait for enabled send control and click
     await new Promise(resolve => setTimeout(resolve, 300));
-    await sendPrompt();
+    const sendCtrl = await waitForSendReady(input, 2500);
+    let selectedBtn = sendCtrl?.button;
 
-    // Verify submit occurred (input cleared, or generating started, or new node created within 3s)
-    let submitConfirmed = false;
-    const submitDeadline = Date.now() + 3500;
-    while (Date.now() < submitDeadline) {
-      const currentVal = normalizeText(input.innerText || input.value);
-      const isGenerating = generationActive();
-      const currentNodes = responseNodes();
-      if (!currentVal || isGenerating || currentNodes.length > initialNodes.length) {
-        submitConfirmed = true;
+    if (selectedBtn && !selectedBtn.disabled && selectedBtn.getAttribute('aria-disabled') !== 'true') {
+      selectedBtn.click();
+    } else if (input) {
+      input.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', code: 'Enter', keyCode: 13, which: 13, bubbles: true }));
+    }
+
+    // Verify confirmation for up to 3 seconds
+    let confirmed = false;
+    const checkDeadline1 = Date.now() + 3000;
+    while (Date.now() < checkDeadline1) {
+      if (isSendConfirmed(input, initialNodes, initialUserMsgs)) {
+        confirmed = true;
         break;
       }
       await new Promise(r => setTimeout(r, 200));
     }
 
-    if (!submitConfirmed) {
-      // Secondary fallback click
-      const sendBtn = findSendControl();
-      if (sendBtn) sendBtn.click();
+    // 2nd Send Attempt (1 Retry) if not confirmed
+    if (!confirmed) {
+      const retryCtrl = findSendControl(input);
+      if (retryCtrl?.button && !retryCtrl.button.disabled && retryCtrl.button.getAttribute('aria-disabled') !== 'true') {
+        selectedBtn = retryCtrl.button;
+        retryCtrl.button.click();
+      } else if (input) {
+        input.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', code: 'Enter', keyCode: 13, which: 13, bubbles: true }));
+      }
+
+      const checkDeadline2 = Date.now() + 2000;
+      while (Date.now() < checkDeadline2) {
+        if (isSendConfirmed(input, initialNodes, initialUserMsgs)) {
+          confirmed = true;
+          break;
+        }
+        await new Promise(r => setTimeout(r, 200));
+      }
+    }
+
+    logSendDiag({
+      button: selectedBtn,
+      readback: true,
+      totalCandidates: sendCtrl?.totalCandidates || 0,
+      confirmed: confirmed
+    });
+
+    // If still not confirmed, fail-fast immediately (do not wait 70 seconds!)
+    if (!confirmed) {
+      busy = false;
+      return { status: 'failed', text: '', error: 'send_not_confirmed' };
     }
 
     const deadline = Date.now() + Math.min(65000, Math.max(10000, (command.deadlineAt - Date.now() / 1000) * 1000));
@@ -244,16 +382,22 @@
         if (isStopped) return finish({ status: 'failed', text: '', error: 'runtime_stopped' });
         if (Date.now() > deadline) return finish({ status: 'timeout', text: '', error: 'command_deadline_exceeded' });
 
-        const newNodes = responseNodes().slice(initialNodes.length);
-        const current = newNodes.length ? latestResponseText() : '';
+        const currentNodes = responseNodes();
+        const newNodes = currentNodes.slice(initialNodes.length);
+        if (!newNodes.length) return;
+
+        // Bind specifically to the newly created target model-response node
+        const targetResponseNode = newNodes[newNodes.length - 1];
+        const contentEl = targetResponseNode.querySelector('message-content, div.markdown, div.model-response-text, .response-body-inner') || targetResponseNode;
+        const current = normalizeText(contentEl.innerText || contentEl.textContent || '');
 
         if (current && current !== previous) {
           previous = current;
           stableSince = Date.now();
         } else if (current && stableSince && Date.now() - stableSince >= 1600 && !generationActive()) {
           const correlated = newNodes.find(node => {
-            const content = node.querySelector('message-content, div.markdown, div.model-response-text, .response-body-inner') || node;
-            return (content.innerText || '').includes(marker);
+            const inner = node.querySelector('message-content, div.markdown, div.model-response-text, .response-body-inner') || node;
+            return (inner.innerText || '').includes(marker);
           });
           if (!correlated) {
             return finish({ status: 'failed', text: '', error: 'request_marker_missing_in_new_node' });
