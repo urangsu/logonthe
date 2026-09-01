@@ -319,6 +319,26 @@ class MobileDOMResolver:
                         return {"frame": frame, "button": loc, "selector": selector, "frame_name": frame.name, "frame_url": frame.url}
                 except Exception:
                     continue
+    @staticmethod
+    def get_comment_placeholder_context(page: Page, preferred_frame=None):
+        """댓글 입력창 플레이스홀더 (.u_cbox_guide 등) 탐색"""
+        frames = [preferred_frame] if preferred_frame else list(page.frames)
+        selectors = [
+            ".u_cbox_guide[data-action='write#placeholder']",
+            ".u_cbox_guide",
+            ".u_cbox_write_box .u_cbox_guide",
+            ".u_cbox_inbox .u_cbox_guide",
+        ]
+        for frame in frames:
+            if frame is None:
+                continue
+            for selector in selectors:
+                try:
+                    loc = frame.locator(selector).first
+                    if loc.count() > 0 and loc.is_visible():
+                        return {"frame": frame, "placeholder": loc, "selector": selector, "frame_name": frame.name, "frame_url": frame.url}
+                except Exception:
+                    continue
         return None
 
 
