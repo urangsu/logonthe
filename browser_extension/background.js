@@ -221,8 +221,6 @@ async function runCommandCycle() {
   // 3. Dispatch NFA_EXECUTE_COMMAND to Gemini Content Script (Two-Message Protocol)
   let execResult = null;
   const dispatchPromise = new Promise((resolve) => {
-    inFlightCommandResolvers.set(command.requestId, resolve);
-
     const deadlineMs = typeof command.deadlineAt === 'number' && command.deadlineAt > 1000000000
       ? (command.deadlineAt * 1000 - Date.now())
       : (typeof command.deadlineAt === 'number' ? (command.deadlineAt - Date.now() / 1000) * 1000 : 65000);
@@ -235,13 +233,26 @@ async function runCommandCycle() {
       }
     }, timeoutMs);
 
+    inFlightCommandResolvers.set(command.requestId, {
+      resolve,
+      timer,
+      commandMetadata: {
+        requestId: command.requestId,
+        postKey: command.postKey,
+        navigationVersion: command.navigationVersion
+      }
+    });
+
     chrome.tabs.sendMessage(
       activeRuntime.tabId,
       { type: 'NFA_EXECUTE_COMMAND', command },
       (res) => {
         if (chrome.runtime.lastError || !res?.ok) {
-          clearTimeout(timer);
-          inFlightCommandResolvers.delete(command.requestId);
+          const inFlight = inFlightCommandResolvers.get(command.requestId);
+          if (inFlight) {
+            if (inFlight.timer) clearTimeout(inFlight.timer);
+            inFlightCommandResolvers.delete(command.requestId);
+          }
           resolve({
             status: 'failed',
             text: '',
@@ -355,10 +366,24 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
   }
 
   if (message?.type === 'NFA_EXECUTION_RESULT' || message?.type === 'NFA_COMMAND_RESULT') {
-    const resolver = inFlightCommandResolvers.get(message.requestId);
-    if (resolver) {
+    const inFlight = inFlightCommandResolvers.get(message.requestId);
+    if (inFlight) {
+      if (inFlight.timer) clearTimeout(inFlight.timer);
       inFlightCommandResolvers.delete(message.requestId);
-      resolver(message.result);
+      inFlight.resolve(message.result);
+    } else {
+      // Recovery fallback when resolver is missing (e.g. timeout race or extension restart)
+      console.log('[GEMINI][BACKGROUND] resolver_missing_result_recovered', message.requestId);
+      if (message.requestId && message.result) {
+        bridgeFetch('/v1/result', 'POST', {
+          requestId: message.requestId,
+          postKey: message.postKey || '',
+          navigationVersion: message.navigationVersion || 0,
+          status: message.result.status || 'failed',
+          text: message.result.text || '',
+          error: message.result.error || ''
+        }, 10000).catch(err => console.debug('[GEMINI][BACKGROUND] recovery submit fail:', err));
+      }
     }
     sendResponse({ ok: true });
     return true;

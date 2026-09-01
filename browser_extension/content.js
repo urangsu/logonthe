@@ -129,7 +129,7 @@
     target.dispatchEvent(new Event('input', { bubbles: true, cancelable: true }));
     target.dispatchEvent(new Event('change', { bubbles: true, cancelable: true }));
     const read = normalizeText(target.innerText || target.value || '');
-    return read === normalizeText(text) || read.includes(normalizeText(text));
+    return read === normalizeText(text);
   }
 
   function responseNodes() {
@@ -251,7 +251,7 @@
       return { status: 'dom_unsupported', text: '', error: 'Gemini 입력창을 찾지 못했습니다.' };
     }
 
-    // Exact prompt injection & readback
+    // Exact prompt injection & strict equality readback
     let isTextSet = setEditorText(input, command.prompt);
     if (!isTextSet) {
       await new Promise(r => setTimeout(r, 200));
@@ -260,7 +260,7 @@
     }
     const readbackText = normalizeText(input.innerText || input.value || '');
     const expectedText = normalizeText(command.prompt);
-    const readbackOk = (readbackText === expectedText || readbackText.includes(expectedText));
+    const readbackOk = (readbackText === expectedText);
     if (!readbackOk) {
       logSendDiag({ button: null, readback: false, confirmed: false });
       return { status: 'dom_unsupported', text: '', error: 'prompt_exact_readback_failed' };
