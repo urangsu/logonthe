@@ -85,6 +85,23 @@ class GeminiPreflight:
     active_request_id: Optional[str] = None
     command_state: str = "idle"
 
+    def to_json(self) -> Dict[str, object]:
+        return {
+            "ready": self.ready,
+            "status": self.status,
+            "title": self.title,
+            "url": self.url,
+            "message": self.message,
+            "extensionVersion": self.extension_version,
+            "contentBuild": self.content_build,
+            "protocolVersion": self.protocol_version,
+            "bridgeSchemaVersion": self.bridge_schema_version,
+            "heartbeatAgeMs": self.heartbeat_age_ms,
+            "bridgeSessionId": self.bridge_session_id,
+            "activeRequestId": self.active_request_id,
+            "commandState": self.command_state,
+        }
+
 
 import urllib.parse
 from services.runtime_contract import load_runtime_contract
@@ -519,7 +536,7 @@ class GeminiBridgeHTTPServer:
                     return self._json(200, {"command": cmd.to_json() if cmd else None})
 
                 if path == "/v1/status":
-                    return self._json(200, asdict(bridge.preflight()))
+                    return self._json(200, bridge.preflight().to_json())
 
                 return self._json(404, {"error": "not_found"})
 

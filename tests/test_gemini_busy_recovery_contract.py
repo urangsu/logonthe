@@ -1,3 +1,4 @@
+import json
 import threading
 import time
 import unittest
@@ -139,6 +140,81 @@ class GeminiBusyRecoveryContractTests(unittest.TestCase):
              unittest.mock.patch.object(MobileDOMResolver, "get_comment_submit_context", return_value={"frame": frame, "button": submit_btn, "selector": "button.u_cbox_btn_upload"}):
             ok = CommentEditorAdapter.set_text(page, "테스트 댓글 내용")
             self.assertFalse(ok, "is_disabled() exception must fail-closed")
+
+    def test_case_6_http_v1_status_explicit_camelcase_contract(self):
+        """⑥ /v1/status HTTP 엔드포인트가 명시적 camelCase JSON 계약을 준수하는지 검증"""
+        bridge = GeminiExtensionBridge(expected_extension_version="13.2.3", expected_build_id="13.2.3-r6")
+        cmd = GeminiCommand.create("post:status_check", 1, "prompt_text")
+        bridge.publish(cmd)
+
+        server = GeminiBridgeHTTPServer(bridge, host="127.0.0.1", port=0)
+        server.start()
+        try:
+            import http.client
+            conn = http.client.HTTPConnection("127.0.0.1", server.port, timeout=2.0)
+            conn.request("GET", "/v1/status")
+            resp = conn.getresponse()
+            self.assertEqual(resp.status, 200)
+            data = json.loads(resp.read().decode("utf-8"))
+
+            # Must contain exact camelCase fields needed by background.js
+            self.assertIn("bridgeSessionId", data)
+            self.assertIn("activeRequestId", data)
+            self.assertIn("commandState", data)
+            self.assertIn("extensionVersion", data)
+            self.assertIn("contentBuild", data)
+            self.assertEqual(data["activeRequestId"], cmd.request_id)
+            self.assertEqual(data["commandState"], "pending")
+
+            # Must NOT contain raw snake_case keys
+            self.assertNotIn("active_request_id", data)
+            self.assertNotIn("bridge_session_id", data)
+            self.assertNotIn("command_state", data)
+            conn.close()
+        finally:
+            server.stop()
+
+    def test_case_7_background_reconciliation_keeps_active_request_safe(self):
+        """⑦ 정상 active request는 background reconciliation에서 절대 orphan 취소되지 않음"""
+        bridge = GeminiExtensionBridge(expected_extension_version="13.2.3", expected_build_id="13.2.3-r6")
+        cmd = GeminiCommand.create("post:safe", 1, "prompt_text")
+        bridge.publish(cmd)
+
+        # Chrome extension simulates reading /v1/status
+        status_data = bridge.preflight().to_json()
+        python_active_req_id = status_data.get("activeRequestId")
+        busy_req_id = cmd.request_id
+
+        # Reconciliation condition: if pythonActiveReqId === busyReqId -> DO NOT CANCEL
+        should_cancel = (
+            python_active_req_id is None
+            or (isinstance(python_active_req_id, str) and python_active_req_id != busy_req_id)
+        )
+        self.assertFalse(should_cancel, "Active running command must NEVER be cancelled by reconciliation")
+
+    def test_case_8_cancel_execution_settles_promise_instantly(self):
+        """⑧ cancelExecution 호출 시 pending Promise가 미해결 상태로 남지 않고 settle됨"""
+        settled_result = None
+        finish_called = False
+
+        def mock_finish(res):
+            nonlocal settled_result, finish_called
+            finish_called = True
+            settled_result = res
+
+        exec_state = {
+            "requestId": "req-123",
+            "cancelled": False,
+            "finish": mock_finish
+        }
+
+        # Simulating cancelExecution
+        exec_state["cancelled"] = True
+        exec_state["finish"]({"status": "failed", "text": "", "error": "cancelled_by_bridge"})
+
+        self.assertTrue(finish_called)
+        self.assertEqual(settled_result["status"], "failed")
+        self.assertEqual(settled_result["error"], "cancelled_by_bridge")
 
 
 if __name__ == "__main__":

@@ -139,17 +139,19 @@ async function startHeartbeatLoop() {
         bridgeStatus = await bridgeFetch('/v1/status', 'GET', null, 3000);
       } catch (_) {}
 
-      if (activeRuntime && activeRuntime.ping.status === 'busy') {
-        const pythonActiveReqId = bridgeStatus?.activeRequestId || null;
-        const busyReqId = activeRuntime.ping.busyRequestId;
-        // Reconcile: If Python has no active request, or busyRequestId doesn't match Python activeRequestId
-        if (!pythonActiveReqId || (busyReqId && busyReqId !== pythonActiveReqId)) {
-          try {
-            chrome.tabs.sendMessage(activeRuntime.tabId, {
-              type: 'NFA_CANCEL_COMMAND',
-              requestId: busyReqId
-            }, () => {});
-          } catch (_) {}
+      // Reconcile orphan busy only when bridge contract is fully valid (Fail-closed on contract_invalid)
+      if (activeRuntime && activeRuntime.ping.status === 'busy' && activeRuntime.ping.busyRequestId) {
+        if (bridgeStatus && (bridgeStatus.bridgeSessionId || bridgeStatus.status) && typeof bridgeStatus.activeRequestId !== 'undefined') {
+          const pythonActiveReqId = bridgeStatus.activeRequestId; // string or null
+          const busyReqId = activeRuntime.ping.busyRequestId;
+          if (pythonActiveReqId === null || (typeof pythonActiveReqId === 'string' && pythonActiveReqId !== busyReqId)) {
+            try {
+              chrome.tabs.sendMessage(activeRuntime.tabId, {
+                type: 'NFA_CANCEL_COMMAND',
+                requestId: busyReqId
+              }, () => {});
+            } catch (_) {}
+          }
         }
       }
 
@@ -165,7 +167,7 @@ async function startHeartbeatLoop() {
         buildId: contract.runtimeBuild,
         protocolVersion: contract.protocolVersion,
         bridgeSchemaVersion: contract.bridgeSchemaVersion,
-        consumerId: 'background-r5',
+        consumerId: 'background-r6',
         lastRuntimePingAt: now,
         busyRequestId: activeRuntime?.ping.busyRequestId || null,
         busySince: activeRuntime?.ping.busySince || null,
@@ -216,7 +218,7 @@ async function runCommandCycle() {
     return;
   }
 
-  // 3. Dispatch NFA_EXECUTE_COMMAND to Gemini Content Script
+  // 3. Dispatch NFA_EXECUTE_COMMAND to Gemini Content Script (Two-Message Protocol)
   let execResult = null;
   const dispatchPromise = new Promise((resolve) => {
     inFlightCommandResolvers.set(command.requestId, resolve);
@@ -278,8 +280,9 @@ async function startTransportEngine() {
   while (true) {
     try {
       await runCommandCycle();
-    } catch (e) {
-      await new Promise(r => setTimeout(r, 2000));
+    } catch (cycleErr) {
+      console.debug('[GEMINI][BACKGROUND] cycle error:', cycleErr);
+      await new Promise(r => setTimeout(r, 1000));
     }
   }
 }
@@ -351,7 +354,7 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
     return true;
   }
 
-  if (message?.type === 'NFA_COMMAND_RESULT') {
+  if (message?.type === 'NFA_EXECUTION_RESULT' || message?.type === 'NFA_COMMAND_RESULT') {
     const resolver = inFlightCommandResolvers.get(message.requestId);
     if (resolver) {
       inFlightCommandResolvers.delete(message.requestId);

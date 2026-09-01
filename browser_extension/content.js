@@ -21,7 +21,7 @@
   const RESPONSE_SELECTORS = 'model-response';
   let runtimeContract = {
     extensionVersion: '13.2.3',
-    runtimeBuild: '13.2.3-r5',
+    runtimeBuild: '13.2.3-r6',
     protocolVersion: 3,
     bridgeSchemaVersion: 2
   };
@@ -42,16 +42,18 @@
     });
   } catch (_) {}
 
-  // Active execution state machine
+  // Active execution state machine with lifecycle resolve / finish support
   let activeExecution = null;
 
-  function cancelExecution(reqId) {
+  function cancelExecution(reqId, reason = 'cancelled') {
     if (!activeExecution) return false;
     if (!reqId || activeExecution.requestId === reqId) {
       activeExecution.cancelled = true;
-      try { activeExecution.observer?.disconnect(); } catch (_) {}
-      if (activeExecution.timer) clearInterval(activeExecution.timer);
-      activeExecution = null;
+      if (typeof activeExecution.finish === 'function') {
+        activeExecution.finish({ status: 'failed', text: '', error: reason });
+      } else if (typeof activeExecution.resolve === 'function') {
+        activeExecution.resolve({ status: 'failed', text: '', error: reason });
+      }
       return true;
     }
     return false;
@@ -60,7 +62,7 @@
   function stopRuntime() {
     if (isStopped) return;
     isStopped = true;
-    cancelExecution();
+    cancelExecution(null, 'runtime_stopped');
     while (eventCleanups.length > 0) {
       const cleanup = eventCleanups.pop();
       try { cleanup(); } catch (_) {}
@@ -104,7 +106,7 @@
 
     if (activeExecution) {
       if (Date.now() > activeExecution.deadlineAt) {
-        cancelExecution(activeExecution.requestId);
+        cancelExecution(activeExecution.requestId, 'command_deadline_exceeded');
       } else {
         return 'busy';
       }
@@ -126,7 +128,8 @@
     }
     target.dispatchEvent(new Event('input', { bubbles: true, cancelable: true }));
     target.dispatchEvent(new Event('change', { bubbles: true, cancelable: true }));
-    return true;
+    const read = normalizeText(target.innerText || target.value || '');
+    return read === normalizeText(text) || read.includes(normalizeText(text));
   }
 
   function responseNodes() {
@@ -248,14 +251,17 @@
       return { status: 'dom_unsupported', text: '', error: 'Gemini 입력창을 찾지 못했습니다.' };
     }
 
+    // Exact prompt injection & readback
     let isTextSet = setEditorText(input, command.prompt);
     if (!isTextSet) {
       await new Promise(r => setTimeout(r, 200));
       if (isStopped || execState.cancelled) return { status: 'failed', text: '', error: 'cancelled' };
       isTextSet = setEditorText(input, command.prompt);
     }
-    const readbackOk = normalizeText(input.innerText || input.value).includes(normalizeText(command.prompt).slice(0, 30));
-    if (!isTextSet && !readbackOk) {
+    const readbackText = normalizeText(input.innerText || input.value || '');
+    const expectedText = normalizeText(command.prompt);
+    const readbackOk = (readbackText === expectedText || readbackText.includes(expectedText));
+    if (!readbackOk) {
       logSendDiag({ button: null, readback: false, confirmed: false });
       return { status: 'dom_unsupported', text: '', error: 'prompt_exact_readback_failed' };
     }
@@ -336,6 +342,9 @@
         resolve(res);
       };
 
+      execState.finish = finish;
+      execState.resolve = resolve;
+
       const checkOutput = () => {
         if (isStopped) return finish({ status: 'failed', text: '', error: 'runtime_stopped' });
         if (execState.cancelled) return finish({ status: 'failed', text: '', error: 'cancelled' });
@@ -381,7 +390,7 @@
     if (isStopped) return { status: 'failed', text: '', error: 'runtime_stopped' };
     if (activeExecution) {
       if (Date.now() > activeExecution.deadlineAt) {
-        cancelExecution(activeExecution.requestId);
+        cancelExecution(activeExecution.requestId, 'command_deadline_exceeded');
       } else {
         return { status: 'busy', text: '', error: 'runtime_busy' };
       }
@@ -398,7 +407,9 @@
       deadlineAt: deadlineMs,
       cancelled: false,
       observer: null,
-      timer: null
+      timer: null,
+      finish: null,
+      resolve: null
     };
     activeExecution = execState;
 
@@ -435,21 +446,29 @@
     }
 
     if (message.type === 'NFA_CANCEL_COMMAND') {
-      const cancelled = cancelExecution(message.requestId);
+      const cancelled = cancelExecution(message.requestId, 'cancelled_by_bridge');
       sendResponse({ ok: true, cancelled, status: pageStatus() });
       return true;
     }
 
     if (message.type === 'NFA_EXECUTE_COMMAND') {
-      sendResponse({ ok: true, started: true });
+      // Two-message protocol: immediate ACK to prevent long-lived sendMessage port timeout
+      sendResponse({
+        ok: true,
+        started: true,
+        requestId: message.command?.requestId,
+        protocol: 'two-message-v2'
+      });
+
+      // Asynchronous core execution followed by NFA_EXECUTION_RESULT push
       execute(message.command)
         .then(result => {
           try {
             chrome.runtime.sendMessage({
-              type: 'NFA_COMMAND_RESULT',
-              requestId: message.command.requestId,
-              postKey: message.command.postKey,
-              navigationVersion: message.command.navigationVersion,
+              type: 'NFA_EXECUTION_RESULT',
+              requestId: message.command?.requestId,
+              postKey: message.command?.postKey,
+              navigationVersion: message.command?.navigationVersion,
               result: result
             });
           } catch (_) {}
@@ -457,14 +476,15 @@
         .catch(err => {
           try {
             chrome.runtime.sendMessage({
-              type: 'NFA_COMMAND_RESULT',
-              requestId: message.command.requestId,
-              postKey: message.command.postKey,
-              navigationVersion: message.command.navigationVersion,
+              type: 'NFA_EXECUTION_RESULT',
+              requestId: message.command?.requestId,
+              postKey: message.command?.postKey,
+              navigationVersion: message.command?.navigationVersion,
               result: { status: 'failed', text: '', error: String(err?.message || err) }
             });
           } catch (_) {}
         });
+
       return false;
     }
 
