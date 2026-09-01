@@ -268,17 +268,21 @@ class CommentInteractionService:
 
             ensure_page_alive(page)
 
-            # 1. UI 스레드로부터 전달된 클립보드 적용 명령 처리
+            # 1. UI 스레드로부터 전달된 명령 처리
             if command_bridge:
                 cmd = command_bridge.pop_command()
-                if cmd and cmd.kind == WorkerCommandType.APPLY_CLIPBOARD_COMMENT:
-                    from services.comments.community_rhythm import FinalQualityGate
-                    gate_res = FinalQualityGate.validate_final_text(cmd.text, preset=preset, source="clipboard")
-                    if gate_res.valid:
-                        if CommentEditorAdapter.set_text(page, cmd.text):
-                            logger.log("  📋 [COMMENT] 클립보드 텍스트를 댓글 에디터에 적용했습니다.")
-                    else:
-                        logger.log(f"  ⚠️ [COMMENT] 클립보드 텍스트가 품질 게이트를 통과하지 못해 적용을 거부했습니다: [{gate_res.code}] {gate_res.reason} (매칭: {gate_res.matched})", "WARNING")
+                if cmd:
+                    if cmd.kind in (WorkerCommandType.SKIP_POST, WorkerCommandType.GEMINI_SKIP_POST):
+                        logger.log("  ⏭️ [USER] 다음 글로 바로 넘어가기 요청을 수신했습니다 (스킵).")
+                        return UserAction.SKIP
+                    elif cmd.kind == WorkerCommandType.APPLY_CLIPBOARD_COMMENT:
+                        from services.comments.community_rhythm import FinalQualityGate
+                        gate_res = FinalQualityGate.validate_final_text(cmd.text, preset=preset, source="clipboard")
+                        if gate_res.valid:
+                            if CommentEditorAdapter.set_text(page, cmd.text):
+                                logger.log("  📋 [COMMENT] 클립보드 텍스트를 댓글 에디터에 적용했습니다.")
+                        else:
+                            logger.log(f"  ⚠️ [COMMENT] 클립보드 텍스트가 품질 게이트를 통과하지 못해 적용을 거부했습니다: [{gate_res.code}] {gate_res.reason} (매칭: {gate_res.matched})", "WARNING")
 
             # 2. 브라우저 이벤트 상태 확인
             try:

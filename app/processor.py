@@ -395,10 +395,10 @@ class PostProcessor:
                                     if self.stop_event and self.stop_event.is_set():
                                         raise StopRequestedException("사용자 작업 중지")
                                     cmd = self.command_bridge.pop_command() if self.command_bridge else None
-                                    if cmd and cmd.kind == WorkerCommandType.GEMINI_SKIP_POST:
+                                    if cmd and cmd.kind in (WorkerCommandType.GEMINI_SKIP_POST, WorkerCommandType.SKIP_POST):
                                         result.comment_result = CommentProcessResult(
                                             status=CommentSubmitState.SKIPPED,
-                                            error=f"gemini_failed:{failure}",
+                                            error=f"gemini_failed:{failure}" if failure else "user_skipped",
                                         )
                                         self.pause_event.clear()
                                         if self.state_mgr:

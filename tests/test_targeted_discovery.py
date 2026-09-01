@@ -34,6 +34,20 @@ class TestTargetedDiscoveryV9(unittest.TestCase):
         self.assertTrue(switched_2)
         # 로테이션 완료
 
+    def test_query_rotator_prioritizes_food_and_matjib(self):
+        """맛집(FOOD 및 맛집 커스텀) 쿼리가 큐의 최우선 순위로 배치되는지 검증"""
+        rotator = QueryRotator(
+            enabled_categories=["LIVING", "FOOD", "CAFE", "TRAVEL"],
+            custom_queries=["홍대 맛집", "강남 카페"],
+            posts_per_query=2
+        )
+        # 첫 번째 쿼리는 반드시 FOOD 카테고리이거나 '맛집' 쿼리여야 함
+        first_spec = rotator.current_spec
+        self.assertTrue(
+            first_spec.category == "FOOD" or "맛집" in first_spec.query,
+            f"Expected first query to be FOOD/맛집, got: {first_spec}"
+        )
+
     def test_topic_filter_whitelist_pass(self):
         # 생활형 카테고리 정상 통과
         pass_titles = [

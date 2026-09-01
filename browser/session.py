@@ -169,33 +169,34 @@ def interruptible_wait(
     stop_event: Optional[threading.Event],
     seconds: float,
     step: float = 0.1,
-    pause_event: Optional[threading.Event] = None
+    pause_event: Optional[threading.Event] = None,
+    skip_event: Optional[threading.Event] = None
 ) -> bool:
-    """stop_event 및 pause_event 신호를 즉각 감지하며 주어진 시간만큼 대기 (중지 요청 시 True 반환)"""
-    if stop_event and stop_event.is_set():
+    """stop_event, pause_event, skip_event 신호를 즉각 감지하며 주어진 시간만큼 대기 (중지 또는 건너뛰기 시 True 반환)"""
+    if (stop_event and stop_event.is_set()) or (skip_event and skip_event.is_set()):
         return True
 
     # 일시정지 상태 대기
     while pause_event and pause_event.is_set():
-        if stop_event and stop_event.is_set():
+        if (stop_event and stop_event.is_set()) or (skip_event and skip_event.is_set()):
             return True
         time.sleep(step)
 
     if seconds <= 0:
-        return bool(stop_event and stop_event.is_set())
+        return bool((stop_event and stop_event.is_set()) or (skip_event and skip_event.is_set()))
 
     elapsed = 0.0
     while elapsed < seconds:
-        if stop_event and stop_event.is_set():
+        if (stop_event and stop_event.is_set()) or (skip_event and skip_event.is_set()):
             return True
         while pause_event and pause_event.is_set():
-            if stop_event and stop_event.is_set():
+            if (stop_event and stop_event.is_set()) or (skip_event and skip_event.is_set()):
                 return True
             time.sleep(step)
         sleep_dur = min(step, seconds - elapsed)
         time.sleep(sleep_dur)
         elapsed += sleep_dur
-    return bool(stop_event and stop_event.is_set())
+    return bool((stop_event and stop_event.is_set()) or (skip_event and skip_event.is_set()))
 
 
 class BrowserSession:

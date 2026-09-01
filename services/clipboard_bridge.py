@@ -22,6 +22,10 @@ class ClipboardCommandBridge:
     def send_gemini_skip_post(self):
         self._queue.put(WorkerCommand(kind=WorkerCommandType.GEMINI_SKIP_POST))
 
+    def send_skip_post(self):
+        """현재 글 처리를 중단하고 다음 글로 건너뛰도록 명령 전달"""
+        self._queue.put(WorkerCommand(kind=WorkerCommandType.SKIP_POST))
+
     def send_gemini_use_local_once(self):
         self._queue.put(WorkerCommand(kind=WorkerCommandType.GEMINI_USE_LOCAL_ONCE))
 

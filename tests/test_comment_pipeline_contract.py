@@ -180,6 +180,39 @@ class TestCommentPipelineContract(unittest.TestCase):
         self.assertEqual(res.comment_result.status, CommentSubmitState.SKIPPED)
         self.assertEqual(res.comment_result.error, "server_duplicate_check_unknown")
 
+    @patch("app.processor.TargetPostGuard.verify")
+    @patch("app.processor.CommentInteractionService.open_comment_layer", return_value=(True, "ok"))
+    @patch("app.processor.MobileDOMResolver.get_comment_editor_context")
+    @patch("app.processor.ServerCommentDuplicateGuard.scan_page_for_my_comment")
+    @patch("app.processor.ContentContextExtractor.extract")
+    @patch("app.processor.CommentEditorAdapter.set_text", return_value=True)
+    @patch("app.processor.CommentInteractionService.install_keyboard_listener")
+    @patch("app.processor.CommentEditorAdapter.focus")
+    @patch("app.processor.CommentInteractionService.submit_and_verify")
+    def test_comment_006_skip_to_next_post_command(
+        self, mock_submit, mock_focus, mock_kb, mock_set_text, mock_extract, mock_dup_scan, mock_ctx, mock_open, mock_guard
+    ):
+        """COMMENT-006: UI 다음 글로 넘어가기(SKIP_POST) 명령 시 에디터 등록 생략 및 SKIPPED 반환"""
+        mock_ctx.return_value = {"frame": self.mock_page, "root": self.mock_page}
+        mock_dup_scan.return_value = CommentPresenceResult(state=CommentPresenceState.ABSENT, confidence="high")
+        mock_extract.return_value = MagicMock(title="테스트 포스팅", excerpt="제주 서귀포 맛집 다녀온 후기입니다.")
+
+        from services.clipboard_bridge import ClipboardCommandBridge
+        bridge = ClipboardCommandBridge()
+        bridge.send_skip_post()
+
+        processor = PostProcessor(
+            self.config,
+            like_enabled=False,
+            comment_enabled=True,
+            gemini_web_enabled=False,
+            command_bridge=bridge
+        )
+        res = processor.process(self.mock_page, self.post)
+
+        mock_submit.assert_not_called()
+        self.assertEqual(res.comment_result.status, CommentSubmitState.SKIPPED)
+
 
 if __name__ == "__main__":
     unittest.main()

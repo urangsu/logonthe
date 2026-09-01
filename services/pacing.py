@@ -33,12 +33,18 @@ class PacingService:
         config,
         stop_event: Optional[threading.Event] = None,
         state_manager = None,
-        pause_event: Optional[threading.Event] = None
+        pause_event: Optional[threading.Event] = None,
+        skip_event: Optional[threading.Event] = None
     ):
         self.config = config
         self.stop_event = stop_event
         self.state_manager = state_manager
         self.pause_event = pause_event
+        self.skip_event = skip_event or threading.Event()
+
+    def interrupt(self):
+        """대기 중인 페이싱 지연을 즉각 깨우고 다음 단계로 진행"""
+        self.skip_event.set()
 
     def _range(self, min_key: str, max_key: str, default_min: float = 1.0, default_max: float = 2.5) -> Tuple[float, float]:
         low = float(self.config.get(min_key, default_min))
@@ -57,7 +63,8 @@ class PacingService:
             return PacingResult(PacingKind.ACTION, 0.0)
 
         seconds = round(random.uniform(low, high), 2)
-        interrupted = interruptible_wait(self.stop_event, seconds, pause_event=self.pause_event)
+        interrupted = interruptible_wait(self.stop_event, seconds, pause_event=self.pause_event, skip_event=self.skip_event)
+        self.skip_event.clear()
         return PacingResult(PacingKind.ACTION, seconds, interrupted)
 
     def _wait_named(self, kind: PacingKind, min_key: str, max_key: str, default_min: float, default_max: float) -> PacingResult:
@@ -67,7 +74,8 @@ class PacingService:
         if high <= 0:
             return PacingResult(kind, 0.0)
         seconds = round(random.uniform(low, high), 2)
-        interrupted = interruptible_wait(self.stop_event, seconds, pause_event=self.pause_event)
+        interrupted = interruptible_wait(self.stop_event, seconds, pause_event=self.pause_event, skip_event=self.skip_event)
+        self.skip_event.clear()
         return PacingResult(kind, seconds, interrupted)
 
     def wait_page_settle(self) -> PacingResult:
@@ -94,7 +102,8 @@ class PacingService:
             self.state_manager.update(new_state=FeedState.PACING, message=f"다음 글로 이동 전 대기 중... ({seconds:.1f}초)")
 
         logger.log(f"[PACING] 다음 글 진입 전 {seconds:.1f}초 대기...")
-        interrupted = interruptible_wait(self.stop_event, seconds, pause_event=self.pause_event)
+        interrupted = interruptible_wait(self.stop_event, seconds, pause_event=self.pause_event, skip_event=self.skip_event)
+        self.skip_event.clear()
         return PacingResult(PacingKind.NEXT_POST, seconds, interrupted)
 
     def maybe_pause(self) -> Optional[PacingResult]:
@@ -118,7 +127,8 @@ class PacingService:
             self.state_manager.update(new_state=FeedState.PAUSED, message=f"잠시 쉬는 중... ({seconds:.1f}초)")
 
         logger.log(f"☕ [PAUSE] 작업 간격 조정을 위해 {seconds:.1f}초 동안 잠시 대기합니다.")
-        interrupted = interruptible_wait(self.stop_event, seconds, pause_event=self.pause_event)
+        interrupted = interruptible_wait(self.stop_event, seconds, pause_event=self.pause_event, skip_event=self.skip_event)
+        self.skip_event.clear()
         return PacingResult(PacingKind.PAUSE, seconds, interrupted)
 
     def reset(self) -> None:

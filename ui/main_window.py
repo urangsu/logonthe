@@ -176,7 +176,7 @@ class MainWindow(ctk.CTk):
         
         cat_row = ctk.CTkFrame(self.discovery_frame, fg_color="transparent")
         cat_row.pack(fill="x", padx=8, pady=2)
-        ctk.CTkCheckBox(cat_row, text="맛집/음식", variable=self.cat_vars["FOOD"]).pack(side="left", padx=4)
+        ctk.CTkCheckBox(cat_row, text="맛집 (우선)", variable=self.cat_vars["FOOD"]).pack(side="left", padx=4)
         ctk.CTkCheckBox(cat_row, text="카페/디저트", variable=self.cat_vars["CAFE"]).pack(side="left", padx=4)
         ctk.CTkCheckBox(cat_row, text="육아", variable=self.cat_vars["PARENTING"]).pack(side="left", padx=4)
         ctk.CTkCheckBox(cat_row, text="리빙/살림", variable=self.cat_vars["LIVING"]).pack(side="left", padx=4)
@@ -187,7 +187,7 @@ class MainWindow(ctk.CTk):
         custom_q_row = ctk.CTkFrame(self.discovery_frame, fg_color="transparent")
         custom_q_row.pack(fill="x", padx=8, pady=(2, 4))
         ctk.CTkLabel(custom_q_row, text="내 검색어 추가 (쉼표 구분):", font=ctk.CTkFont(size=11)).pack(side="left", padx=(0, 4))
-        self.custom_discovery_entry = ctk.CTkEntry(custom_q_row, placeholder_text="예: 광양 맛집, 순천 카페, 아이랑 여수", height=26)
+        self.custom_discovery_entry = ctk.CTkEntry(custom_q_row, placeholder_text="예: 강남 찐맛집, 제주 맛집 추천, 동네 카페", height=26)
         self.custom_discovery_entry.pack(side="left", fill="x", expand=True, padx=4)
         saved_custom = ", ".join(self.config_service.get("custom_discovery_queries", []))
         if saved_custom:
@@ -505,6 +505,12 @@ class MainWindow(ctk.CTk):
             font=ctk.CTkFont(size=14, weight="bold"), command=self._toggle_pause, state="disabled"
         )
         self.btn_pause.pack(side="left", expand=True, fill="x", padx=3)
+
+        self.btn_skip_post = ctk.CTkButton(
+            btn_frame, text="⏭️ 다음 글로 바로 넘어가기", fg_color="#4F46E5", hover_color="#4338CA", height=38,
+            font=ctk.CTkFont(size=14, weight="bold"), command=self._skip_to_next_post, state="disabled"
+        )
+        self.btn_skip_post.pack(side="left", expand=True, fill="x", padx=3)
 
         self.btn_stop = ctk.CTkButton(
             btn_frame, text="⏹ 작업 즉시 중지", fg_color="#DC2626", hover_color="#B91C1C", height=38,
@@ -911,6 +917,7 @@ class MainWindow(ctk.CTk):
 
         self.btn_start.configure(state="disabled")
         self.btn_pause.configure(state="normal", text="⏸️ 일시정지", fg_color="#D97706", hover_color="#B45309")
+        self.btn_skip_post.configure(state="normal")
         self.btn_stop.configure(state="normal")
         self.stop_event.clear()
         self.pause_event.clear()
@@ -925,6 +932,7 @@ class MainWindow(ctk.CTk):
             pause_event=self.pause_event,
             gemini_extension_bridge=self.gemini_extension_bridge,
         )
+        self.current_controller = controller
 
         def worker():
             try:
@@ -949,6 +957,19 @@ class MainWindow(ctk.CTk):
             logger.log("▶️ 작업을 다시 재개합니다.")
             self.state_mgr.update(message="작업 재개됨")
 
+    def _skip_to_next_post(self):
+        """현재 글 처리를 즉시 건너뛰고 다음 글로 바로 이동"""
+        if not self.worker_thread or not self.worker_thread.is_alive():
+            return
+        logger.log("⏭️ [USER] 다음 글로 바로 넘어가기 버튼 클릭됨 (현재 글 스킵)")
+        self.command_bridge.send_skip_post()
+        if hasattr(self, "current_controller") and self.current_controller:
+            if hasattr(self.current_controller, "pacing"):
+                self.current_controller.pacing.interrupt()
+        if self.pause_event and self.pause_event.is_set():
+            self.pause_event.clear()
+            self.btn_pause.configure(text="⏸️ 일시정지", fg_color="#D97706", hover_color="#B45309")
+
     def _stop_task(self):
         if self.worker_thread and self.worker_thread.is_alive():
             self.pause_event.clear()
@@ -958,8 +979,10 @@ class MainWindow(ctk.CTk):
     def _on_task_finished(self):
         self.btn_start.configure(state="normal")
         self.btn_pause.configure(state="disabled", text="⏸️ 일시정지", fg_color="#D97706", hover_color="#B45309")
+        self.btn_skip_post.configure(state="disabled")
         self.btn_stop.configure(state="disabled")
         self.pause_event.clear()
+        self.current_controller = None
 
     def _on_close(self):
         self.stop_event.set()

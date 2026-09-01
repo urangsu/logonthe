@@ -12,9 +12,13 @@ class QuerySpec:
 DISCOVERY_QUERIES: Dict[str, List[str]] = {
     "FOOD": [
         "내돈내산 맛집 후기",
-        "동네 맛집 후기",
-        "가족 외식 후기",
-        "주말 맛집",
+        "동네 찐맛집 후기",
+        "현지인 맛집 추천",
+        "가족 외식 맛집",
+        "주말 맛집 투어",
+        "점심 맛집 솔직후기",
+        "숨은 맛집 내돈내산",
+        "분위기 좋은 맛집",
     ],
     "CAFE": [
         "동네 카페 후기",
@@ -52,6 +56,7 @@ DISCOVERY_QUERIES: Dict[str, List[str]] = {
 class QueryRotator:
     """
     생활형 주제 검색어 순환 풀 (v9-lite / V13.3)
+    - 맛집(FOOD) 카테고리를 최우선 탐색 대상으로 큐 전면에 배치
     - 선택된 카테고리별 검색어 및 사용자 지정 검색어와 QuerySpec(category, query) 보존
     - 검색어당 2~3개 처리 후 다음 검색어로 자연스럽게 로테이션
     """
@@ -65,28 +70,40 @@ class QueryRotator:
         self.enabled_categories = enabled_categories or list(DISCOVERY_QUERIES.keys())
         self.custom_queries = [q.strip() for q in (custom_queries or []) if q.strip()]
 
-        # QuerySpec 리스트 조합
-        self.specs: List[QuerySpec] = []
+        # QuerySpec 리스트 조합 (맛집 우선순위 큐 구성)
+        food_specs: List[QuerySpec] = []
+        other_specs: List[QuerySpec] = []
+
         for cat in self.enabled_categories:
             if cat in DISCOVERY_QUERIES:
-                for q in DISCOVERY_QUERIES[cat]:
-                    self.specs.append(QuerySpec(cat, q))
+                queries = list(DISCOVERY_QUERIES[cat])
+                random.shuffle(queries)
+                for q in queries:
+                    spec = QuerySpec(cat, q)
+                    if cat == "FOOD" or "맛집" in q:
+                        food_specs.append(spec)
+                    else:
+                        other_specs.append(spec)
 
         # 사용자 정의 검색어 추가 (CUSTOM 카테고리)
         for cq in self.custom_queries:
-            if not any(s.query == cq for s in self.specs):
-                self.specs.append(QuerySpec("CUSTOM", cq))
+            if not any(s.query == cq for s in (food_specs + other_specs)):
+                spec = QuerySpec("CUSTOM", cq)
+                if "맛집" in cq or "식당" in cq or "밥집" in cq or "외식" in cq:
+                    food_specs.insert(0, spec)
+                else:
+                    other_specs.append(spec)
+
+        # 맛집 쿼리를 큐 전면에 우선 배치
+        self.specs = food_specs + other_specs
 
         if not self.specs:
             self.specs = [
                 QuerySpec("FOOD", "내돈내산 맛집 후기"),
+                QuerySpec("FOOD", "동네 찐맛집 후기"),
                 QuerySpec("CAFE", "동네 카페 후기"),
                 QuerySpec("PARENTING", "육아 일상"),
-                QuerySpec("LIVING", "살림 일상"),
             ]
-
-        # 세션 시작 시 다양성을 위해 셔플
-        random.shuffle(self.specs)
 
         # 하위 호환성 문자열 리스트
         self.queries: List[str] = [s.query for s in self.specs]
