@@ -6,9 +6,20 @@ from playwright.sync_api import sync_playwright
 
 OUTPUT_FILE = os.path.join(os.path.dirname(__file__), "..", "data", "collected_comments_theqoo_muk.json")
 
-def collect_theqoo_comments(target_count=550):
+def collect_theqoo_comments(target_count=1400):
     all_comments = []
     seen_texts = set()
+
+    if os.path.exists(OUTPUT_FILE):
+        try:
+            with open(OUTPUT_FILE, "r", encoding="utf-8") as f:
+                existing = json.load(f)
+                for item in existing:
+                    all_comments.append(item)
+                    seen_texts.add(item.get("text", ""))
+            print(f"Loaded {len(all_comments)} existing comments from {OUTPUT_FILE}")
+        except Exception as e:
+            print(f"Failed to load existing comments: {e}")
 
     with sync_playwright() as p:
         browser = p.chromium.launch(headless=True)
@@ -21,12 +32,12 @@ def collect_theqoo_comments(target_count=550):
 
         # 1. 핫게시판 글 목록 수집 (여러 페이지 순회)
         post_urls = []
-        for page_num in range(1, 10):
+        for page_num in range(1, 30):
             list_url = f"https://theqoo.net/muk?filter_mode=hot&page={page_num}"
             print(f"[LIST] Scraping post list page {page_num}: {list_url}")
             try:
                 page.goto(list_url, wait_until="domcontentloaded", timeout=20000)
-                page.wait_for_timeout(1500)
+                page.wait_for_timeout(1000)
 
                 # 공지 제외하고 일반 핫게시글 링크 추출
                 links = page.evaluate("""
@@ -58,7 +69,7 @@ def collect_theqoo_comments(target_count=550):
                     if not any(x["id"] == item["id"] for x in post_urls):
                         post_urls.append(item)
 
-                if len(post_urls) >= 40:
+                if len(post_urls) >= 120:
                     break
             except Exception as e:
                 print(f"Error fetching list page {page_num}: {e}")
@@ -155,4 +166,4 @@ def collect_theqoo_comments(target_count=550):
     return all_comments
 
 if __name__ == "__main__":
-    collect_theqoo_comments(550)
+    collect_theqoo_comments(1400)

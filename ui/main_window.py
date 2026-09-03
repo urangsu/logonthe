@@ -134,6 +134,7 @@ class MainWindow(ctk.CTk):
 
         tab_feed = self.tabview.add("⚡ 피드 작업")
         tab_settings = self.tabview.add("⚙️ 세부 옵션")
+        tab_replies = self.tabview.add("💬 내 글 답글 도우미")
 
         # ==================== [탭 1: 피드 작업] ====================
         # Source Selection
@@ -449,6 +450,59 @@ class MainWindow(ctk.CTk):
         add_range(p_detail, "안정화:", "settle_min_entry", "settle_max_entry", "page_settle_min", "page_settle_max", 1.0, 2.0)
         add_range(p_detail, "본문→공감:", "pre_like_min_entry", "pre_like_max_entry", "pre_like_delay_min", "pre_like_delay_max", 5.0, 10.0)
         add_range(p_detail, "공감→댓글:", "post_like_min_entry", "post_like_max_entry", "post_like_delay_min", "post_like_delay_max", 2.0, 5.0)
+
+        # ==================== [탭 3: 💬 내 글 답글 도우미] ====================
+        replies_split = ctk.CTkFrame(tab_replies, fg_color="transparent")
+        replies_split.pack(fill="both", expand=True, padx=4, pady=2)
+
+        # 좌측 패널 (최근 글 목록)
+        reply_left = ctk.CTkFrame(replies_split, width=280)
+        reply_left.pack(side="left", fill="both", padx=(0, 4), pady=1)
+        reply_left.pack_propagate(False)
+
+        left_top = ctk.CTkFrame(reply_left, fg_color="transparent")
+        left_top.pack(fill="x", padx=4, pady=2)
+        ctk.CTkLabel(left_top, text="블로그ID:", font=ctk.CTkFont(size=11, weight="bold")).pack(side="left", padx=1)
+        self.reply_blog_id_entry = ctk.CTkEntry(left_top, placeholder_text="아이디", font=ctk.CTkFont(size=11), width=90, height=22)
+        self.reply_blog_id_entry.pack(side="left", padx=2)
+        saved_bid = self.config_service.get("my_blog_id", "")
+        if saved_bid:
+            self.reply_blog_id_entry.insert(0, saved_bid)
+
+        self.btn_load_recent_posts = ctk.CTkButton(
+            left_top, text="글 목록", width=65, height=22, font=ctk.CTkFont(size=11),
+            command=self._load_my_recent_posts
+        )
+        self.btn_load_recent_posts.pack(side="left", padx=1)
+
+        self.reply_posts_scroll = ctk.CTkScrollableFrame(reply_left, label_text="최근 글 (클릭 시 댓글 로드)")
+        self.reply_posts_scroll.pack(fill="both", expand=True, padx=2, pady=2)
+
+        # 우측 패널 (댓글 스레드 및 추천 답글)
+        reply_right = ctk.CTkFrame(replies_split, fg_color="transparent")
+        reply_right.pack(side="right", fill="both", expand=True, padx=(4, 0), pady=1)
+
+        right_top = ctk.CTkFrame(reply_right, fg_color="transparent")
+        right_top.pack(fill="x", padx=4, pady=2)
+        self.reply_post_info_lbl = ctk.CTkLabel(
+            right_top, text="좌측에서 글을 선택해 주세요", font=ctk.CTkFont(size=11, weight="bold"), anchor="w"
+        )
+        self.reply_post_info_lbl.pack(side="left", fill="x", expand=True, padx=2)
+
+        self.reply_audit_status_lbl = ctk.CTkLabel(
+            right_top, text="", font=ctk.CTkFont(size=11)
+        )
+        self.reply_audit_status_lbl.pack(side="right", padx=4)
+
+        self.btn_batch_generate_replies = ctk.CTkButton(
+            right_top, text="🤖 미답글 추천 생성", width=125, height=24,
+            fg_color="#059669", hover_color="#047857", font=ctk.CTkFont(size=11, weight="bold"),
+            command=self._batch_generate_replies
+        )
+        self.btn_batch_generate_replies.pack(side="right", padx=2)
+
+        self.reply_threads_scroll = ctk.CTkScrollableFrame(reply_right, label_text="댓글 스레드 및 추천 답글")
+        self.reply_threads_scroll.pack(fill="both", expand=True, padx=2, pady=2)
 
         # ==================== [하단 고정 영역] ====================
         # UX Shortcut Guide (Compact)
@@ -965,6 +1019,335 @@ class MainWindow(ctk.CTk):
         self.btn_stop.configure(state="disabled")
         self.pause_event.clear()
         self.current_controller = None
+
+    # ==================== [내 글 답글 도우미 핸들러] ====================
+    def _load_my_recent_posts(self):
+        blog_id = self.reply_blog_id_entry.get().strip()
+        if not blog_id:
+            messagebox.showwarning("입력 필요", "블로그 ID를 입력해 주세요.")
+            return
+
+        self.btn_load_recent_posts.configure(state="disabled", text="로딩 중...")
+        for widget in self.reply_posts_scroll.winfo_children():
+            widget.destroy()
+
+            from services.my_blog_recent_posts import MyBlogRecentPostService
+            import urllib.request
+            import urllib.parse
+            import json
+            import re
+
+            url = f"https://blog.naver.com/PostTitleListAsync.naver?blogId={blog_id}&viewdate=&currentPage=1&categoryNo=0&countPerPage=30"
+            raw_candidates = []
+            try:
+                req = urllib.request.Request(url, headers={"User-Agent": "Mozilla/5.0"})
+                with urllib.request.urlopen(req, timeout=10) as resp:
+                    raw_bytes = resp.read()
+                    raw_str = raw_bytes.decode('utf-8', errors='ignore')
+                    cleaned_str = re.sub(r"\\\'", "'", raw_str)
+                    data = json.loads(cleaned_str, strict=False)
+                    for item in data.get("postList", []):
+                        raw_candidates.append({
+                            "log_no": item.get("logNo"),
+                            "title": urllib.parse.unquote_plus(item.get("title", "")),
+                            "comment_count": int(item.get("commentCount", 0) or 0),
+                            "published_text": item.get("addDate", ""),
+                            "url": f"https://m.blog.naver.com/{blog_id}/{item.get('logNo')}"
+                        })
+            except Exception as e:
+                logger.log(f"[REPLY_UI] 글 목록 로드 오류: {e}", "ERROR")
+
+            ranked_posts, _ = MyBlogRecentPostService._rank_candidates(raw_candidates, max_count=25)
+            # Map back comment count
+            cmt_map = {c["log_no"]: c["comment_count"] for c in raw_candidates}
+            posts = []
+            for rp in ranked_posts:
+                posts.append({
+                    "log_no": rp["log_no"],
+                    "title": rp["title"],
+                    "comment_count": cmt_map.get(rp["log_no"], 0),
+                    "date": rp.get("published_text", ""),
+                    "url": rp["url"]
+                })
+
+            def update_ui():
+                self.btn_load_recent_posts.configure(state="normal", text="글 목록")
+                if not posts:
+                    ctk.CTkLabel(self.reply_posts_scroll, text="글을 불러오지 못했습니다.", font=ctk.CTkFont(size=11)).pack(pady=10)
+                    return
+
+                for p in posts:
+                    p_card = ctk.CTkFrame(self.reply_posts_scroll, fg_color="#1E293B", corner_radius=6)
+                    p_card.pack(fill="x", padx=2, pady=2)
+
+                    row1 = ctk.CTkFrame(p_card, fg_color="transparent")
+                    row1.pack(fill="x", padx=6, pady=(3, 0))
+                    ctk.CTkLabel(row1, text=f"📅 {p['date']}", font=ctk.CTkFont(size=10), text_color="#94A3B8").pack(side="left")
+                    ctk.CTkLabel(row1, text=f"💬 {p['comment_count']}개", font=ctk.CTkFont(size=10, weight="bold"), text_color="#38BDF8").pack(side="right")
+
+                    title_btn = ctk.CTkButton(
+                        p_card, text=p['title'][:35], font=ctk.CTkFont(size=11),
+                        fg_color="transparent", hover_color="#334155", anchor="w",
+                        command=lambda post_item=p: self._on_select_reply_post(post_item)
+                    )
+                    title_btn.pack(fill="x", padx=4, pady=(0, 3))
+
+            self.after(0, update_ui)
+
+        threading.Thread(target=worker, daemon=True).start()
+
+    def _on_select_reply_post(self, post_item: dict):
+        self._current_selected_reply_post = post_item
+        blog_id = self.reply_blog_id_entry.get().strip()
+        log_no = post_item.get("log_no")
+
+        self.reply_post_info_lbl.configure(text=f"📌 {post_item.get('title')[:35]}")
+        self.reply_audit_status_lbl.configure(text="댓글 로드 중...", text_color="#FBBF24")
+        self.btn_batch_generate_replies.configure(state="disabled")
+
+        for widget in self.reply_threads_scroll.winfo_children():
+            widget.destroy()
+
+        loading_lbl = ctk.CTkLabel(self.reply_threads_scroll, text="브라우저 세션을 통해 댓글 스레드를 전수 수집 중입니다...", font=ctk.CTkFont(size=11))
+        loading_lbl.pack(pady=20)
+
+        def worker():
+            from playwright.sync_api import sync_playwright
+            from services.my_blog_comment_thread_collector import MyBlogCommentThreadCollector
+
+            nodes = []
+            status = "failed"
+            disp_count = None
+
+            try:
+                with sync_playwright() as p:
+                    browser = p.chromium.launch(headless=True)
+                    page = browser.new_page(
+                        viewport={"width": 430, "height": 900},
+                        user_agent="Mozilla/5.0 (iPhone; CPU iPhone OS 16_5 like Mac OS X) AppleWebKit/605.1.15"
+                    )
+                    nodes, status, disp_count = MyBlogCommentThreadCollector.collect_threads(
+                        page, blog_id, log_no, stop_event=self.stop_event
+                    )
+                    browser.close()
+            except Exception as e:
+                logger.log(f"[REPLY_UI] 댓글 스레드 수집 실패: {e}", "ERROR")
+
+            def update_threads_ui():
+                self.btn_batch_generate_replies.configure(state="normal")
+                loading_lbl.destroy()
+                self._current_reply_nodes = nodes
+                self._reply_widget_map = {}
+
+                # Status label update
+                if status == "complete":
+                    self.reply_audit_status_lbl.configure(
+                        text=f"✅ 전체 로드 완료 ({len(nodes)}개)", text_color="#4ADE80"
+                    )
+                elif status == "partial":
+                    self.reply_audit_status_lbl.configure(
+                        text=f"⚠️ 일부만 로드됨 ({len(nodes)}/{disp_count or '?'})", text_color="#F87171"
+                    )
+                else:
+                    self.reply_audit_status_lbl.configure(
+                        text="❌ 로드 실패", text_color="#EF4444"
+                    )
+
+                if not nodes:
+                    ctk.CTkLabel(self.reply_threads_scroll, text="댓글이 없거나 불러오지 못했습니다.", font=ctk.CTkFont(size=11)).pack(pady=15)
+                    return
+
+                for node in nodes:
+                    card = ctk.CTkFrame(self.reply_threads_scroll, fg_color="#1E293B", corner_radius=6)
+                    card.pack(fill="x", padx=4, pady=3)
+
+                    # Top meta
+                    top_r = ctk.CTkFrame(card, fg_color="transparent")
+                    top_r.pack(fill="x", padx=6, pady=(3, 1))
+
+                    nick_txt = f"👤 {node.nickname or '익명'}"
+                    ctk.CTkLabel(top_r, text=nick_txt, font=ctk.CTkFont(size=11, weight="bold"), text_color="#E2E8F0").pack(side="left")
+                    ctk.CTkLabel(top_r, text=node.date, font=ctk.CTkFont(size=10), text_color="#94A3B8").pack(side="left", padx=6)
+
+                    # Tag
+                    if node.is_secret:
+                        tag_txt, tag_clr = "🔒 비밀댓글", "#64748B"
+                    elif node.is_deleted:
+                        tag_txt, tag_clr = "🗑️ 삭제됨", "#64748B"
+                    elif node.existing_author_reply:
+                        tag_txt, tag_clr = "✅ 답글완료", "#10B981"
+                    else:
+                        tag_txt, tag_clr = "⚡ 미답글", "#F59E0B"
+                    ctk.CTkLabel(top_r, text=tag_txt, font=ctk.CTkFont(size=10, weight="bold"), text_color=tag_clr).pack(side="right")
+
+                    # Comment text
+                    c_text_lbl = ctk.CTkLabel(card, text=node.text, font=ctk.CTkFont(size=11), wraplength=480, justify="left", anchor="w")
+                    c_text_lbl.pack(fill="x", padx=6, pady=2)
+
+                    # Existing reply (if any)
+                    if node.existing_author_reply:
+                        ex_frame = ctk.CTkFrame(card, fg_color="#0F172A", corner_radius=4)
+                        ex_frame.pack(fill="x", padx=6, pady=2)
+                        ctk.CTkLabel(ex_frame, text=f"↳ 내 답글: {node.existing_author_reply}", font=ctk.CTkFont(size=10), text_color="#38BDF8", wraplength=460, justify="left").pack(padx=4, pady=2, anchor="w")
+
+                    # Reply editor area (only for eligible comments or editable)
+                    reply_box = ctk.CTkFrame(card, fg_color="transparent")
+                    reply_box.pack(fill="x", padx=6, pady=(2, 4))
+
+                    reply_entry = ctk.CTkEntry(reply_box, placeholder_text="추천 답글이 여기에 표시됩니다...", font=ctk.CTkFont(size=11))
+                    reply_entry.pack(side="left", fill="x", expand=True, padx=(0, 4))
+                    self._reply_widget_map[node.comment_no] = reply_entry
+
+                    # Buttons
+                    ctk.CTkButton(
+                        reply_box, text="🔄 재생성", width=55, height=22, font=ctk.CTkFont(size=10),
+                        fg_color="#3B82F6", hover_color="#2563EB",
+                        command=lambda c_no=node.comment_no, nick=node.nickname, txt=node.text: self._regenerate_single_reply(c_no, nick, txt)
+                    ).pack(side="left", padx=2)
+
+                    ctk.CTkButton(
+                        reply_box, text="📋 복사", width=45, height=22, font=ctk.CTkFont(size=10),
+                        fg_color="#64748B", hover_color="#475569",
+                        command=lambda ent=reply_entry: self._copy_reply_to_clipboard(ent)
+                    ).pack(side="left", padx=2)
+
+                    ctk.CTkButton(
+                        reply_box, text="✍️ 답글창", width=55, height=22, font=ctk.CTkFont(size=10),
+                        fg_color="#8B5CF6", hover_color="#7C3AED",
+                        command=lambda c_no=node.comment_no, ent=reply_entry: self._insert_reply_to_browser(c_no, ent)
+                    ).pack(side="left", padx=2)
+
+            self.after(0, update_threads_ui)
+
+        threading.Thread(target=worker, daemon=True).start()
+
+    def _batch_generate_replies(self):
+        if not getattr(self, "_current_reply_nodes", None):
+            messagebox.showinfo("알림", "로드된 댓글이 없습니다.")
+            return
+
+        eligible = [n for n in self._current_reply_nodes if n.is_eligible_for_auto_reply]
+        if not eligible:
+            messagebox.showinfo("알림", "답글 생성이 필요한 미답글이 없습니다.")
+            return
+
+        p_info = getattr(self, "_current_selected_reply_post", {})
+        post_title = p_info.get("title", "")
+
+        self.btn_batch_generate_replies.configure(state="disabled", text="생성 중...")
+
+        def worker():
+            from services.my_blog_reply_service import MyBlogReplyService
+
+            targets = [{"comment_no": n.comment_no, "nickname": n.nickname, "text": n.text} for n in eligible]
+            replies = MyBlogReplyService.generate_replies(
+                self.gemini_extension_bridge,
+                post_title=post_title,
+                post_excerpt="",
+                target_comments=targets,
+                stop_event=self.stop_event
+            )
+
+            def apply_replies():
+                self.btn_batch_generate_replies.configure(state="normal", text="🤖 미답글 추천 생성")
+                applied_count = 0
+                for c_no, res_data in replies.items():
+                    widget = self._reply_widget_map.get(c_no)
+                    if widget and res_data.get("status") == "REPLY":
+                        widget.delete(0, "end")
+                        widget.insert(0, res_data.get("reply", ""))
+                        applied_count += 1
+                logger.log(f"[REPLY_UI] 추천 답글 {applied_count}개 적용 완료")
+                messagebox.showinfo("완료", f"{applied_count}개의 댓글에 대한 추천 답글 생성이 완료되었습니다.")
+
+            self.after(0, apply_replies)
+
+        threading.Thread(target=worker, daemon=True).start()
+
+    def _regenerate_single_reply(self, comment_no: str, nickname: str, text: str):
+        widget = self._reply_widget_map.get(comment_no)
+        if not widget:
+            return
+
+        p_info = getattr(self, "_current_selected_reply_post", {})
+        post_title = p_info.get("title", "")
+
+        widget.delete(0, "end")
+        widget.insert(0, "생성 중...")
+
+        def worker():
+            from services.my_blog_reply_service import MyBlogReplyService
+            res = MyBlogReplyService.generate_replies(
+                self.gemini_extension_bridge,
+                post_title=post_title,
+                post_excerpt="",
+                target_comments=[{"comment_no": comment_no, "nickname": nickname, "text": text}],
+                stop_event=self.stop_event
+            )
+            reply_item = res.get(comment_no, {})
+
+            def update():
+                widget.delete(0, "end")
+                if reply_item.get("status") == "REPLY":
+                    widget.insert(0, reply_item.get("reply", ""))
+                else:
+                    widget.insert(0, "추천 답글 생성 실패")
+
+            self.after(0, update)
+
+        threading.Thread(target=worker, daemon=True).start()
+
+    def _copy_reply_to_clipboard(self, entry_widget):
+        text = entry_widget.get().strip()
+        if not text:
+            return
+        self.clipboard_clear()
+        self.clipboard_append(text)
+        messagebox.showinfo("복사 완료", "추천 답글이 클립보드에 복사되었습니다!\n네이버 블로그 댓글창에 바로 붙여넣기(Cmd+V)하세요.")
+
+    def _insert_reply_to_browser(self, comment_no: str, entry_widget):
+        text = entry_widget.get().strip()
+        if not text:
+            messagebox.showwarning("내용 없음", "추천 답글 내용이 없습니다.")
+            return
+
+        self.clipboard_clear()
+        self.clipboard_append(text)
+
+        # 활성 브라우저 컨트롤러가 있는 경우 exact-readback 주입 시도 (등록 버튼은 클릭하지 않음)
+        injected = False
+        if hasattr(self, "current_controller") and self.current_controller and getattr(self.current_controller, "browser_controller", None):
+            try:
+                page = self.current_controller.browser_controller.page
+                if page:
+                    reply_btn = page.locator(f"li[data-info*='{comment_no}'] a.u_cbox_btn_reply, #comment_{comment_no} a.u_cbox_btn_reply, li[data-info*='{comment_no}'] button.u_cbox_btn_reply").first
+                    if reply_btn.count() > 0 and reply_btn.is_visible():
+                        reply_btn.click(timeout=1500)
+                        page.wait_for_timeout(300)
+
+                    editor = page.locator("div.u_cbox_reply_area textarea, div.u_cbox_reply_area [contenteditable='true'], #naverComment__write_textarea").first
+                    if editor.count() > 0:
+                        editor.focus()
+                        editor.fill(text)
+                        tag_name = editor.evaluate("el => el.tagName")
+                        readback = editor.input_value() if tag_name == "TEXTAREA" else editor.inner_text()
+                        if readback.strip() == text.strip():
+                            injected = True
+                            logger.log(f"[REPLY_UI] 답글창 exact-readback 주입 성공 (comment_no={comment_no}, len={len(text)})")
+            except Exception as e:
+                logger.log(f"[REPLY_UI] 브라우저 직접 주입 시도 중 참고(클립보드로 진행): {e}", "INFO")
+
+        if injected:
+            messagebox.showinfo(
+                "답글 주입 완료",
+                f"✅ 브라우저 답글 입력창에 정확히 입력되었습니다!\n\n[{text}]\n\n* 자동 등록되지 않았습니다. 내용을 확인하신 후 직접 [등록] 버튼을 누르세요."
+            )
+        else:
+            logger.log(f"[REPLY_UI] 답글 텍스트 클립보드 복사 완료 (comment_no={comment_no}): {text}")
+            messagebox.showinfo(
+                "답글 복사 완료",
+                f"📋 답글이 클립보드에 복사되었습니다!\n\n[{text}]\n\n우측 블로그 화면의 해당 댓글 [답글] 버튼을 누른 후 붙여넣기(Cmd+V)하세요.\n* 확인 후 직접 등록하시면 됩니다."
+            )
 
     def _on_close(self):
         self.stop_event.set()

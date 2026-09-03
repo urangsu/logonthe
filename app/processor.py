@@ -163,6 +163,7 @@ class PostProcessor:
         if self.stop_event and self.stop_event.is_set():
             raise StopRequestedException("작업 중지 요청됨")
 
+        self._context_retry_done = False
         # TargetPostGuard: 대상 글 일치 여부 확인 (Fail-Open 원천 차단)
         TargetPostGuard.verify(detail_page, post)
 
@@ -346,6 +347,7 @@ class PostProcessor:
                             post.title, post.excerpt, style=self.ai_prompt_style,
                             preset=preset, request_id=request_id,
                             content_focus=content_focus,
+                            verified_anchors=food_anchors,
                         )
 
                     if self.state_mgr:
@@ -402,6 +404,42 @@ class PostProcessor:
                                         logger.log(
                                             f"[GEMINI][CORRELATED] rid={request_id} post={post.key} nav={navigation_version}"
                                         )
+                                        raw_result_text = (extension_result.text or "").strip()
+                                        if "NEED_MORE_CONTEXT" in raw_result_text:
+                                            if not getattr(self, "_context_retry_done", False):
+                                                setattr(self, "_context_retry_done", True)
+                                                logger.log("  ℹ️ [GEMINI] 'NEED_MORE_CONTEXT' 수신 -> 본문 1800자 재추출 및 음식 앵커 재분석 후 1회 retry 시도")
+                                                context = ContentContextExtractor.extract(detail_page, post, max_chars=1800)
+                                                post.excerpt = context.excerpt or post.excerpt
+                                                food_focus_info = FoodCommentFocus.analyze(post.title or "", post.excerpt or "")
+                                                content_focus = food_focus_info["focus"]
+                                                food_anchors = food_focus_info["food_anchors"]
+                                                sec_anchors = food_focus_info.get("secondary_anchors", [])
+                                                request_id = uuid.uuid4().hex
+                                                ai_prompt = AIPromptBuilder.build(
+                                                    post.title, post.excerpt, style=self.ai_prompt_style,
+                                                    preset=preset, request_id=request_id,
+                                                    content_focus=content_focus,
+                                                    verified_anchors=food_anchors,
+                                                    secondary_anchors=sec_anchors,
+                                                )
+                                                if self.state_mgr:
+                                                    self.state_mgr.update(
+                                                        current_post_excerpt=post.excerpt or "",
+                                                        current_ai_prompt=ai_prompt,
+                                                        message="본문 확장 후 Gemini 댓글 재생성 중..."
+                                                    )
+                                                continue
+                                            else:
+                                                logger.log("  ⏭️ [COMMENT] 본문 1800자 재수집 후에도 컨텍스트 부족(NEED_MORE_CONTEXT) -> context_insufficient로 안전하게 스킵")
+                                                result.comment_result = CommentProcessResult(
+                                                    status=CommentSubmitState.SKIPPED,
+                                                    error="context_insufficient"
+                                                )
+                                                if self.state_mgr:
+                                                    self.state_mgr.update(new_state=FeedState.SKIPPING, inc_skip=True)
+                                                return result
+
                                         gemini_answer = DraftService.clean_ai_response(
                                             extension_result.text,
                                             expected_request_id=request_id,
@@ -532,6 +570,9 @@ class PostProcessor:
                                 ai_prompt = AIPromptBuilder.build(
                                     post.title, post.excerpt, style=self.ai_prompt_style,
                                     preset=preset, request_id=request_id,
+                                    content_focus=content_focus,
+                                    verified_anchors=food_anchors,
+                                    secondary_anchors=food_focus_info.get("secondary_anchors", []),
                                 )
 
                         elif self.gemini_browser_mode == "existing_chrome_mac":

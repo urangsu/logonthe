@@ -70,13 +70,13 @@ class CommentLengthPolicy:
 
 COMMENT_POLICIES: Dict[Union[CommunityRhythmPreset, str], CommentLengthPolicy] = {
     CommunityRhythmPreset.COMMUNITY: CommentLengthPolicy(
-        minimum=16, target_max=75, preferred_min=20, preferred_max=65, maximum=140
+        minimum=16, target_max=48, preferred_min=18, preferred_max=45, maximum=100
     ),
     CommunityRhythmPreset.CALM: CommentLengthPolicy(
-        minimum=20, target_max=85, preferred_min=25, preferred_max=80, maximum=140
+        minimum=20, target_max=65, preferred_min=20, preferred_max=65, maximum=100
     ),
     CommunityRhythmPreset.THOUGHTFUL: CommentLengthPolicy(
-        minimum=25, target_max=115, preferred_min=35, preferred_max=95, maximum=160
+        minimum=25, target_max=100, preferred_min=30, preferred_max=80, maximum=160
     ),
 }
 
@@ -85,7 +85,7 @@ COMMENT_POLICIES: Dict[Union[CommunityRhythmPreset, str], CommentLengthPolicy] =
 # retaining the old validator's safety checks. New final text must use one of
 # the public community rhythm presets above.
 LEGACY_COMMENT_POLICY = CommentLengthPolicy(
-    minimum=12, target_max=75, preferred_min=12, preferred_max=75, maximum=140
+    minimum=12, target_max=75, preferred_min=12, preferred_max=75, maximum=100
 )
 
 
