@@ -164,6 +164,7 @@ class PostProcessor:
             raise StopRequestedException("작업 중지 요청됨")
 
         self._context_retry_done = False
+        self._food_retry_done = False
         # TargetPostGuard: 대상 글 일치 여부 확인 (Fail-Open 원천 차단)
         TargetPostGuard.verify(detail_page, post)
 
@@ -405,7 +406,7 @@ class PostProcessor:
                                             f"[GEMINI][CORRELATED] rid={request_id} post={post.key} nav={navigation_version}"
                                         )
                                         raw_result_text = (extension_result.text or "").strip()
-                                        if "NEED_MORE_CONTEXT" in raw_result_text:
+                                        if raw_result_text == "NEED_MORE_CONTEXT":
                                             if not getattr(self, "_context_retry_done", False):
                                                 setattr(self, "_context_retry_done", True)
                                                 logger.log("  ℹ️ [GEMINI] 'NEED_MORE_CONTEXT' 수신 -> 본문 1800자 재추출 및 음식 앵커 재분석 후 1회 retry 시도")
@@ -498,6 +499,14 @@ class PostProcessor:
                                                         if not getattr(self, "_food_retry_done", False):
                                                             self._food_retry_done = True
                                                             logger.log("⚠️ [FOOD_FOCUS] 음식 정보가 본문에 있음에도 장소 정보에만 반응하여 1회 재시도합니다 (food_focus_missed)", "WARNING")
+                                                            request_id = uuid.uuid4().hex
+                                                            ai_prompt = AIPromptBuilder.build(
+                                                                post.title, post.excerpt, style=self.ai_prompt_style,
+                                                                preset=preset, request_id=request_id,
+                                                                content_focus=content_focus,
+                                                                verified_anchors=food_anchors,
+                                                                secondary_anchors=food_focus_info.get("secondary_anchors", []),
+                                                            )
                                                             gemini_answer = None
                                                             continue
                                         else:

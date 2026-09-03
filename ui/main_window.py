@@ -1,5 +1,6 @@
 import os
 import sys
+import re
 import threading
 import webbrowser
 import tkinter as tk
@@ -951,7 +952,14 @@ class MainWindow(ctk.CTk):
         self.config_service.update_many(cfg_data)
         logger.log(f"[CONFIG] 공감수 제외 기준: {like_thresh}개 (source=data/config.json)")
 
+        # P0-10: 답글 생성 중 피드 시작 방지
+        if hasattr(self, "btn_batch_generate_replies") and str(self.btn_batch_generate_replies.cget("text")) == "생성 중...":
+            messagebox.showwarning("작업 진행 중", "내 글 답글 생성이 진행 중입니다. 답글 생성이 완료된 후 피드 작업을 시작해 주세요.")
+            return
+
         self.btn_start.configure(state="disabled")
+        if hasattr(self, "btn_batch_generate_replies"):
+            self.btn_batch_generate_replies.configure(state="disabled")
         self.btn_pause.configure(state="normal", text="⏸️ 일시정지", fg_color="#D97706", hover_color="#B45309")
         self.btn_skip_post.configure(state="normal")
         self.btn_stop.configure(state="normal")
@@ -1019,6 +1027,10 @@ class MainWindow(ctk.CTk):
         self.btn_stop.configure(state="disabled")
         self.pause_event.clear()
         self.current_controller = None
+        if hasattr(self, "btn_batch_generate_replies"):
+            eligible = [n for n in getattr(self, "_current_reply_nodes", []) if n.is_eligible_for_auto_reply]
+            if eligible and getattr(self, "_reply_collection_status", "") == "complete":
+                self.btn_batch_generate_replies.configure(state="normal")
 
     # ==================== [내 글 답글 도우미 핸들러] ====================
     def _load_my_recent_posts(self):
@@ -1031,44 +1043,9 @@ class MainWindow(ctk.CTk):
         for widget in self.reply_posts_scroll.winfo_children():
             widget.destroy()
 
+        def worker():
             from services.my_blog_recent_posts import MyBlogRecentPostService
-            import urllib.request
-            import urllib.parse
-            import json
-            import re
-
-            url = f"https://blog.naver.com/PostTitleListAsync.naver?blogId={blog_id}&viewdate=&currentPage=1&categoryNo=0&countPerPage=30"
-            raw_candidates = []
-            try:
-                req = urllib.request.Request(url, headers={"User-Agent": "Mozilla/5.0"})
-                with urllib.request.urlopen(req, timeout=10) as resp:
-                    raw_bytes = resp.read()
-                    raw_str = raw_bytes.decode('utf-8', errors='ignore')
-                    cleaned_str = re.sub(r"\\\'", "'", raw_str)
-                    data = json.loads(cleaned_str, strict=False)
-                    for item in data.get("postList", []):
-                        raw_candidates.append({
-                            "log_no": item.get("logNo"),
-                            "title": urllib.parse.unquote_plus(item.get("title", "")),
-                            "comment_count": int(item.get("commentCount", 0) or 0),
-                            "published_text": item.get("addDate", ""),
-                            "url": f"https://m.blog.naver.com/{blog_id}/{item.get('logNo')}"
-                        })
-            except Exception as e:
-                logger.log(f"[REPLY_UI] 글 목록 로드 오류: {e}", "ERROR")
-
-            ranked_posts, _ = MyBlogRecentPostService._rank_candidates(raw_candidates, max_count=25)
-            # Map back comment count
-            cmt_map = {c["log_no"]: c["comment_count"] for c in raw_candidates}
-            posts = []
-            for rp in ranked_posts:
-                posts.append({
-                    "log_no": rp["log_no"],
-                    "title": rp["title"],
-                    "comment_count": cmt_map.get(rp["log_no"], 0),
-                    "date": rp.get("published_text", ""),
-                    "url": rp["url"]
-                })
+            posts = MyBlogRecentPostService.fetch_recent_posts_api(blog_id, max_count=25)
 
             def update_ui():
                 self.btn_load_recent_posts.configure(state="normal", text="글 목록")
@@ -1097,6 +1074,10 @@ class MainWindow(ctk.CTk):
         threading.Thread(target=worker, daemon=True).start()
 
     def _on_select_reply_post(self, post_item: dict):
+        if self.worker_thread and self.worker_thread.is_alive():
+            messagebox.showwarning("작업 진행 중", "피드 작업이 실행 중입니다. 피드 작업을 중지하거나 완료한 후 답글 도우미를 사용해 주세요.")
+            return
+
         self._current_selected_reply_post = post_item
         blog_id = self.reply_blog_id_entry.get().strip()
         log_no = post_item.get("log_no")
@@ -1108,50 +1089,92 @@ class MainWindow(ctk.CTk):
         for widget in self.reply_threads_scroll.winfo_children():
             widget.destroy()
 
-        loading_lbl = ctk.CTkLabel(self.reply_threads_scroll, text="브라우저 세션을 통해 댓글 스레드를 전수 수집 중입니다...", font=ctk.CTkFont(size=11))
+        loading_lbl = ctk.CTkLabel(self.reply_threads_scroll, text="인증 세션을 통해 본문 및 댓글 스레드를 전수 수집 중입니다...", font=ctk.CTkFont(size=11))
         loading_lbl.pack(pady=20)
 
         def worker():
             from playwright.sync_api import sync_playwright
             from services.my_blog_comment_thread_collector import MyBlogCommentThreadCollector
+            from config import get_browser_user_data_dir
 
-            nodes = []
-            status = "failed"
-            disp_count = None
+            result = None
+            post_excerpt = ""
+            post_excerpt_expanded = ""
 
             try:
+                # P0-3: persistent user_data_dir 기반의 인증 세션 활용
+                user_data_dir = get_browser_user_data_dir()
                 with sync_playwright() as p:
-                    browser = p.chromium.launch(headless=True)
-                    page = browser.new_page(
+                    context = p.chromium.launch_persistent_context(
+                        user_data_dir=user_data_dir,
+                        headless=True,
                         viewport={"width": 430, "height": 900},
                         user_agent="Mozilla/5.0 (iPhone; CPU iPhone OS 16_5 like Mac OS X) AppleWebKit/605.1.15"
                     )
-                    nodes, status, disp_count = MyBlogCommentThreadCollector.collect_threads(
-                        page, blog_id, log_no, stop_event=self.stop_event
+                    page = context.new_page()
+
+                    # P0-8: 실제 글 본문 수집 (1500자 기본 / 3000자 확장)
+                    post_url = f"https://m.blog.naver.com/{blog_id}/{log_no}"
+                    page.goto(post_url, wait_until="domcontentloaded", timeout=15000)
+                    page.wait_for_timeout(1000)
+
+                    try:
+                        raw_body = page.evaluate("""() => {
+                            const ct = document.querySelector(".se-main-container, #postViewArea, .post_ct, .se_component_wrap");
+                            return ct ? ct.innerText : document.body.innerText;
+                        }""")
+                        clean_body = re.sub(r"\s+", " ", raw_body or "").strip()
+                        post_excerpt = clean_body[:1600]
+                        post_excerpt_expanded = clean_body[:3200]
+                    except Exception as e:
+                        logger.log(f"[REPLY_UI] 본문 추출 참고: {e}", "INFO")
+
+                    # 댓글 스레드 수집
+                    result = MyBlogCommentThreadCollector.collect_threads(
+                        page, blog_id, log_no,
+                        stop_event=self.stop_event,
+                        expected_comment_count=post_item.get("comment_count")
                     )
-                    browser.close()
+                    context.close()
             except Exception as e:
                 logger.log(f"[REPLY_UI] 댓글 스레드 수집 실패: {e}", "ERROR")
 
             def update_threads_ui():
-                self.btn_batch_generate_replies.configure(state="normal")
                 loading_lbl.destroy()
-                self._current_reply_nodes = nodes
+                if not result:
+                    self.reply_audit_status_lbl.configure(text="❌ 로드 실패", text_color="#EF4444")
+                    self.btn_batch_generate_replies.configure(state="disabled")
+                    return
+
+                self._current_reply_nodes = result.roots
+                self._current_reply_post_excerpt = post_excerpt
+                self._current_reply_post_excerpt_expanded = post_excerpt_expanded
+                self._reply_collection_status = result.status
                 self._reply_widget_map = {}
 
-                # Status label update
-                if status == "complete":
+                nodes = result.roots
+                eligible = [n for n in nodes if n.is_eligible_for_auto_reply]
+
+                # P0-7 & P1-6: 상태 판정 및 통계 상세 표시
+                if result.status == "complete":
                     self.reply_audit_status_lbl.configure(
-                        text=f"✅ 전체 로드 완료 ({len(nodes)}개)", text_color="#4ADE80"
+                        text=f"✅ 전체 로드 완료 (원댓글 {len(nodes)} / 전체 노드 {result.loaded_total} / 표시 댓글수 {result.expected_total or result.loaded_total}) | 미답글 {len(eligible)}개",
+                        text_color="#4ADE80"
                     )
-                elif status == "partial":
+                    # P0-7: COMPLETE일 때만 생성 버튼 활성화
+                    self.btn_batch_generate_replies.configure(state="normal" if eligible else "disabled")
+                elif result.status == "partial":
                     self.reply_audit_status_lbl.configure(
-                        text=f"⚠️ 일부만 로드됨 ({len(nodes)}/{disp_count or '?'})", text_color="#F87171"
+                        text=f"⚠️ 일부만 로드됨 ({result.loaded_total}/{result.expected_total or '?'}) - 전체 로드 필요",
+                        text_color="#F87171"
                     )
+                    self.btn_batch_generate_replies.configure(state="disabled")
                 else:
                     self.reply_audit_status_lbl.configure(
-                        text="❌ 로드 실패", text_color="#EF4444"
+                        text=f"❌ 로드 실패 ({result.failure_reason or '미확인'})",
+                        text_color="#EF4444"
                     )
+                    self.btn_batch_generate_replies.configure(state="disabled")
 
                 if not nodes:
                     ctk.CTkLabel(self.reply_threads_scroll, text="댓글이 없거나 불러오지 못했습니다.", font=ctk.CTkFont(size=11)).pack(pady=15)
@@ -1176,6 +1199,8 @@ class MainWindow(ctk.CTk):
                         tag_txt, tag_clr = "🗑️ 삭제됨", "#64748B"
                     elif node.existing_author_reply:
                         tag_txt, tag_clr = "✅ 답글완료", "#10B981"
+                    elif not node.identity_valid:
+                        tag_txt, tag_clr = "⚠️ 식별불가", "#64748B"
                     else:
                         tag_txt, tag_clr = "⚡ 미답글", "#F59E0B"
                     ctk.CTkLabel(top_r, text=tag_txt, font=ctk.CTkFont(size=10, weight="bold"), text_color=tag_clr).pack(side="right")
@@ -1190,7 +1215,7 @@ class MainWindow(ctk.CTk):
                         ex_frame.pack(fill="x", padx=6, pady=2)
                         ctk.CTkLabel(ex_frame, text=f"↳ 내 답글: {node.existing_author_reply}", font=ctk.CTkFont(size=10), text_color="#38BDF8", wraplength=460, justify="left").pack(padx=4, pady=2, anchor="w")
 
-                    # Reply editor area (only for eligible comments or editable)
+                    # Reply editor area
                     reply_box = ctk.CTkFrame(card, fg_color="transparent")
                     reply_box.pack(fill="x", padx=6, pady=(2, 4))
 
@@ -1198,12 +1223,15 @@ class MainWindow(ctk.CTk):
                     reply_entry.pack(side="left", fill="x", expand=True, padx=(0, 4))
                     self._reply_widget_map[node.comment_no] = reply_entry
 
-                    # Buttons
-                    ctk.CTkButton(
+                    # P1-6: 대상 노드가 아닌 경우 조작 버튼 disabled
+                    btn_state = "normal" if node.is_eligible_for_auto_reply else "disabled"
+
+                    btn_regen = ctk.CTkButton(
                         reply_box, text="🔄 재생성", width=55, height=22, font=ctk.CTkFont(size=10),
-                        fg_color="#3B82F6", hover_color="#2563EB",
+                        fg_color="#3B82F6", hover_color="#2563EB", state=btn_state,
                         command=lambda c_no=node.comment_no, nick=node.nickname, txt=node.text: self._regenerate_single_reply(c_no, nick, txt)
-                    ).pack(side="left", padx=2)
+                    )
+                    btn_regen.pack(side="left", padx=2)
 
                     ctk.CTkButton(
                         reply_box, text="📋 복사", width=45, height=22, font=ctk.CTkFont(size=10),
@@ -1211,17 +1239,23 @@ class MainWindow(ctk.CTk):
                         command=lambda ent=reply_entry: self._copy_reply_to_clipboard(ent)
                     ).pack(side="left", padx=2)
 
-                    ctk.CTkButton(
+                    btn_insert = ctk.CTkButton(
                         reply_box, text="✍️ 답글창", width=55, height=22, font=ctk.CTkFont(size=10),
-                        fg_color="#8B5CF6", hover_color="#7C3AED",
+                        fg_color="#8B5CF6", hover_color="#7C3AED", state=btn_state,
                         command=lambda c_no=node.comment_no, ent=reply_entry: self._insert_reply_to_browser(c_no, ent)
-                    ).pack(side="left", padx=2)
+                    )
+                    btn_insert.pack(side="left", padx=2)
 
             self.after(0, update_threads_ui)
 
         threading.Thread(target=worker, daemon=True).start()
 
     def _batch_generate_replies(self):
+        # P0-10: Feed Gemini와 Reply Gemini 상호 배제 (Mutex)
+        if self.worker_thread and self.worker_thread.is_alive():
+            messagebox.showwarning("작업 진행 중", "피드 작업이 실행 중입니다. 피드 작업을 중지하거나 완료한 후 답글을 생성해 주세요.")
+            return
+
         if not getattr(self, "_current_reply_nodes", None):
             messagebox.showinfo("알림", "로드된 댓글이 없습니다.")
             return
@@ -1233,8 +1267,11 @@ class MainWindow(ctk.CTk):
 
         p_info = getattr(self, "_current_selected_reply_post", {})
         post_title = p_info.get("title", "")
+        post_excerpt = getattr(self, "_current_reply_post_excerpt", "")
+        post_excerpt_expanded = getattr(self, "_current_reply_post_excerpt_expanded", "")
 
         self.btn_batch_generate_replies.configure(state="disabled", text="생성 중...")
+        self.btn_start.configure(state="disabled")  # Feed 시작 방지
 
         def worker():
             from services.my_blog_reply_service import MyBlogReplyService
@@ -1243,13 +1280,15 @@ class MainWindow(ctk.CTk):
             replies = MyBlogReplyService.generate_replies(
                 self.gemini_extension_bridge,
                 post_title=post_title,
-                post_excerpt="",
+                post_excerpt=post_excerpt,
                 target_comments=targets,
-                stop_event=self.stop_event
+                stop_event=self.stop_event,
+                expanded_post_excerpt=post_excerpt_expanded,
             )
 
             def apply_replies():
                 self.btn_batch_generate_replies.configure(state="normal", text="🤖 미답글 추천 생성")
+                self.btn_start.configure(state="normal")  # Mutex 해제
                 applied_count = 0
                 for c_no, res_data in replies.items():
                     widget = self._reply_widget_map.get(c_no)
@@ -1265,28 +1304,37 @@ class MainWindow(ctk.CTk):
         threading.Thread(target=worker, daemon=True).start()
 
     def _regenerate_single_reply(self, comment_no: str, nickname: str, text: str):
+        if self.worker_thread and self.worker_thread.is_alive():
+            messagebox.showwarning("작업 진행 중", "피드 작업이 실행 중입니다. 피드 작업을 중지하거나 완료한 후 재생성해 주세요.")
+            return
+
         widget = self._reply_widget_map.get(comment_no)
         if not widget:
             return
 
         p_info = getattr(self, "_current_selected_reply_post", {})
         post_title = p_info.get("title", "")
+        post_excerpt = getattr(self, "_current_reply_post_excerpt", "")
+        post_excerpt_expanded = getattr(self, "_current_reply_post_excerpt_expanded", "")
 
         widget.delete(0, "end")
         widget.insert(0, "생성 중...")
+        self.btn_start.configure(state="disabled")
 
         def worker():
             from services.my_blog_reply_service import MyBlogReplyService
             res = MyBlogReplyService.generate_replies(
                 self.gemini_extension_bridge,
                 post_title=post_title,
-                post_excerpt="",
+                post_excerpt=post_excerpt,
                 target_comments=[{"comment_no": comment_no, "nickname": nickname, "text": text}],
-                stop_event=self.stop_event
+                stop_event=self.stop_event,
+                expanded_post_excerpt=post_excerpt_expanded,
             )
             reply_item = res.get(comment_no, {})
 
             def update():
+                self.btn_start.configure(state="normal")
                 widget.delete(0, "end")
                 if reply_item.get("status") == "REPLY":
                     widget.insert(0, reply_item.get("reply", ""))
@@ -1314,12 +1362,13 @@ class MainWindow(ctk.CTk):
         self.clipboard_clear()
         self.clipboard_append(text)
 
-        # 활성 브라우저 컨트롤러가 있는 경우 exact-readback 주입 시도 (등록 버튼은 클릭하지 않음)
+        # P0-9: 활성 인증 페이지에서 exact-readback 주입 (등록 버튼은 클릭하지 않음)
         injected = False
-        if hasattr(self, "current_controller") and self.current_controller and getattr(self.current_controller, "browser_controller", None):
-            try:
-                page = self.current_controller.browser_controller.page
-                if page:
+        if hasattr(self, "current_controller") and self.current_controller:
+            sess = getattr(self.current_controller, "session", None)
+            page = getattr(sess, "page", None) if sess else None
+            if page:
+                try:
                     reply_btn = page.locator(f"li[data-info*='{comment_no}'] a.u_cbox_btn_reply, #comment_{comment_no} a.u_cbox_btn_reply, li[data-info*='{comment_no}'] button.u_cbox_btn_reply").first
                     if reply_btn.count() > 0 and reply_btn.is_visible():
                         reply_btn.click(timeout=1500)
@@ -1334,8 +1383,8 @@ class MainWindow(ctk.CTk):
                         if readback.strip() == text.strip():
                             injected = True
                             logger.log(f"[REPLY_UI] 답글창 exact-readback 주입 성공 (comment_no={comment_no}, len={len(text)})")
-            except Exception as e:
-                logger.log(f"[REPLY_UI] 브라우저 직접 주입 시도 중 참고(클립보드로 진행): {e}", "INFO")
+                except Exception as e:
+                    logger.log(f"[REPLY_UI] 브라우저 직접 주입 시도 중 참고(클립보드로 진행): {e}", "INFO")
 
         if injected:
             messagebox.showinfo(

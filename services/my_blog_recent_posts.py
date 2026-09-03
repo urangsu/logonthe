@@ -253,3 +253,60 @@ class MyBlogRecentPostService:
         except Exception as e:
             logger.log(f"❌ [AUDIT] 최근 글 목록 조회 실패: {e}", "ERROR")
             return []
+
+    @classmethod
+    def fetch_recent_posts_api(
+        cls,
+        blog_id: str,
+        max_count: int = 25,
+    ) -> List[Dict[str, Any]]:
+        """
+        네이버 공식 PostTitleListAsync.naver API를 사용하여 헤드리스 없이
+        최근 글 목록을 고속으로 가져오고 _rank_candidates로 정렬 및 검증한다.
+        """
+        import urllib.request
+        import urllib.parse
+        import json
+        import re
+
+        b_id = (blog_id or "").strip()
+        if not b_id:
+            return []
+
+        url = f"https://blog.naver.com/PostTitleListAsync.naver?blogId={b_id}&viewdate=&currentPage=1&categoryNo=0&countPerPage=30"
+        raw_candidates = []
+        cmt_map = {}
+        try:
+            req = urllib.request.Request(url, headers={"User-Agent": "Mozilla/5.0"})
+            with urllib.request.urlopen(req, timeout=10) as resp:
+                raw_bytes = resp.read()
+                raw_str = raw_bytes.decode('utf-8', errors='ignore')
+                cleaned_str = re.sub(r"\\\'", "'", raw_str)
+                data = json.loads(cleaned_str, strict=False)
+                for item in data.get("postList", []):
+                    log_no = str(item.get("logNo", "")).strip()
+                    if not log_no:
+                        continue
+                    cmt_count = int(item.get("commentCount", 0) or 0)
+                    cmt_map[log_no] = cmt_count
+                    raw_candidates.append({
+                        "log_no": log_no,
+                        "title": urllib.parse.unquote_plus(item.get("title", "")),
+                        "published_text": item.get("addDate", ""),
+                        "url": f"https://m.blog.naver.com/{b_id}/{log_no}",
+                    })
+        except Exception as e:
+            logger.log(f"[RECENT_POSTS_API] 최근 글 API 조회 실패: {e}", "ERROR")
+            return []
+
+        ranked_posts, _ = cls._rank_candidates(raw_candidates, max_count=max_count)
+        final_posts = []
+        for rp in ranked_posts:
+            final_posts.append({
+                "log_no": rp["log_no"],
+                "title": rp["title"],
+                "comment_count": cmt_map.get(rp["log_no"], 0),
+                "date": rp.get("published_text", ""),
+                "url": rp["url"]
+            })
+        return final_posts
