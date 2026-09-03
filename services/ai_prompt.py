@@ -19,6 +19,7 @@ class AIPromptBuilder:
         style: str = "warm_short",
         preset: PresetLike = CommunityRhythmPreset.COMMUNITY,
         request_id: Optional[str] = None,
+        content_focus: str = "GENERAL",
     ) -> str:
         req_id = request_id or uuid.uuid4().hex[:8]
         title_s = title.strip() if title else "(제목 없음)"
@@ -48,6 +49,16 @@ class AIPromptBuilder:
 치즈카츠 치즈 늘어나는 모습이 너무 맛있겠어요~
 노을 지는 타이밍이 진짜 예술이네요~"""
 
+        food_focus_block = ""
+        if content_focus in ("FOOD_RESTAURANT", "CAFE_DESSERT", "FOOD_PRODUCT"):
+            food_focus_block = """[음식 글 우선 규칙]
+이 글이 맛집/음식/디저트/먹거리 글이라면 주차, 위치, 인테리어, 매장 크기보다 본문에 실제로 나온 메뉴나 음식 자체를 우선해서 반응해.
+본문에 메뉴명, 디저트/음료명, 맛, 식감, 재료, 조리 상태, 음식 비주얼 정보가 하나라도 있으면 그중 한 가지를 댓글 핵심으로 골라.
+음식 정보가 본문에 있는데도 '주차 편하겠어요', '위치 좋네요', '매장 넓네요', '가까워서 좋네요'처럼 장소/편의 부가정보만 언급하지 마.
+맛이나 식감은 본문에서 직접 확인된 경우에만 말하고(예: 본문에 '국물이 진하다'가 있으면 언급 가능), 본문에 없는 맛/식감(예: '쫀득하다', '바삭하다', '고소하다')을 지어내지 마.
+본문에 맛/식감 설명이 없으면 메뉴명/제품명 자체나 재료 조합, 비주얼, 먹어보고 싶은 의향으로만 반응해.
+"""
+
         prompt = f"""자연스러운 20대 한국어 구어로 블로그 본문에서 직접 확인한 한 가지 세부 내용에만 짧게 반응해.
 
 [중요 안내]
@@ -62,6 +73,7 @@ class AIPromptBuilder:
 6. 헐, 와, 미쳤다, 맛도리 같은 강한 유행어는 댓글당 최대 1개만 써.
 7. {length_guide}
 
+{food_focus_block}
 {rhythm_guide}
 
 [절대 쓰지 마 — HARD BAN]

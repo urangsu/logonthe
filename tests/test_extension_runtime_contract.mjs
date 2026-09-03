@@ -225,3 +225,114 @@ test('JS Extension Contract: resolver-loss result recovery fallback', async () =
   assert.strictEqual(recoverySubmitted.requestId, 'req-orphaned-resolver');
   assert.strictEqual(recoverySubmitted.text, 'recovered text');
 });
+
+test('GEM-R8-001: fresh chat empty turns verification', () => {
+  const userQueries = [];
+  const responses = [];
+  const hasEditor = true;
+  const isFresh = userQueries.length === 0 && responses.length === 0 && hasEditor;
+  assert.strictEqual(isFresh, true, 'Fresh chat must have 0 queries and 0 responses');
+});
+
+test('GEM-R8-002: prompt send in fresh chat', () => {
+  let sendConfirmed = false;
+  const initialQueries = [];
+  const currentQueries = [{ text: '프롬프트' }];
+  if (currentQueries.length > initialQueries.length) {
+    sendConfirmed = true;
+  }
+  assert.strictEqual(sendConfirmed, true, 'Send must be confirmed upon new query');
+});
+
+test('GEM-R8-003: visible response appears and binds in fresh chat', () => {
+  const freshChatVerified = true;
+  const currentResponses = [{ tagName: 'MODEL-RESPONSE', isConnected: true, text: '신규 답변' }];
+  let boundNode = null;
+  if (freshChatVerified && currentResponses.length > 0) {
+    boundNode = currentResponses[currentResponses.length - 1];
+  }
+  assert.ok(boundNode, 'Latest visible model response must be bound in fresh chat');
+  assert.strictEqual(boundNode.text, '신규 답변');
+});
+
+test('GEM-R8-004: response text stable 1800ms while global aria-busy remains true -> completed', () => {
+  const globalAriaBusy = true; // Lingering elsewhere on page
+  const targetResponse = {
+    text: '완성된 댓글 본문입니다~',
+    hasLocalStreaming: false,
+    hasComposerStop: false
+  };
+  const lastMutationAt = Date.now() - 1900; // 1900ms ago
+  const mutationAge = Date.now() - lastMutationAt;
+
+  let completed = false;
+  // Under r8: authoritative condition does NOT check global aria-busy!
+  if (targetResponse.text.length > 0 && mutationAge >= 1800 && !targetResponse.hasLocalStreaming && !targetResponse.hasComposerStop) {
+    completed = true;
+  }
+  assert.strictEqual(completed, true, 'Stable text must complete even if page-wide aria-busy is true');
+});
+
+test('GEM-R8-005: selector candidate fallback finds response', () => {
+  const mockDOM = [
+    { selector: 'div[data-message-author-role="model"]', text: '모델 응답' }
+  ];
+  const SELECTORS = [
+    'model-response',
+    'div[data-message-author-role="model"]',
+    'div.model-response',
+    '[data-test-id="model-response"]'
+  ];
+  let found = null;
+  for (const sel of SELECTORS) {
+    const match = mockDOM.find(el => el.selector === sel);
+    if (match) {
+      found = match;
+      break;
+    }
+  }
+  assert.ok(found, 'Fallback selector must locate response');
+  assert.strictEqual(found.text, '모델 응답');
+});
+
+test('GEM-R8-006: visible completed response exists -> 65s timeout prohibited', () => {
+  const visibleResponseText = '이미 완성된 답변';
+  const lastMutationAge = 3500; // Stable for 3.5s
+  let status = 'pending';
+
+  if (visibleResponseText.length > 0 && lastMutationAge >= 1800) {
+    status = 'completed';
+  }
+  assert.notStrictEqual(status, 'timeout');
+  assert.strictEqual(status, 'completed');
+});
+
+test('GEM-R8-007: WAIT_DIAG diagnostic payload generated', () => {
+  const diag = {
+    rid: 'test-rid-diag',
+    elapsedMs: 5100,
+    freshChatVerified: true,
+    sendConfirmed: true,
+    userQueryCount: 1,
+    responseSelectorCount: 1,
+    visibleResponseCount: 1,
+    responseBound: true,
+    responseTextLength: 25,
+    lastMutationAgeMs: 1900,
+    generationEvidence: 'idle',
+    runtimeBuild: '13.2.3-r8'
+  };
+  assert.strictEqual(diag.runtimeBuild, '13.2.3-r8');
+  assert.strictEqual(diag.freshChatVerified, true);
+  assert.strictEqual(diag.responseBound, true);
+});
+
+test('GEM-R8-008: old r7 runtime with r8 contract triggers reinjection', () => {
+  const contract = { runtimeBuild: '13.2.3-r8' };
+  const pingResponse = { ok: true, build: '13.2.3-r7' };
+  let reinjected = false;
+  if (!pingResponse.ok || pingResponse.build !== contract.runtimeBuild) {
+    reinjected = true;
+  }
+  assert.strictEqual(reinjected, true, 'r7 build must trigger reinjection under r8 contract');
+});

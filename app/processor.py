@@ -326,12 +326,20 @@ class PostProcessor:
                     preset = self.config.get("comment_style_preset", "community")
                     suffix = DraftService.resolve_suffix(post.source, self.config)
 
+                    from services.food_comment_focus import FoodCommentFocus
+                    food_focus_info = FoodCommentFocus.analyze(post.title or "", post.excerpt or "")
+                    content_focus = food_focus_info["focus"]
+                    food_anchors = food_focus_info["food_anchors"]
+                    if content_focus != "GENERAL":
+                        logger.log(f"[FOOD_FOCUS] focus={content_focus} anchors={food_anchors[:3]}")
+
                     request_id = uuid.uuid4().hex
                     ai_prompt = ""
                     if self.ai_clipboard_enabled or self.gemini_web_enabled:
                         ai_prompt = AIPromptBuilder.build(
                             post.title, post.excerpt, style=self.ai_prompt_style,
                             preset=preset, request_id=request_id,
+                            content_focus=content_focus,
                         )
 
                     if self.state_mgr:
@@ -425,6 +433,29 @@ class PostProcessor:
                                                         f"✅ [GEMINI/EXTENSION] 품질 검사 통과: "
                                                         f"length={combined_gate.length} source=gemini"
                                                     )
+                                                    selected_anchor = "none"
+                                                    matched_food = [a for a in food_anchors if a in gemini_answer]
+                                                    if matched_food:
+                                                        selected_anchor = matched_food[0]
+                                                    elif food_focus_info.get("secondary_anchors"):
+                                                        matched_sec = [s for s in food_focus_info["secondary_anchors"] if s in gemini_answer]
+                                                        if matched_sec:
+                                                            selected_anchor = f"secondary:{matched_sec[0]}"
+
+                                                    if content_focus != "GENERAL":
+                                                        logger.log(f"[FOOD_COMMENT] focus={content_focus} selected_anchor={selected_anchor}")
+
+                                                    # Check if food anchors were available but Gemini only commented on secondary place anchors
+                                                    if (
+                                                        food_focus_info.get("has_food_details")
+                                                        and not matched_food
+                                                        and any(sec in gemini_answer for sec in ("주차", "위치", "인테리어", "매장", "공간", "접근성"))
+                                                    ):
+                                                        if not getattr(self, "_food_retry_done", False):
+                                                            self._food_retry_done = True
+                                                            logger.log("⚠️ [FOOD_FOCUS] 음식 정보가 본문에 있음에도 장소 정보에만 반응하여 1회 재시도합니다 (food_focus_missed)", "WARNING")
+                                                            gemini_answer = None
+                                                            continue
                                         else:
                                             failure = "empty_cleaned_response"
                                             logger.log("⚠️ [GEMINI/EXTENSION] 정제 후 응답 본문이 비어있음", "WARNING")

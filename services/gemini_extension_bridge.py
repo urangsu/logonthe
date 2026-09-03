@@ -575,6 +575,27 @@ class GeminiBridgeHTTPServer:
                 if self.path == "/v1/result":
                     accepted, reason = bridge.submit_result(GeminiResult.from_json(payload))
                     return self._json(200, {"ok": True, "accepted": accepted, "reason": reason})
+                if self.path == "/v1/diag":
+                    rid = str(payload.get("rid", ""))
+                    elapsed = payload.get("elapsedMs", 0)
+                    elapsed_s = f"{elapsed / 1000.0:.1f}s" if isinstance(elapsed, (int, float)) else str(elapsed)
+                    fresh = payload.get("freshChatVerified", False)
+                    confirmed = payload.get("sendConfirmed", False)
+                    u_count = payload.get("userQueryCount", 0)
+                    r_count = payload.get("responseSelectorCount", 0)
+                    v_count = payload.get("visibleResponseCount", 0)
+                    r_bound = payload.get("responseBound", False)
+                    t_len = payload.get("responseTextLength", 0)
+                    mut_age = payload.get("lastMutationAgeMs", 0)
+                    mut_age_s = f"{mut_age / 1000.0:.1f}s" if isinstance(mut_age, (int, float)) else str(mut_age)
+                    evidence = payload.get("generationEvidence", "")
+                    build = payload.get("runtimeBuild", "")
+                    logger.log(
+                        f"[GEMINI][WAIT_DIAG] rid={rid} elapsed={elapsed_s} freshChatVerified={fresh} "
+                        f"sendConfirmed={confirmed} userQueries={u_count} responseCount={r_count}/{v_count} "
+                        f"bound={r_bound} textLen={t_len} lastMutationAge={mut_age_s} evidence={evidence} build={build}"
+                    )
+                    return self._json(200, {"ok": True})
                 return self._json(404, {"error": "not_found"})
 
         try:

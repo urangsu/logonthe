@@ -171,7 +171,7 @@ class TestV133DiscoveryAndRuntime(unittest.TestCase):
         """runtime_contract.json과 manifest.json 및 Python loader 일치 검증"""
         contract = load_runtime_contract()
         self.assertEqual(contract.extension_version, "13.2.3")
-        self.assertEqual(contract.runtime_build, "13.2.3-r7")
+        self.assertEqual(contract.runtime_build, "13.2.3-r8")
         self.assertEqual(contract.protocol_version, 3)
         self.assertEqual(contract.bridge_schema_version, 2)
 

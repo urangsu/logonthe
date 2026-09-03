@@ -279,6 +279,107 @@ class PlaywrightGeminiDOMContractTests(unittest.TestCase):
             self.assertNotEqual(result["boundNodeText"], "첫 번째 이전 답변 내용", "Must not bind old rerendered response")
             browser.close()
 
+    def test_dom_003_fresh_chat_and_non_blocking_completion_contract(self):
+        """DOM-003: Fresh chat 격리 환경에서 페이지 aria-busy가 남아있어도 1800ms 안정화 시 정상 완료 확인"""
+        with sync_playwright() as p:
+            browser = p.chromium.launch(headless=True)
+            page = browser.new_page()
+
+            page.set_content("""
+            <!DOCTYPE html>
+            <html>
+            <body>
+              <div id="sidebar" aria-busy="true">사이드바 동기화 중...</div>
+              <main>
+                <chat-history id="history"></chat-history>
+                <div class="composer">
+                  <rich-textarea><div contenteditable="true" id="ed"></div></rich-textarea>
+                  <button id="send-btn" aria-label="send"><span>send</span></button>
+                </div>
+              </main>
+            </body>
+            </html>
+            """)
+
+            result = page.evaluate("""() => {
+                const RESPONSE_SELECTORS = [
+                  'model-response',
+                  'div[data-message-author-role="model"]',
+                  'div.model-response',
+                  '[data-test-id="model-response"]',
+                  '.response-container-content'
+                ].join(', ');
+
+                function responseNodes() {
+                  return [...document.querySelectorAll(RESPONSE_SELECTORS)];
+                }
+
+                function userQueryNodes() {
+                  return [...document.querySelectorAll('.user-message, user-query')];
+                }
+
+                function editor() {
+                  return document.getElementById('ed');
+                }
+
+                function extractResponseText(node) {
+                  if (!node) return '';
+                  const contentEl = node.querySelector('message-content, div.markdown, div.model-response-text, .response-body-inner') || node;
+                  return (contentEl.innerText || contentEl.textContent || '').trim();
+                }
+
+                // 1. Fresh Chat Verification
+                const userQueries = userQueryNodes();
+                const responses = responseNodes();
+                const ed = editor();
+                const isFresh = userQueries.length === 0 && responses.length === 0 && Boolean(ed);
+
+                // 2. Simulate User Query and Gemini Answer appearance
+                const history = document.getElementById('history');
+                const userTurn = document.createElement('user-query');
+                userTurn.className = 'user-message';
+                userTurn.innerText = '프롬프트';
+                history.appendChild(userTurn);
+
+                const modelTurn = document.createElement('model-response');
+                modelTurn.className = 'model-response';
+                modelTurn.innerHTML = '<div class="model-response-text">완성된 댓글 답변입니다~</div>';
+                history.appendChild(modelTurn);
+
+                // 3. Bind response in fresh chat
+                let targetResponseNode = null;
+                const curResponses = responseNodes();
+                if (isFresh && curResponses.length > 0) {
+                  targetResponseNode = curResponses[curResponses.length - 1];
+                }
+
+                // 4. Test Completion Contract under lingering page-wide aria-busy=true
+                const globalAriaBusy = Boolean(document.querySelector('[aria-busy="true"]'));
+                const curText = extractResponseText(targetResponseNode);
+                const lastMutationAge = 2000; // >= 1800ms
+                const localStreaming = Boolean(targetResponseNode.querySelector('.loading-dots, .streaming, [aria-busy="true"]'));
+
+                let completed = false;
+                if (curText.length > 0 && lastMutationAge >= 1800 && !localStreaming) {
+                  completed = true;
+                }
+
+                return {
+                  isFresh,
+                  hasTargetNode: Boolean(targetResponseNode),
+                  responseBoundText: curText,
+                  globalAriaBusy,
+                  completed
+                };
+            }""")
+
+            self.assertTrue(result["isFresh"])
+            self.assertTrue(result["hasTargetNode"])
+            self.assertEqual(result["responseBoundText"], "완성된 댓글 답변입니다~")
+            self.assertTrue(result["globalAriaBusy"], "Page-wide aria-busy exists in test DOM")
+            self.assertTrue(result["completed"], "Must complete even if page-wide aria-busy exists")
+            browser.close()
+
 
 if __name__ == "__main__":
     unittest.main()

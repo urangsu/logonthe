@@ -167,7 +167,7 @@ async function startHeartbeatLoop() {
         buildId: contract.runtimeBuild,
         protocolVersion: contract.protocolVersion,
         bridgeSchemaVersion: contract.bridgeSchemaVersion,
-        consumerId: 'background-r7',
+        consumerId: 'background-r8',
         lastRuntimePingAt: now,
         busyRequestId: activeRuntime?.ping.busyRequestId || null,
         busySince: activeRuntime?.ping.busySince || null,
@@ -178,6 +178,79 @@ async function startHeartbeatLoop() {
     } catch (_) {}
     await new Promise(r => setTimeout(r, 10000));
   }
+}
+
+async function ensureFreshGeminiConversation(tabId) {
+  if (typeof tabId !== 'number') return { ok: false, error: 'missing_tab_id' };
+
+  // 1. Check if the tab already has an empty fresh conversation
+  for (let attempt = 0; attempt < 2; attempt++) {
+    const checkRes = await new Promise(resolve => {
+      try {
+        chrome.tabs.sendMessage(tabId, { type: 'NFA_CHECK_FRESH_CHAT' }, res => {
+          if (chrome.runtime.lastError || !res?.ok) resolve(null);
+          else resolve(res);
+        });
+      } catch (_) {
+        resolve(null);
+      }
+    });
+
+    if (checkRes && checkRes.fresh) {
+      console.log('[GEMINI][BACKGROUND] FRESH_CHAT_READY (verified empty)');
+      return { ok: true, reason: 'already_fresh' };
+    }
+
+    if (attempt === 0) {
+      // Soft reset: click New Chat button inside page
+      await new Promise(resolve => {
+        try {
+          chrome.tabs.sendMessage(tabId, { type: 'NFA_RESET_FRESH_CHAT' }, () => resolve());
+        } catch (_) {
+          resolve();
+        }
+      });
+      await new Promise(r => setTimeout(r, 1000));
+    }
+  }
+
+  // 2. Hard reset: navigate tab directly to https://gemini.google.com/app
+  console.log('[GEMINI][BACKGROUND] Navigating tab to fresh https://gemini.google.com/app');
+  try {
+    await chrome.tabs.update(tabId, { url: 'https://gemini.google.com/app' });
+  } catch (navErr) {
+    return { ok: false, error: String(navErr?.message || navErr) };
+  }
+
+  // Wait for tab navigation and verify empty fresh state
+  const deadline = Date.now() + 15000;
+  while (Date.now() < deadline) {
+    await new Promise(r => setTimeout(r, 1000));
+    const tab = await chrome.tabs.get(tabId).catch(() => null);
+    if (!tab || tab.status !== 'complete') continue;
+
+    await ensureGeminiRuntime(tabId);
+    const ping = await pingRuntime(tabId);
+    if (!ping.ok || ping.status !== 'ready') continue;
+
+    const checkRes = await new Promise(resolve => {
+      try {
+        chrome.tabs.sendMessage(tabId, { type: 'NFA_CHECK_FRESH_CHAT' }, res => {
+          if (chrome.runtime.lastError || !res?.ok) resolve(null);
+          else resolve(res);
+        });
+      } catch (_) {
+        resolve(null);
+      }
+    });
+
+    if (checkRes && checkRes.fresh) {
+      console.log('[GEMINI][BACKGROUND] FRESH_CHAT_READY (navigated and verified)');
+      return { ok: true, reason: 'navigated_fresh' };
+    }
+  }
+
+  return { ok: false, error: 'fresh_chat_not_verified' };
 }
 
 const inFlightCommandResolvers = new Map();
@@ -215,6 +288,21 @@ async function runCommandCycle() {
       return;
     }
   } catch (_) {
+    return;
+  }
+
+  // 3. Verify and prepare fresh Gemini conversation isolation
+  const freshCheck = await ensureFreshGeminiConversation(activeRuntime.tabId);
+  if (!freshCheck.ok) {
+    console.warn('[GEMINI][BACKGROUND] fresh chat verification failed:', freshCheck.error);
+    await bridgeFetch('/v1/result', 'POST', {
+      requestId: command.requestId,
+      postKey: command.postKey,
+      navigationVersion: command.navigationVersion,
+      status: 'dom_unsupported',
+      text: '',
+      error: 'fresh_chat_not_verified'
+    }, 10000).catch(() => {});
     return;
   }
 
@@ -384,6 +472,14 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
           error: message.result.error || ''
         }, 10000).catch(err => console.debug('[GEMINI][BACKGROUND] recovery submit fail:', err));
       }
+    }
+    sendResponse({ ok: true });
+    return true;
+  }
+
+  if (message?.type === 'NFA_WAIT_DIAG') {
+    if (message.diag) {
+      bridgeFetch('/v1/diag', 'POST', message.diag, 4000).catch(() => {});
     }
     sendResponse({ ok: true });
     return true;

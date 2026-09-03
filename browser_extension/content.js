@@ -19,10 +19,16 @@
     'div[contenteditable="true"]',
     'textarea'
   ];
-  const RESPONSE_SELECTORS = 'model-response';
+  const RESPONSE_SELECTORS = [
+    'model-response',
+    'div[data-message-author-role="model"]',
+    'div.model-response',
+    '[data-test-id="model-response"]',
+    '.response-container-content'
+  ].join(', ');
   let runtimeContract = {
     extensionVersion: '13.2.3',
-    runtimeBuild: '13.2.3-r7',
+    runtimeBuild: '13.2.3-r8',
     protocolVersion: 3,
     bridgeSchemaVersion: 2
   };
@@ -378,6 +384,14 @@
     return Boolean(document.querySelector(busySelector));
   }
 
+  function detectGenerationEvidence(node) {
+    if (!node) return 'none';
+    if (node.querySelector('.loading-dots, .streaming, [aria-busy="true"]')) return 'local_streaming';
+    if (findComposer(editor())?.querySelector('[aria-label*="중지"], [aria-label*="Stop"]')) return 'composer_stop_button';
+    if (document.querySelector('[aria-busy="true"]')) return 'page_aria_busy';
+    return 'idle';
+  }
+
   async function waitForSendReady(input, timeoutMs = 2500) {
     const deadline = Date.now() + timeoutMs;
     while (Date.now() < deadline) {
@@ -422,6 +436,11 @@
     const baselineUserQueryFingerprints = new Set(
       initialUserQueries.map(q => canonicalPromptText(extractUserQueryText(q))).filter(Boolean)
     );
+
+    const freshChatVerified = (initialResponseList.length === 0 && initialUserQueries.length === 0);
+    if (freshChatVerified) {
+      console.log('[GEMINI][FRESH_CHAT_READY]', true);
+    }
 
     let target = editor();
     if (!target) {
@@ -535,6 +554,17 @@
     }
 
     function findTurnResponseCandidate() {
+      const currentResponses = responseNodes();
+
+      if (freshChatVerified) {
+        // In a verified fresh chat, baseline response count was 0.
+        // Once send is confirmed, any visible response node with text or latest visible node is authoritative!
+        if (currentResponses.length > 0) {
+          return currentResponses[currentResponses.length - 1];
+        }
+        return null;
+      }
+
       if (!currentUserTurn || !currentUserTurn.isConnected) {
         const newQuery = findNewUserQuery();
         if (newQuery) {
@@ -542,8 +572,6 @@
           console.log('[GEMINI][USER_TURN_BOUND]', JSON.stringify({ rid: command.requestId }));
         }
       }
-
-      const currentResponses = responseNodes();
 
       // Strategy 1: Find first response strictly following currentUserTurn in document order
       if (currentUserTurn && currentUserTurn.isConnected) {
@@ -637,8 +665,52 @@
     }
 
     const deadline = Math.min(execState.deadlineAt, Date.now() + 65000);
-    let stableSince = null;
+    let lastMutationAt = Date.now();
     let previous = '';
+
+    function checkResponseRecovery() {
+      if (freshChatVerified && (Date.now() - execState.startedAt >= 5000) && confirmed && !targetResponseNode) {
+        const visibleResponses = responseNodes().filter(n => extractResponseText(n).length > 0);
+        if (visibleResponses.length > 0) {
+          const candidate = visibleResponses[visibleResponses.length - 1];
+          bindResponseNode(candidate, 'fresh_chat_latest_visible');
+          console.log('[GEMINI][RESPONSE_RECOVERY_BIND]', JSON.stringify({
+            rid: command.requestId,
+            responseCount: visibleResponses.length,
+            textLength: extractResponseText(candidate).length,
+            reason: 'fresh_chat_latest_visible'
+          }));
+          return candidate;
+        }
+      }
+      return null;
+    }
+
+    let lastDiagReportAt = 0;
+    function reportWaitDiag(reason = 'periodic') {
+      const now = Date.now();
+      if (reason === 'periodic' && now - lastDiagReportAt < 4800) return;
+      lastDiagReportAt = now;
+      const curText = targetResponseNode ? extractResponseText(targetResponseNode) : '';
+      const diag = {
+        rid: command.requestId,
+        elapsedMs: now - execState.startedAt,
+        freshChatVerified: Boolean(freshChatVerified),
+        sendConfirmed: Boolean(confirmed),
+        userQueryCount: userQueryNodes().length,
+        responseSelectorCount: document.querySelectorAll(RESPONSE_SELECTORS).length,
+        visibleResponseCount: responseNodes().length,
+        responseBound: Boolean(targetResponseNode),
+        responseTextLength: curText.length,
+        lastMutationAgeMs: targetResponseNode ? (now - lastMutationAt) : 0,
+        generationEvidence: detectGenerationEvidence(targetResponseNode),
+        runtimeBuild: runtimeContract.runtimeBuild
+      };
+      console.log('[GEMINI][WAIT_DIAG]', JSON.stringify(diag));
+      try {
+        chrome.runtime.sendMessage({ type: 'NFA_WAIT_DIAG', diag });
+      } catch (_) {}
+    }
 
     return new Promise((resolve) => {
       let resolved = false;
@@ -661,10 +733,15 @@
       const checkOutput = () => {
         if (isStopped) return finish({ status: 'failed', text: '', error: 'runtime_stopped' });
         if (execState.cancelled) return finish({ status: 'failed', text: '', error: 'cancelled' });
-        if (Date.now() > deadline) return finish({ status: 'timeout', text: '', error: 'command_deadline_exceeded' });
+        if (Date.now() > deadline) {
+          reportWaitDiag('timeout');
+          return finish({ status: 'timeout', text: '', error: 'command_deadline_exceeded' });
+        }
+
+        reportWaitDiag('periodic');
 
         if (!targetResponseNode || !targetResponseNode.isConnected) {
-          const candidate = findTurnResponseCandidate();
+          const candidate = findTurnResponseCandidate() || checkResponseRecovery();
           if (candidate) {
             bindResponseNode(candidate, 'observer_phase');
           }
@@ -684,9 +761,20 @@
 
         if (current !== previous) {
           previous = current;
-          stableSince = Date.now();
-        } else if (stableSince && Date.now() - stableSince >= 1200 && !generationActive()) {
-          return finish({ status: 'completed', text: current, error: '' });
+          lastMutationAt = Date.now();
+        } else if (current.length > 0) {
+          const mutationAge = Date.now() - lastMutationAt;
+          const localStreaming = Boolean(targetResponseNode.querySelector('.loading-dots, .streaming, [aria-busy="true"]'));
+          const composerStop = Boolean(findComposer(editor())?.querySelector('[aria-label*="중지"], [aria-label*="Stop"]'));
+
+          // Authoritative completion: text is stable for >= 1800ms and no local streaming / composer stop button
+          if (mutationAge >= 1800 && !localStreaming && !composerStop) {
+            return finish({ status: 'completed', text: current, error: '' });
+          }
+          // Fallback completion: text has been stable for >= 2500ms regardless of any external indicators
+          if (mutationAge >= 2500) {
+            return finish({ status: 'completed', text: current, error: '' });
+          }
         }
       };
 
@@ -764,6 +852,42 @@
     if (message.type === 'NFA_CANCEL_COMMAND') {
       const cancelled = cancelExecution(message.requestId, 'cancelled_by_bridge');
       sendResponse({ ok: true, cancelled, status: pageStatus() });
+      return true;
+    }
+
+    if (message.type === 'NFA_CHECK_FRESH_CHAT') {
+      const userQueries = userQueryNodes();
+      const responses = responseNodes();
+      const ed = editor();
+      const isFresh = userQueries.length === 0 && responses.length === 0 && Boolean(ed);
+      sendResponse({
+        ok: true,
+        fresh: isFresh,
+        userQueryCount: userQueries.length,
+        responseCount: responses.length,
+        composerAvailable: Boolean(ed)
+      });
+      return true;
+    }
+
+    if (message.type === 'NFA_RESET_FRESH_CHAT') {
+      const newChatSelectors = [
+        'a[href="/app"]',
+        'button[aria-label*="새 대화"]',
+        'button[aria-label*="New chat"]',
+        '[data-test-id="new-chat-button"]',
+        '.new-chat-button'
+      ];
+      let clicked = false;
+      for (const sel of newChatSelectors) {
+        const btn = document.querySelector(sel);
+        if (btn && visible(btn)) {
+          btn.click();
+          clicked = true;
+          break;
+        }
+      }
+      sendResponse({ ok: true, clicked });
       return true;
     }
 
