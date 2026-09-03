@@ -253,8 +253,8 @@ class BrowserSession:
         self,
         headless: bool = False,
         user_data_dir: str = USER_DATA_DIR,
-        viewport_width: int = 430,
-        viewport_height: int = 900,
+        viewport_width: int = 414,
+        viewport_height: int = 680,
         cdp_url: Optional[str] = None
     ):
         self.headless = headless
@@ -310,7 +310,9 @@ class BrowserSession:
                 args=[
                     "--disable-infobars",
                     "--no-first-run",
-                    "--no-default-browser-check"
+                    "--no-default-browser-check",
+                    "--window-size=438,760",
+                    "--window-position=960,30"
                 ]
             )
 

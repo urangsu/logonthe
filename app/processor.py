@@ -284,6 +284,12 @@ class PostProcessor:
                 else:
                     logger.log(f"  ⚠️ [COMMENT] 댓글 레이어 준비 타임아웃 ({open_reason}).", "WARNING")
                     result.comment_result = CommentProcessResult(status=CommentSubmitState.FAILED, error=open_reason)
+                if self.config.get("skip_on_comment_failure", True):
+                    logger.log(f"  ⏭️ [COMMENT] 댓글창 열기 불가({open_reason}) -> 다음 글로 건너뜁니다.")
+                    result.comment_result.status = CommentSubmitState.SKIPPED
+                    if self.state_mgr:
+                        self.state_mgr.update(new_state=FeedState.SKIPPING, inc_skip=True)
+                    return result
             else:
                 from services.user_learning_service import UserLearningService
 
@@ -471,6 +477,17 @@ class PostProcessor:
                                     break
                                 if self.stop_event and self.stop_event.is_set():
                                     raise StopRequestedException("사용자 작업 중지")
+
+                                if self.config.get("skip_on_comment_failure", True):
+                                    logger.log(f"  ⏭️ [COMMENT] Gemini 댓글 생성 실패({failure}) -> 설정에 따라 다음 글로 자동 건너뜁니다.")
+                                    result.comment_result = CommentProcessResult(
+                                        status=CommentSubmitState.SKIPPED,
+                                        error=f"gemini_failed:{failure}",
+                                    )
+                                    if self.state_mgr:
+                                        self.state_mgr.update(new_state=FeedState.SKIPPING, inc_skip=True)
+                                    return result
+
                                 if self.pause_event is not None:
                                     self.pause_event.set()
                                 else:
@@ -581,6 +598,11 @@ class PostProcessor:
                     if not pre_inject_gate.valid:
                         logger.log(f"  ❌ [COMMENT] 에디터 주입 전 품질 게이트 실패: [{pre_inject_gate.code}] {pre_inject_gate.reason}", "ERROR")
                         result.comment_result = CommentProcessResult(status=CommentSubmitState.FAILED, error=pre_inject_gate.code)
+                        if self.config.get("skip_on_comment_failure", True):
+                            logger.log("  ⏭️ [COMMENT] 초안 품질 게이트 실패 -> 다음 글로 건너뜁니다.")
+                            result.comment_result.status = CommentSubmitState.SKIPPED
+                            if self.state_mgr:
+                                self.state_mgr.update(new_state=FeedState.SKIPPING, inc_skip=True)
                         return result
 
                     # 에디터에 주입 및 Read-back 검증
@@ -588,6 +610,12 @@ class PostProcessor:
                     if not set_ok:
                         logger.log("  ❌ [COMMENT] 에디터 초안 주입 및 Read-back 검증 실패", "ERROR")
                         result.comment_result = CommentProcessResult(status=CommentSubmitState.FAILED, error="editor_set_text_failed")
+                        if self.config.get("skip_on_comment_failure", True):
+                            logger.log("  ⏭️ [COMMENT] 에디터 주입 실패 -> 다음 글로 건너뜁니다.")
+                            result.comment_result.status = CommentSubmitState.SKIPPED
+                            if self.state_mgr:
+                                self.state_mgr.update(new_state=FeedState.SKIPPING, inc_skip=True)
+                        return result
                     else:
                         logger.log(f"[COMMENT][DRAFT_READY] source={draft_source_label} chars={len(draft_text)}")
                         # 비밀댓글 설정

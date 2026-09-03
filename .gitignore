@@ -7,6 +7,7 @@ __pycache__/
 env/
 venv/
 ENV/
+.venv*/
 
 # Chrome / User Profile (Sensitive Login Sessions & Cookies)
 config.json

@@ -23,7 +23,7 @@ DEFAULT_CONFIG_V2: Dict[str, Any] = {
     "fixed_suffix": "",
     "recommendation_suffix_enabled": False,
     "recommendation_suffix": "",
-    "comment_style_preset": "community",
+    "comment_style_preset": "thoughtful",
     "secret_comment": False,
     "browser_mode": "persistent",
     "direct_urls": [],
@@ -68,6 +68,7 @@ DEFAULT_CONFIG_V2: Dict[str, Any] = {
     "allow_local_draft_on_gemini_failure": False,
     "gemini_mode": "new",
     "gemini_custom_url": "https://gemini.google.com/app/0a1545681329aa0a?hl=ko",
+    "skip_on_comment_failure": True,
 
     # User Learning & Engagement Audit (v7.0)
     "user_learning_record_enabled": True,

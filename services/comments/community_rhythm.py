@@ -17,6 +17,7 @@ from typing import ClassVar, Dict, Optional, Tuple, Union
 class CommunityRhythmPreset(str, Enum):
     COMMUNITY = "community"
     CALM = "calm"
+    THOUGHTFUL = "thoughtful"
 
 
 @dataclass(frozen=True)
@@ -69,19 +70,22 @@ class CommentLengthPolicy:
 
 COMMENT_POLICIES: Dict[Union[CommunityRhythmPreset, str], CommentLengthPolicy] = {
     CommunityRhythmPreset.COMMUNITY: CommentLengthPolicy(
-        minimum=16, target_max=48, preferred_min=18, preferred_max=45, maximum=100
+        minimum=16, target_max=75, preferred_min=20, preferred_max=65, maximum=140
     ),
     CommunityRhythmPreset.CALM: CommentLengthPolicy(
-        minimum=20, target_max=65, preferred_min=20, preferred_max=65, maximum=100
+        minimum=20, target_max=85, preferred_min=25, preferred_max=80, maximum=140
+    ),
+    CommunityRhythmPreset.THOUGHTFUL: CommentLengthPolicy(
+        minimum=25, target_max=115, preferred_min=35, preferred_max=95, maximum=160
     ),
 }
 
 # A profile used only by the compatibility adapter in PositiveSafetyValidator.
 # It keeps that public API's historic 12-character and period behavior while
 # retaining the old validator's safety checks. New final text must use one of
-# the two public community rhythm presets above.
+# the public community rhythm presets above.
 LEGACY_COMMENT_POLICY = CommentLengthPolicy(
-    minimum=12, target_max=75, preferred_min=12, preferred_max=75, maximum=100
+    minimum=12, target_max=75, preferred_min=12, preferred_max=75, maximum=140
 )
 
 
@@ -136,7 +140,7 @@ PresetLike = Union[CommunityRhythmPreset, str]
 class FinalQualityGate:
     """One policy gate for every final comment text source."""
 
-    HARD_MAX_LENGTH: ClassVar[int] = 100
+    HARD_MAX_LENGTH: ClassVar[int] = 160
     MAX_LENGTH: ClassVar[int] = HARD_MAX_LENGTH
     LEGACY_PRESET: ClassVar[str] = "legacy"
     FINAL_TEXT_SOURCES: ClassVar[Tuple[str, ...]] = (
@@ -389,15 +393,18 @@ class FinalQualityGate:
                 tone_score=round((policy.score(length) * 0.8) + (0.2 if normalized.endswith("~") else 0.1), 2),
             )
 
+        is_thoughtful = (effective_preset == CommunityRhythmPreset.THOUGHTFUL.value)
+        effective_allow_period = allow_period or is_thoughtful
         if not isinstance(text, str):
             return result(False, "invalid_text", "comment text must be a string")
-        if not allow_period and not legacy and ("." in normalized or "。" in normalized):
+        if not effective_allow_period and not legacy and ("." in normalized or "。" in normalized):
             matched = "." if "." in normalized else "。"
             return result(False, "forbidden_period", f"period is forbidden: {matched}", matched=matched)
-        if not legacy and normalized.count("~") > 1:
-            return result(False, "excessive_tilde", "at most one tilde is allowed", matched="~")
+        max_tilde_allowed = 2 if is_thoughtful else 1
+        if not legacy and normalized.count("~") > max_tilde_allowed:
+            return result(False, "excessive_tilde", f"at most {max_tilde_allowed} tildes allowed", matched="~")
         strong_slang = re.findall(r"(?:^|\s)(헐|와|세상에|대박)(?=\s)|미쳤|맛도리", normalized)
-        if not legacy and len(strong_slang) > 1:
+        if not legacy and len(strong_slang) > (2 if is_thoughtful else 1):
             return result(False, "excessive_slang", "at most one strong slang expression is allowed")
         if semantic_compatibility is False:
             return result(False, "semantic_mismatch", "reaction is incompatible with its anchor")

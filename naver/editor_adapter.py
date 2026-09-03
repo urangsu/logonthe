@@ -35,6 +35,10 @@ class CommentEditorAdapter:
             if not context:
                 return False
             context["editor"].focus()
+            try:
+                context["editor"].scroll_into_view_if_needed(timeout=1000)
+            except Exception:
+                pass
             logger.log(f"[NAVER][COMMENT_EDITOR_FOUND] frame={context['frame_name'] or 'main'} selector={context['selector']} frameUrl={context['frame_url']}")
             logger.log("[NAVER][EDITOR_FOCUS_OK]")
             return True

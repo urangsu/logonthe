@@ -172,6 +172,10 @@ class CommentInteractionService:
 
             # 3. 에디터 준비 완료 확인
             if CommentEditorAdapter.is_visible(page):
+                try:
+                    page.evaluate("() => { const el = document.querySelector('.u_cbox_write_box, .u_cbox_area, .u_cbox'); if (el) el.scrollIntoView({ behavior: 'smooth', block: 'center' }); }")
+                except Exception:
+                    pass
                 return True, "ready"
 
             # 4. write_box 클릭 시도

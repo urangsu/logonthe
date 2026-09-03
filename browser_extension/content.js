@@ -24,7 +24,9 @@
     'div[data-message-author-role="model"]',
     'div.model-response',
     '[data-test-id="model-response"]',
-    '.response-container-content'
+    '.response-container-content',
+    'message-content',
+    '.model-response-text'
   ].join(', ');
   let runtimeContract = {
     extensionVersion: '13.2.3',
@@ -376,11 +378,11 @@
   }
 
   function userQueryNodes() {
-    return [...document.querySelectorAll('.user-message, user-query, [data-test-id="user-query"], .query-text, .user-query-container')].filter(visible);
+    return [...document.querySelectorAll('.user-message, user-query, [data-test-id="user-query"], .query-text, .user-query-container, div[data-message-author-role="user"], .user-query-content')].filter(visible);
   }
 
   function generationActive() {
-    const busySelector = '[aria-busy="true"], [data-is-generating="true"], .loading-dots, .streaming, [aria-label*="중지"], [aria-label*="Stop"]';
+    const busySelector = '[aria-busy="true"], [data-is-generating="true"], .loading-dots, .streaming, [aria-label*="중지"], [aria-label*="Stop"], [aria-label*="생성 중지"]';
     return Boolean(document.querySelector(busySelector));
   }
 
@@ -604,9 +606,9 @@
       return null;
     }
 
-    // Verify send confirmation for up to 5 seconds
+    // Verify send confirmation for up to 12 seconds
     let confirmed = false;
-    const checkDeadline = Date.now() + 5000;
+    const checkDeadline = Date.now() + 12000;
 
     while (Date.now() < checkDeadline) {
       if (isStopped || execState.cancelled) return { status: 'failed', text: '', error: 'cancelled' };
@@ -624,18 +626,19 @@
       await new Promise(r => setTimeout(r, 150));
     }
 
-    // 2nd Send Attempt if not confirmed after 2.5s
+    // 2nd Send Attempt if not confirmed after 12s (wait another 8s)
     if (!confirmed) {
       if (!target || !target.isConnected) target = editor();
       const retryCtrl = findSendControl(target);
       if (retryCtrl?.button && !retryCtrl.button.disabled && retryCtrl.button.getAttribute('aria-disabled') !== 'true') {
         selectedBtn = retryCtrl.button;
         retryCtrl.button.click();
-      } else if (target && target.isConnected) {
+      }
+      if (target && target.isConnected) {
         target.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', code: 'Enter', keyCode: 13, which: 13, bubbles: true }));
       }
 
-      const retryDeadline = Date.now() + 2500;
+      const retryDeadline = Date.now() + 8000;
       while (Date.now() < retryDeadline) {
         if (isStopped || execState.cancelled) return { status: 'failed', text: '', error: 'cancelled' };
 
