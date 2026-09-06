@@ -117,10 +117,10 @@ class FeedController:
         source_type = FeedSourceType(source_type_str)
         max_items = int(self.config.get("max_feed_items", 20))
         like_enabled = bool(self.config.get("like_enabled", True))
-        comment_enabled = bool(self.config.get("comment_enabled", True))
+        auto_comment_submit_enabled = bool(self.config.get("auto_comment_submit_enabled", False))
+        comment_enabled = bool(self.config.get("comment_enabled", True)) or auto_comment_submit_enabled
         comment_template = str(self.config.get("comment_template", ""))
         secret_comment = bool(self.config.get("secret_comment", False))
-        auto_comment_submit_enabled = bool(self.config.get("auto_comment_submit_enabled", False))
         auto_comment_chance = float(self.config.get("auto_comment_chance", 0.60))
         auto_comment_delay_min = float(self.config.get("auto_comment_delay_min", 3.0))
         auto_comment_delay_max = float(self.config.get("auto_comment_delay_max", 6.0))

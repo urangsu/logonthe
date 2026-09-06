@@ -220,8 +220,12 @@ class MainWindow(ctk.CTk):
         self.secret_comment_var = ctk.BooleanVar(value=self.config_service.get("secret_comment", False))
         ctk.CTkCheckBox(opt_frame, text="비밀댓글", font=ctk.CTkFont(size=11), variable=self.secret_comment_var).pack(side="left", padx=4)
 
+        def _on_auto_comment_toggle():
+            if self.auto_comment_submit_var.get():
+                self.comment_enabled_var.set(True)
+
         self.auto_comment_submit_var = ctk.BooleanVar(value=self.config_service.get("auto_comment_submit_enabled", False))
-        ctk.CTkCheckBox(opt_frame, text="랜덤 자동 등록", font=ctk.CTkFont(size=11), variable=self.auto_comment_submit_var).pack(side="left", padx=4)
+        ctk.CTkCheckBox(opt_frame, text="랜덤 자동 등록", font=ctk.CTkFont(size=11), variable=self.auto_comment_submit_var, command=_on_auto_comment_toggle).pack(side="left", padx=4)
 
         ctk.CTkLabel(opt_frame, text="작성 확률:", font=ctk.CTkFont(size=11)).pack(side="left", padx=(4, 1))
         self.auto_comment_chance_entry = ctk.CTkEntry(opt_frame, width=36, height=22, font=ctk.CTkFont(size=11))
@@ -925,7 +929,7 @@ class MainWindow(ctk.CTk):
             "custom_discovery_queries": custom_queries_list,
             "max_feed_items": max_items,
             "like_enabled": self.like_enabled_var.get(),
-            "comment_enabled": self.comment_enabled_var.get(),
+            "comment_enabled": self.comment_enabled_var.get() or self.auto_comment_submit_var.get(),
             "auto_comment_submit_enabled": self.auto_comment_submit_var.get(),
             "auto_comment_chance": auto_chance,
             "auto_comment_delay_min": auto_cmt_min,
