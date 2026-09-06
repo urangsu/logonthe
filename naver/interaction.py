@@ -266,14 +266,20 @@ class CommentInteractionService:
         command_bridge: Optional[ClipboardCommandBridge] = None,
         preset: str = "community",
         skip_event: Optional[threading.Event] = None,
-        post_key: str = ""
+        post_key: str = "",
+        timeout_seconds: Optional[float] = None,
     ) -> UserAction:
+        start_time = time.time()
         while True:
             if stop_event and stop_event.is_set():
                 return UserAction.STOP
             if skip_event and skip_event.is_set():
                 logger.log("  ⏭️ [USER] skip_event 감지: 현재 글 작성을 건너뛰고 다음 글로 이동합니다.")
                 return UserAction.SKIP
+            if timeout_seconds is not None and timeout_seconds > 0:
+                if (time.time() - start_time) >= timeout_seconds:
+                    logger.log(f"  ⏱️ [COMMENT] 자동 등록 대기 시간({timeout_seconds:.1f}초) 만료 - 댓글을 자동 등록합니다.")
+                    return UserAction.AUTO_SUBMIT
 
             ensure_page_alive(page)
 

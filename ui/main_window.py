@@ -220,12 +220,22 @@ class MainWindow(ctk.CTk):
         self.secret_comment_var = ctk.BooleanVar(value=self.config_service.get("secret_comment", False))
         ctk.CTkCheckBox(opt_frame, text="비밀댓글", font=ctk.CTkFont(size=11), variable=self.secret_comment_var).pack(side="left", padx=4)
 
-        ctk.CTkCheckBox(
-            opt_frame, text="⚡ 댓글 실패 시 자동 스킵", font=ctk.CTkFont(size=11, weight="bold"),
-            variable=self.skip_on_comment_failure_var, text_color="#38BDF8"
-        ).pack(side="left", padx=6)
+        self.auto_comment_submit_var = ctk.BooleanVar(value=self.config_service.get("auto_comment_submit_enabled", False))
+        ctk.CTkCheckBox(opt_frame, text="랜덤 자동 등록", font=ctk.CTkFont(size=11), variable=self.auto_comment_submit_var).pack(side="left", padx=4)
 
-        ctk.CTkLabel(opt_frame, text="최대 글 수:", font=ctk.CTkFont(size=11)).pack(side="left", padx=(8, 2))
+        ctk.CTkLabel(opt_frame, text="작성 확률:", font=ctk.CTkFont(size=11)).pack(side="left", padx=(4, 1))
+        self.auto_comment_chance_entry = ctk.CTkEntry(opt_frame, width=36, height=22, font=ctk.CTkFont(size=11))
+        self.auto_comment_chance_entry.pack(side="left", padx=1)
+        self.auto_comment_chance_entry.insert(0, str(int(float(self.config_service.get("auto_comment_chance", 0.60)) * 100)))
+        add_mac_clipboard_support(self.auto_comment_chance_entry, self)
+        ctk.CTkLabel(opt_frame, text="%", font=ctk.CTkFont(size=11)).pack(side="left", padx=(1, 6))
+
+        ctk.CTkCheckBox(
+            opt_frame, text="댓글 실패 시 자동 스킵", font=ctk.CTkFont(size=11, weight="bold"),
+            variable=self.skip_on_comment_failure_var, text_color="#38BDF8"
+        ).pack(side="left", padx=4)
+
+        ctk.CTkLabel(opt_frame, text="최대 글 수:", font=ctk.CTkFont(size=11)).pack(side="left", padx=(6, 2))
         self.max_items_entry = ctk.CTkEntry(opt_frame, width=40, height=22, font=ctk.CTkFont(size=11))
         self.max_items_entry.pack(side="left", padx=1)
         self.max_items_entry.insert(0, str(self.config_service.get("max_feed_items", 20)))
@@ -451,6 +461,7 @@ class MainWindow(ctk.CTk):
         add_range(p_detail, "안정화:", "settle_min_entry", "settle_max_entry", "page_settle_min", "page_settle_max", 1.0, 2.0)
         add_range(p_detail, "본문→공감:", "pre_like_min_entry", "pre_like_max_entry", "pre_like_delay_min", "pre_like_delay_max", 5.0, 10.0)
         add_range(p_detail, "공감→댓글:", "post_like_min_entry", "post_like_max_entry", "post_like_delay_min", "post_like_delay_max", 2.0, 5.0)
+        add_range(p_detail, "자동 등록 대기:", "auto_comment_delay_min_entry", "auto_comment_delay_max_entry", "auto_comment_delay_min", "auto_comment_delay_max", 3.0, 6.0)
 
         # ==================== [탭 3: 💬 내 글 답글 도우미] ====================
         replies_split = ctk.CTkFrame(tab_replies, fg_color="transparent")
@@ -867,6 +878,9 @@ class MainWindow(ctk.CTk):
             pre_like_max = float(self.pre_like_max_entry.get().strip())
             post_like_min = float(self.post_like_min_entry.get().strip())
             post_like_max = float(self.post_like_max_entry.get().strip())
+            auto_chance = float(self.auto_comment_chance_entry.get().strip()) / 100.0
+            auto_cmt_min = float(self.auto_comment_delay_min_entry.get().strip())
+            auto_cmt_max = float(self.auto_comment_delay_max_entry.get().strip())
 
             like_thresh = int(self.like_thresh_entry.get().strip())
             visitor_thresh = int(self.visitor_thresh_entry.get().strip())
@@ -877,8 +891,10 @@ class MainWindow(ctk.CTk):
                 raise ValueError("동작 간격 및 다음 글 대기 시간 범위가 올바르지 않습니다.")
             if not (0 <= p_chance <= 1.0) or not (0 <= p_min <= p_max <= 3600):
                 raise ValueError("Pause 확률(0~100%) 및 시간 범위가 올바르지 않습니다.")
-            if not all((0 <= lo <= hi <= 300) for lo, hi in ((settle_min, settle_max), (pre_like_min, pre_like_max), (post_like_min, post_like_max))):
+            if not all((0 <= lo <= hi <= 300) for lo, hi in ((settle_min, settle_max), (pre_like_min, pre_like_max), (post_like_min, post_like_max), (auto_cmt_min, auto_cmt_max))):
                 raise ValueError("세부 작업 간격 범위가 올바르지 않습니다.")
+            if not (0.01 <= auto_chance <= 1.0):
+                raise ValueError("댓글 작성 확률은 1~100% 사이여야 합니다.")
             if like_thresh < 1 or visitor_thresh < 1:
                 raise ValueError("공감수 및 일 방문자 수 기준값은 1 이상이어야 합니다.")
         except ValueError as ve:
@@ -910,6 +926,10 @@ class MainWindow(ctk.CTk):
             "max_feed_items": max_items,
             "like_enabled": self.like_enabled_var.get(),
             "comment_enabled": self.comment_enabled_var.get(),
+            "auto_comment_submit_enabled": self.auto_comment_submit_var.get(),
+            "auto_comment_chance": auto_chance,
+            "auto_comment_delay_min": auto_cmt_min,
+            "auto_comment_delay_max": auto_cmt_max,
             "comment_template": self.tmpl_textbox.get("1.0", "end-1c").strip(),
             "general_suffix": self.general_suffix_entry.get().strip(),
             "fixed_suffix": self.general_suffix_entry.get().strip(),

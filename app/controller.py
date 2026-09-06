@@ -120,6 +120,10 @@ class FeedController:
         comment_enabled = bool(self.config.get("comment_enabled", True))
         comment_template = str(self.config.get("comment_template", ""))
         secret_comment = bool(self.config.get("secret_comment", False))
+        auto_comment_submit_enabled = bool(self.config.get("auto_comment_submit_enabled", False))
+        auto_comment_chance = float(self.config.get("auto_comment_chance", 0.60))
+        auto_comment_delay_min = float(self.config.get("auto_comment_delay_min", 3.0))
+        auto_comment_delay_max = float(self.config.get("auto_comment_delay_max", 6.0))
         direct_urls = self.config.get("direct_urls", [])
 
         ai_clipboard_enabled = bool(self.config.get("ai_clipboard_enabled", True))
@@ -151,6 +155,7 @@ class FeedController:
             f"max_items={max_items}\n"
             f"like_enabled={like_enabled}\n"
             f"comment_enabled={comment_enabled}\n"
+            f"auto_comment_submit={auto_comment_submit_enabled} (chance={auto_comment_chance})\n"
             f"topic_filter={log_topic_filter}\n"
             f"like_threshold={self.config.get('like_count_skip_threshold', 999)}\n"
             f"visitor_threshold={self.config.get('daily_visitor_skip_threshold', 10000)}\n"
@@ -235,6 +240,10 @@ class FeedController:
                 on_like_committed=self.history.record_like_checkpoint,
                 on_comment_committed=self.history.record_comment_checkpoint,
                 skip_event=self.skip_event,
+                auto_comment_submit_enabled=auto_comment_submit_enabled,
+                auto_comment_chance=auto_comment_chance,
+                auto_comment_delay_min=auto_comment_delay_min,
+                auto_comment_delay_max=auto_comment_delay_max,
             )
 
             seen_candidate_keys: Set[str] = set()

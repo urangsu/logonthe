@@ -1,3 +1,4 @@
+import random
 import threading
 import time
 import uuid
@@ -65,6 +66,10 @@ class PostProcessor:
         on_like_committed: Optional[Callable[[FeedPost, LikeProcessResult], None]] = None,
         on_comment_committed: Optional[Callable[[FeedPost, CommentProcessResult], None]] = None,
         skip_event: Optional[threading.Event] = None,
+        auto_comment_submit_enabled: Optional[bool] = None,
+        auto_comment_chance: Optional[float] = None,
+        auto_comment_delay_min: Optional[float] = None,
+        auto_comment_delay_max: Optional[float] = None,
     ):
         self.config = config
         self.session = session
@@ -90,6 +95,28 @@ class PostProcessor:
         self.on_like_committed = on_like_committed
         self.on_comment_committed = on_comment_committed
         self.navigation_version = 0
+
+        # Random Auto Comment Submit settings
+        cfg_dict = config if isinstance(config, dict) else (config.data if hasattr(config, "data") else {})
+        if auto_comment_submit_enabled is not None:
+            self.auto_comment_submit_enabled = bool(auto_comment_submit_enabled)
+        else:
+            self.auto_comment_submit_enabled = bool(cfg_dict.get("auto_comment_submit_enabled", False))
+
+        if auto_comment_chance is not None:
+            self.auto_comment_chance = float(auto_comment_chance)
+        else:
+            self.auto_comment_chance = float(cfg_dict.get("auto_comment_chance", 0.60))
+
+        if auto_comment_delay_min is not None:
+            self.auto_comment_delay_min = float(auto_comment_delay_min)
+        else:
+            self.auto_comment_delay_min = float(cfg_dict.get("auto_comment_delay_min", 3.0))
+
+        if auto_comment_delay_max is not None:
+            self.auto_comment_delay_max = float(auto_comment_delay_max)
+        else:
+            self.auto_comment_delay_max = float(cfg_dict.get("auto_comment_delay_max", 6.0))
 
     def process(
         self,
@@ -315,6 +342,22 @@ class PostProcessor:
                     result.comment_result = CommentProcessResult(status=CommentSubmitState.SKIPPED, error="server_duplicate_check_unknown")
                 else:
                     # 3-3. 내 댓글이 없는 것이 확실한 경우(ABSENT HIGH)에만 초안 생성 및 주입
+                    if self.auto_comment_submit_enabled:
+                        roll = random.random()
+                        if roll > self.auto_comment_chance:
+                            logger.log(
+                                f"  🎲 [COMMENT] 이번 글은 랜덤 작성 비율({int(self.auto_comment_chance * 100)}%, roll={roll:.2f})에 따라 댓글 작성을 건너뜁니다."
+                            )
+                            result.comment_result = CommentProcessResult(
+                                status=CommentSubmitState.SKIPPED,
+                                error="random_chance_skipped",
+                            )
+                            return result
+                        else:
+                            logger.log(
+                                f"  🎲 [COMMENT] 랜덤 댓글 작성 대상 선정 ({int(self.auto_comment_chance * 100)}%, roll={roll:.2f}) - Gemini 댓글 생성 및 자동 등록을 진행합니다."
+                            )
+
                     context = detail_context or ContentContextExtractor.extract(detail_page, post, max_chars=self.ai_context_max_chars)
                     post.title = context.title or post.title
                     post.excerpt = context.excerpt
@@ -683,11 +726,21 @@ class PostProcessor:
 
                         cmt_res = CommentProcessResult(status=CommentSubmitState.DRAFTED, draft_text=draft_text)
 
-                        if self.state_mgr:
+                        auto_submit_timeout = None
+                        if self.auto_comment_submit_enabled:
+                            auto_submit_timeout = random.uniform(
+                                min(self.auto_comment_delay_min, self.auto_comment_delay_max),
+                                max(self.auto_comment_delay_min, self.auto_comment_delay_max)
+                            )
+                            msg = f"댓글 자동 등록 대기 중 ({draft_source_label} 입력됨 / {auto_submit_timeout:.1f}초 후 자동 등록 / Esc=건너뛰기)"
+                        else:
                             msg = f"댓글 확인 대기 중 ({draft_source_label} 입력됨 / 수정 후 Enter=등록 / Esc=건너뛰기)"
+
+                        if self.state_mgr:
                             self.state_mgr.update(new_state=FeedState.WAITING_USER, message=msg)
                         logger.log(
                             f"[COMMENT][WAITING_USER] post={post.key} source={draft_source_label} chars={len(draft_text)}"
+                            + (f" auto_submit_in={auto_submit_timeout:.1f}s" if auto_submit_timeout else "")
                         )
 
                         action = CommentInteractionService.wait_for_user_action(
@@ -696,7 +749,8 @@ class PostProcessor:
                             command_bridge=self.command_bridge,
                             preset=preset,
                             skip_event=self.skip_event,
-                            post_key=post.key
+                            post_key=post.key,
+                            timeout_seconds=auto_submit_timeout,
                         )
 
                         if action == UserAction.STOP:
@@ -716,8 +770,8 @@ class PostProcessor:
                             )
                             if self.state_mgr:
                                 self.state_mgr.update(new_state=FeedState.SKIPPING, inc_skip=True)
-                        elif action in (UserAction.SUBMIT, UserAction.NATIVE_SUBMIT):
-                            logger.log(f"[COMMENT][SUBMIT_REQUESTED] post={post.key}")
+                        elif action in (UserAction.SUBMIT, UserAction.NATIVE_SUBMIT, UserAction.AUTO_SUBMIT):
+                            logger.log(f"[COMMENT][SUBMIT_REQUESTED] post={post.key} action={action.value}")
                             final_text = CommentInteractionService.read_final_text(detail_page)
                             submitted_cand = final_text or draft_text
 
@@ -751,7 +805,7 @@ class PostProcessor:
                                 cmt_res.submitted_text,
                                 self.stop_event,
                                 preset=preset,
-                                click=(action == UserAction.SUBMIT),
+                                click=(action in (UserAction.SUBMIT, UserAction.AUTO_SUBMIT)),
                             )
                             cmt_res.status = submit_status
 
