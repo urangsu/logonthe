@@ -1,3 +1,4 @@
+import random
 import threading
 import traceback
 from typing import Optional, List, Set
@@ -303,11 +304,19 @@ class FeedController:
                     # 실제 처리 진입 대상 카운트 등록
                     attempted_post_keys.add(post.key)
 
+                    sample_selected = None
+                    sample_roll = None
+                    if should_comment and auto_comment_submit_enabled:
+                        sample_roll = random.random()
+                        sample_selected = (sample_roll <= auto_comment_chance)
+
                     action_plan = PostActionPlan(
                         process_like=should_like,
                         process_comment=should_comment,
                         local_like_recorded=is_local_liked,
-                        local_comment_recorded=is_local_commented
+                        local_comment_recorded=is_local_commented,
+                        comment_sample_selected=sample_selected,
+                        comment_sample_roll=sample_roll,
                     )
 
                     # 매 글 처리마다 살아있는 detail_page 획득

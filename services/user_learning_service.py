@@ -28,6 +28,7 @@ class UserLearningService:
         evidence_span: str = "",
         source: str = "unknown",
         rejection_reason: str = "",
+        decision_origin: str = "user",
     ):
         if not final_submitted or not final_submitted.strip():
             return
@@ -41,6 +42,7 @@ class UserLearningService:
             source=source,
             decision="edited" if (initial_draft or "").strip() != final_submitted.strip() else "adopted",
             rejection_reason=rejection_reason,
+            decision_origin=decision_origin,
         )
 
     @classmethod
@@ -69,6 +71,7 @@ class UserLearningService:
         source: str = "unknown",
         decision: str = "skipped",
         rejection_reason: str = "",
+        decision_origin: str = "user",
     ):
         if decision not in {"adopted", "edited", "skipped", "rejected"}:
             raise ValueError(f"unsupported learning decision: {decision}")
@@ -88,6 +91,7 @@ class UserLearningService:
             "evidence_span": evidence_span[:160],
             "source": source,
             "decision": decision,
+            "decision_origin": decision_origin,
             "initial_draft": initial_s,
             "final_submitted": final_s,
             "is_user_edited": is_edited,
@@ -122,6 +126,8 @@ class UserLearningService:
                 logger.log("  📝 [LEARNING] 사용자가 건너뛴 초안과 사유를 기록했습니다.")
             elif is_edited:
                 logger.log("  📝 [LEARNING] 사용자가 수정한 댓글을 학습용 데이터셋(user_learning_corpus.json)에 기록했습니다.")
+            elif decision_origin == "auto_submit":
+                logger.log("  📝 [LEARNING] 자동 등록 댓글이 학습용 데이터셋(user_learning_corpus.json)에 기록되었습니다 (출처: auto_submit).")
             else:
                 logger.log("  📝 [LEARNING] 등록된 댓글을 학습용 데이터셋(user_learning_corpus.json)에 기록했습니다.")
         except Exception as e:

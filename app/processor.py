@@ -118,6 +118,9 @@ class PostProcessor:
         else:
             self.auto_comment_delay_max = float(cfg_dict.get("auto_comment_delay_max", 6.0))
 
+        # P1-1 Invariant: if auto_comment_submit_enabled is active, comment pipeline is always enabled
+        self.comment_enabled = bool(comment_enabled or self.auto_comment_submit_enabled)
+
     def process(
         self,
         detail_page: Page,
@@ -343,8 +346,14 @@ class PostProcessor:
                 else:
                     # 3-3. 내 댓글이 없는 것이 확실한 경우(ABSENT HIGH)에만 초안 생성 및 주입
                     if self.auto_comment_submit_enabled:
-                        roll = random.random()
-                        if roll > self.auto_comment_chance:
+                        if action_plan and action_plan.comment_sample_selected is not None:
+                            sample_selected = action_plan.comment_sample_selected
+                            roll = action_plan.comment_sample_roll if action_plan.comment_sample_roll is not None else 0.0
+                        else:
+                            roll = random.random()
+                            sample_selected = roll <= self.auto_comment_chance
+
+                        if not sample_selected:
                             logger.log(
                                 f"  🎲 [COMMENT] 이번 글은 랜덤 작성 비율({int(self.auto_comment_chance * 100)}%, roll={roll:.2f})에 따라 댓글 작성을 건너뜁니다."
                             )
@@ -352,6 +361,8 @@ class PostProcessor:
                                 status=CommentSubmitState.SKIPPED,
                                 error="random_chance_skipped",
                             )
+                            if self.state_mgr:
+                                self.state_mgr.update(new_state=FeedState.SKIPPING, inc_skip=True, inc_processed=True)
                             return result
                         else:
                             logger.log(
@@ -819,6 +830,7 @@ class PostProcessor:
                                     anchor=(local_res.anchor if 'local_res' in locals() and local_res else ""),
                                     evidence_span=(local_res.evidence_span if 'local_res' in locals() and local_res else ""),
                                     source=("gemini" if draft_source_label == "Gemini 생성" else "local"),
+                                    decision_origin=("auto_submit" if action == UserAction.AUTO_SUBMIT else "user"),
                                 )
                                 if self.state_mgr:
                                     self.state_mgr.update(inc_comment=True)

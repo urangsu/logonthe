@@ -110,6 +110,42 @@ def migrate_engagement_audit_recent_posts(data: Dict[str, Any]) -> Dict[str, Any
     return migrated
 
 
+def normalize_auto_comment_config(data: Dict[str, Any]) -> Dict[str, Any]:
+    """Clamp and fail-closed validation for auto comment submission parameters."""
+    normalized = dict(data)
+    try:
+        chance = float(normalized.get("auto_comment_chance", 0.60))
+        if chance != chance or chance < 0.0:  # NaN or negative
+            chance = 0.0
+        elif chance > 1.0:
+            chance = 1.0
+    except (TypeError, ValueError):
+        chance = 0.60
+    normalized["auto_comment_chance"] = chance
+
+    try:
+        d_min = float(normalized.get("auto_comment_delay_min", 3.0))
+        if d_min != d_min:  # NaN
+            d_min = 3.0
+        else:
+            d_min = max(0.0, d_min)
+    except (TypeError, ValueError):
+        d_min = 3.0
+
+    try:
+        d_max = float(normalized.get("auto_comment_delay_max", 6.0))
+        if d_max != d_max:
+            d_max = max(d_min, 6.0)
+        else:
+            d_max = max(d_min, max(0.0, d_max))
+    except (TypeError, ValueError):
+        d_max = max(d_min, 6.0)
+
+    normalized["auto_comment_delay_min"] = d_min
+    normalized["auto_comment_delay_max"] = d_max
+    return normalized
+
+
 def migrate_config_v1_to_v2(old_data: Dict[str, Any]) -> Dict[str, Any]:
     """기존 config 구조를 v2 schema로 안전하게 변환"""
     cfg = DEFAULT_CONFIG_V2.copy()
@@ -198,6 +234,7 @@ class ConfigService:
             merged = DEFAULT_CONFIG_V2.copy()
             merged.update(loaded)
             merged = migrate_workflow_mode(merged)
+            merged = normalize_auto_comment_config(merged)
             migrated_audit = migrate_engagement_audit_recent_posts(merged)
             if migrated_audit != merged:
                 self._atomic_save(migrated_audit)
@@ -211,6 +248,7 @@ class ConfigService:
         merged.update(self.data)
         merged.update(data)
         merged = migrate_workflow_mode(merged)
+        merged = normalize_auto_comment_config(merged)
         merged = migrate_engagement_audit_recent_posts(merged)
         merged["schema_version"] = 3
         self._atomic_save(merged)
@@ -222,6 +260,7 @@ class ConfigService:
         merged.update(self.data)
         merged.update(values)
         merged = migrate_workflow_mode(merged)
+        merged = normalize_auto_comment_config(merged)
         merged = migrate_engagement_audit_recent_posts(merged)
         merged["schema_version"] = 3
         self._atomic_save(merged)

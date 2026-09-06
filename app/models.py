@@ -71,6 +71,8 @@ class PostActionPlan:
     process_comment: bool = True
     local_like_recorded: bool = False
     local_comment_recorded: bool = False
+    comment_sample_selected: Optional[bool] = None
+    comment_sample_roll: Optional[float] = None
 
 
 @dataclass

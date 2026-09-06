@@ -44,6 +44,8 @@ class CommentInteractionService:
             () => {
                 window.__NAVER_FEED_ACTION__ = null;
                 window.__NAVER_COMMENT_SUBMITTED_FLAG__ = false;
+                window.__NAVER_COMMENT_USER_DIRTY__ = false;
+                window.__NAVER_COMMENT_LAST_INPUT_AT__ = 0;
 
                 if (window.__NAVER_FEED_KEY_HANDLER__) {
                     document.removeEventListener('keydown', window.__NAVER_FEED_KEY_HANDLER__, true);
@@ -51,18 +53,28 @@ class CommentInteractionService:
                 if (window.__NAVER_FEED_CLICK_HANDLER__) {
                     document.removeEventListener('click', window.__NAVER_FEED_CLICK_HANDLER__, true);
                 }
+                if (window.__NAVER_FEED_INPUT_HANDLER__) {
+                    document.removeEventListener('input', window.__NAVER_FEED_INPUT_HANDLER__, true);
+                }
 
                 // 1. 키보드 단축키 핸들러 (Enter=등록, Shift+Enter=줄바꿈, Esc=건너뛰기)
                 window.__NAVER_FEED_KEY_HANDLER__ = (e) => {
-                    if ((e.metaKey || e.ctrlKey) && (e.key === 'v' || e.key === 'V')) {
-                        return;
-                    }
-
                     const editor = e.target.closest ? (
                         e.target.closest('#naverComment__write_textarea') || 
                         e.target.closest('.u_cbox_text') ||
                         e.target.closest('[contenteditable="true"]')
                     ) : null;
+
+                    if (editor && e.key !== 'Escape') {
+                        if (e.key !== 'Enter' || e.shiftKey) {
+                            window.__NAVER_COMMENT_USER_DIRTY__ = true;
+                            window.__NAVER_COMMENT_LAST_INPUT_AT__ = Date.now();
+                        }
+                    }
+
+                    if ((e.metaKey || e.ctrlKey) && (e.key === 'v' || e.key === 'V')) {
+                        return;
+                    }
 
                     if (e.key === 'Enter' && e.shiftKey) {
                         return;
@@ -119,8 +131,22 @@ class CommentInteractionService:
                     }
                 };
 
+                // 3. 에디터 텍스트 수정(input) 감지 리스너
+                window.__NAVER_FEED_INPUT_HANDLER__ = (e) => {
+                    const editor = e.target.closest ? (
+                        e.target.closest('#naverComment__write_textarea') ||
+                        e.target.closest('.u_cbox_text') ||
+                        e.target.closest('[contenteditable="true"]')
+                    ) : null;
+                    if (editor) {
+                        window.__NAVER_COMMENT_USER_DIRTY__ = true;
+                        window.__NAVER_COMMENT_LAST_INPUT_AT__ = Date.now();
+                    }
+                };
+
                 document.addEventListener('keydown', window.__NAVER_FEED_KEY_HANDLER__, true);
                 document.addEventListener('click', window.__NAVER_FEED_CLICK_HANDLER__, true);
+                document.addEventListener('input', window.__NAVER_FEED_INPUT_HANDLER__, true);
             }
         """)
 
@@ -271,19 +297,47 @@ class CommentInteractionService:
     ) -> UserAction:
         start_time = time.time()
         while True:
+            # 1. 종료 이벤트
             if stop_event and stop_event.is_set():
                 return UserAction.STOP
             if skip_event and skip_event.is_set():
                 logger.log("  ⏭️ [USER] skip_event 감지: 현재 글 작성을 건너뛰고 다음 글로 이동합니다.")
                 return UserAction.SKIP
-            if timeout_seconds is not None and timeout_seconds > 0:
-                if (time.time() - start_time) >= timeout_seconds:
-                    logger.log(f"  ⏱️ [COMMENT] 자동 등록 대기 시간({timeout_seconds:.1f}초) 만료 - 댓글을 자동 등록합니다.")
-                    return UserAction.AUTO_SUBMIT
 
             ensure_page_alive(page)
 
-            # 1. UI 스레드로부터 전달된 명령 처리
+            # 2. 브라우저 사용자 액션 및 편집 상태 먼저 평가 (우선순위 역전 및 이중 제출 방지)
+            editor_context = None
+            action_frame = None
+            try:
+                editor_context = MobileDOMResolver.get_comment_editor_context(page)
+                action_frame = editor_context["frame"] if editor_context else page.main_frame
+                eval_res = action_frame.evaluate("""
+                    () => {
+                        const act = window.__NAVER_FEED_ACTION__;
+                        window.__NAVER_FEED_ACTION__ = null;
+                        const dirty = window.__NAVER_COMMENT_USER_DIRTY__ === true;
+                        return [act, dirty];
+                    }
+                """)
+                action_data = eval_res[0] if isinstance(eval_res, (list, tuple)) and len(eval_res) > 0 else None
+                is_dirty = eval_res[1] if isinstance(eval_res, (list, tuple)) and len(eval_res) > 1 else False
+
+                if action_data == "SUBMIT":
+                    return UserAction.SUBMIT
+                elif action_data == "SUBMIT_MANUAL":
+                    return UserAction.NATIVE_SUBMIT
+                elif action_data in ("SKIP", "CLOSED"):
+                    return UserAction.SKIP
+
+                # P0-2: 사용자가 키 입력/수정을 시작한 경우 AUTO_SUBMIT 즉시 해제 (수동 검토 모드로 전환)
+                if is_dirty and timeout_seconds is not None:
+                    logger.log("  ✍️ [COMMENT] 사용자의 직접 댓글 수정/입력 감지 -> 자동 등록 취소 (수동 확인 모드로 전환)")
+                    timeout_seconds = None
+            except Exception:
+                pass
+
+            # 3. UI 스레드로부터 전달된 명령 처리
             if command_bridge:
                 cmd = command_bridge.pop_command()
                 if cmd:
@@ -297,28 +351,38 @@ class CommentInteractionService:
                         if gate_res.valid:
                             if CommentEditorAdapter.set_text(page, cmd.text):
                                 logger.log("  📋 [COMMENT] 클립보드 텍스트를 댓글 에디터에 적용했습니다.")
+                                if timeout_seconds is not None:
+                                    logger.log("  ✍️ [COMMENT] 클립보드 댓글 적용 -> 자동 등록 취소 (수동 확인 모드로 전환)")
+                                    timeout_seconds = None
                         else:
                             logger.log(f"  ⚠️ [COMMENT] 클립보드 텍스트가 품질 게이트를 통과하지 못해 적용을 거부했습니다: [{gate_res.code}] {gate_res.reason} (매칭: {gate_res.matched})", "WARNING")
 
-            # 2. 브라우저 이벤트 상태 확인
-            try:
-                editor_context = MobileDOMResolver.get_comment_editor_context(page)
-                action_frame = editor_context["frame"] if editor_context else page.main_frame
-                action_data = action_frame.evaluate("""
-                    () => {
-                        const act = window.__NAVER_FEED_ACTION__;
-                        window.__NAVER_FEED_ACTION__ = null;
-                        return act;
-                    }
-                """)
-                if action_data == "SUBMIT":
-                    return UserAction.SUBMIT
-                elif action_data == "SUBMIT_MANUAL":
-                    return UserAction.NATIVE_SUBMIT
-                elif action_data in ("SKIP", "CLOSED"):
-                    return UserAction.SKIP
-            except Exception:
-                pass
+            # 4. 마지막으로 timeout 검사 (모든 브라우저 액션 drain 후 평가)
+            if timeout_seconds is not None and timeout_seconds >= 0:
+                if (time.time() - start_time) >= timeout_seconds:
+                    # Timeout 만료 순간 마지막 1회 브라우저 액션 최종 drain
+                    try:
+                        if action_frame is None:
+                            editor_context = MobileDOMResolver.get_comment_editor_context(page)
+                            action_frame = editor_context["frame"] if editor_context else page.main_frame
+                        final_act = action_frame.evaluate("""
+                            () => {
+                                const act = window.__NAVER_FEED_ACTION__;
+                                window.__NAVER_FEED_ACTION__ = null;
+                                return act;
+                            }
+                        """)
+                        if final_act == "SUBMIT":
+                            return UserAction.SUBMIT
+                        elif final_act == "SUBMIT_MANUAL":
+                            return UserAction.NATIVE_SUBMIT
+                        elif final_act in ("SKIP", "CLOSED"):
+                            return UserAction.SKIP
+                    except Exception:
+                        pass
+
+                    logger.log(f"  ⏱️ [COMMENT] 자동 등록 대기 시간({timeout_seconds:.1f}초) 만료 - 댓글을 자동 등록합니다.")
+                    return UserAction.AUTO_SUBMIT
 
             interruptible_wait(stop_event, 0.15)
 
