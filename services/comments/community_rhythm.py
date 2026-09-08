@@ -11,7 +11,7 @@ import re
 import unicodedata
 from dataclasses import dataclass
 from enum import Enum
-from typing import ClassVar, Dict, Optional, Tuple, Union
+from typing import ClassVar, Dict, List, Optional, Tuple, Union
 
 
 class CommunityRhythmPreset(str, Enum):
@@ -169,6 +169,10 @@ class FinalQualityGate:
         "먹어보고 싶습니다",
         "같습니다",
         "싶습니다",
+        "습니다",
+        "있습니다",
+        "없습니다",
+        "드립니다",
     )
 
     # Hard banned macros: blatant macro / opening boilerplate / hype words
@@ -394,67 +398,74 @@ class FinalQualityGate:
             )
 
         is_thoughtful = (effective_preset == CommunityRhythmPreset.THOUGHTFUL.value)
-        effective_allow_period = allow_period or is_thoughtful
+        is_user_source = source in ("user_edit", "user", "manual", "user_override")
+        effective_allow_period = allow_period or is_thoughtful or is_user_source
         if not isinstance(text, str):
             return result(False, "invalid_text", "comment text must be a string")
         if not effective_allow_period and not legacy and ("." in normalized or "。" in normalized):
             matched = "." if "." in normalized else "。"
             return result(False, "forbidden_period", f"period is forbidden: {matched}", matched=matched)
-        max_tilde_allowed = 2 if is_thoughtful else 1
+        max_tilde_allowed = 4 if is_user_source else (2 if is_thoughtful else 1)
         if not legacy and normalized.count("~") > max_tilde_allowed:
             return result(False, "excessive_tilde", f"at most {max_tilde_allowed} tildes allowed", matched="~")
         strong_slang = re.findall(r"(?:^|\s)(헐|와|세상에|대박)(?=\s)|미쳤|맛도리", normalized)
-        if not legacy and len(strong_slang) > (2 if is_thoughtful else 1):
+        if not legacy and not is_user_source and len(strong_slang) > (2 if is_thoughtful else 1):
             return result(False, "excessive_slang", "at most one strong slang expression is allowed")
         if semantic_compatibility is False:
             return result(False, "semantic_mismatch", "reaction is incompatible with its anchor")
         if length > policy.maximum:
             return result(False, "length_exceeded", f"comment exceeds {policy.maximum} characters", band="above_maximum", score=0.0)
 
-        for phrase in cls.FORMAL_SUBSTRINGS:
-            if phrase in normalized:
-                return result(False, "formal_register", f"formal register is forbidden: {phrase}", matched=phrase)
-        # PositiveSafetyValidator still owns its historic macro vocabulary;
-        # its compatibility profile must not reject existing grounded text
-        # merely because a newly added V13.1 root is present. Final text uses
-        # the strict public profile above.
-        if not legacy:
-            for phrase in cls.HARD_BANNED_MACROS:
+        # 사용자 직접 편집본은 AI 초안용 문체 강제 규칙(격식체/매크로/이모지/가짜경험/최소길이)을 면제함
+        if not is_user_source:
+            for phrase in cls.FORMAL_SUBSTRINGS:
                 if phrase in normalized:
-                    return result(False, "banned_macro", f"summary or macro phrase is forbidden: {phrase}", matched=phrase)
+                    return result(False, "formal_register", f"formal register is forbidden: {phrase}", matched=phrase)
+            # PositiveSafetyValidator still owns its historic macro vocabulary;
+            # its compatibility profile must not reject existing grounded text
+            # merely because a newly added V13.1 root is present. Final text uses
+            # the strict public profile above.
+            if not legacy:
+                for phrase in cls.HARD_BANNED_MACROS:
+                    if phrase in normalized:
+                        return result(False, "banned_macro", f"summary or macro phrase is forbidden: {phrase}", matched=phrase)
 
-            matched_soft = [p for p in cls.SOFT_AI_PHRASES if p in normalized]
-            if len(matched_soft) >= 2:
-                return result(False, "banned_macro", f"multiple soft AI phrases: {', '.join(matched_soft)}", matched=matched_soft[0])
-        for phrase in cls.FAKE_EXPERIENCE_PHRASES:
-            if phrase in normalized:
-                return result(False, "fake_experience", f"unverified past experience is forbidden: {phrase}", matched=phrase)
-        fake_experience = cls._FAKE_EXPERIENCE_RE.search(normalized)
-        if fake_experience:
-            return result(
-                False,
-                "fake_experience",
-                f"unverified past experience is forbidden: {fake_experience.group()}",
-                matched=fake_experience.group(),
-            )
-        for phrase in cls.ABSOLUTE_OR_PRESSURE_PHRASES:
-            if phrase in normalized:
-                return result(False, "absolute_or_pressure", f"absolute or pressure wording is forbidden: {phrase}", matched=phrase)
+                matched_soft = [p for p in cls.SOFT_AI_PHRASES if p in normalized]
+                if len(matched_soft) >= 2:
+                    return result(False, "banned_macro", f"multiple soft AI phrases: {', '.join(matched_soft)}", matched=matched_soft[0])
+            for phrase in cls.FAKE_EXPERIENCE_PHRASES:
+                if phrase in normalized:
+                    return result(False, "fake_experience", f"unverified past experience is forbidden: {phrase}", matched=phrase)
+            fake_experience = cls._FAKE_EXPERIENCE_RE.search(normalized)
+            if fake_experience:
+                return result(
+                    False,
+                    "fake_experience",
+                    f"unverified past experience is forbidden: {fake_experience.group()}",
+                    matched=fake_experience.group(),
+                )
+            for phrase in cls.ABSOLUTE_OR_PRESSURE_PHRASES:
+                if phrase in normalized:
+                    return result(False, "absolute_or_pressure", f"absolute or pressure wording is forbidden: {phrase}", matched=phrase)
+            for phrase in cls.EMOTICON_PHRASES:
+                if phrase in normalized:
+                    return result(False, "laughter_or_emoticon", f"laughter or emoticon is forbidden: {phrase}", matched=phrase)
+            laughter = cls._LAUGHTER_RE.search(normalized)
+            if laughter:
+                return result(False, "laughter_or_emoticon", f"laughter marker is forbidden: {laughter.group()}", matched=laughter.group())
+            for symbol in normalized:
+                if unicodedata.category(symbol) == "So":
+                    return result(False, "emoji", f"emoji or symbol is forbidden: {symbol}", matched=symbol)
+
+        # 욕설(RUDE_SLANG)은 항상 금지
         for phrase in cls.RUDE_SLANG_PHRASES:
             if phrase in normalized.lower():
                 return result(False, "rude_slang", f"rude slang is forbidden: {phrase}", matched=phrase)
-        for phrase in cls.EMOTICON_PHRASES:
-            if phrase in normalized:
-                return result(False, "laughter_or_emoticon", f"laughter or emoticon is forbidden: {phrase}", matched=phrase)
-        laughter = cls._LAUGHTER_RE.search(normalized)
-        if laughter:
-            return result(False, "laughter_or_emoticon", f"laughter marker is forbidden: {laughter.group()}", matched=laughter.group())
-        for symbol in normalized:
-            if unicodedata.category(symbol) == "So":
-                return result(False, "emoji", f"emoji or symbol is forbidden: {symbol}", matched=symbol)
 
-        if length < policy.minimum:
-            return result(False, "length_below_minimum", f"comment is shorter than {policy.minimum} characters", band="below_minimum", score=0.0)
+        if not is_user_source:
+            if length < policy.minimum:
+                return result(False, "length_below_minimum", f"comment is shorter than {policy.minimum} characters", band="below_minimum", score=0.0)
+
         return result(True, "ok", "comment passed final quality policy")
 
     @classmethod
@@ -510,10 +521,170 @@ class FinalQualityGate:
         return cls.validate(text, legacy=legacy, allow_period=legacy)
 
 
+
+@dataclass(frozen=True)
+class DraftInspectionResult:
+    """5단계 초안 품질 검사 결과"""
+    passed: bool
+    stage: int  # 0: 통과, 1~5: 불합격 단계
+    code: str
+    feedback: str
+    matched: Optional[str] = None
+
+
+class CommentDraftInspector:
+    """
+    실제 사람의 말투 반영 여부를 검증하는 5단계 초안 검사기 및 1회 재작성 피드백 생성기:
+    1. 현재 글/요청에 해당하는 응답인가? (NEED_MORE_CONTEXT, 최소 길이)
+    2. 본문에 없는 사실이나 경험을 지어냈는가? (거짓 방문/사용 경험)
+    3. 상투적인 요약·평가·중복 마무리가 있는가? (설명조, 습관적 덧붙임)
+    4. 최근 댓글과 지나치게 비슷한가? (어미/구조 반복)
+    5. 실제 사용자 문체에서 벗어나는가? (격식체, 매크로 문구)
+    """
+
+    EXPLANATORY_PHRASES: ClassVar[Tuple[str, ...]] = (
+        "부분을 이렇게 풀어주",
+        "부분을 풀어주",
+        "설명이 구체적이라",
+        "설명이 자세해서",
+        "구성이 돋보",
+        "정리가 잘 되어",
+        "깔끔하게 정리",
+        "소개해주셔서",
+        "한눈에 들어오네요",
+        "이해하기 편하네요",
+    )
+
+    REPETITIVE_TAILS: ClassVar[Tuple[str, ...]] = (
+        "참고해야겠",
+        "참고할게요",
+        "기억해둬야겠",
+        "기억해둘게요",
+        "한번 가봐야겠",
+        "가봐야겠",
+        "방문해봐야겠",
+        "도움이 될 것 같",
+        "도움이 되겠",
+        "가보고 싶네요",
+        "들러봐야겠",
+        "좋겠어요",
+    )
+
+    @classmethod
+    def inspect(
+        cls,
+        text: str,
+        recent_comments: Optional[List[str]] = None,
+        preset: PresetLike = CommunityRhythmPreset.THOUGHTFUL,
+    ) -> DraftInspectionResult:
+        if not text or not isinstance(text, str):
+            return DraftInspectionResult(
+                passed=False, stage=1, code="empty_text",
+                feedback="댓글 텍스트가 비어 있습니다. 본문의 구체적 내용에 반응해주세요."
+            )
+
+        raw = text.strip()
+        if raw == "NEED_MORE_CONTEXT":
+            return DraftInspectionResult(
+                passed=False, stage=1, code="need_more_context",
+                feedback="NEED_MORE_CONTEXT"
+            )
+
+        normalized = FinalQualityGate.normalize(raw)
+
+        # 1단계: 현재 글/요청 적합성 및 최소 길이
+        if len(normalized) < 10:
+            return DraftInspectionResult(
+                passed=False, stage=1, code="too_short",
+                feedback="댓글 길이가 너무 짧습니다. 본문의 구체적인 내용 하나를 언급하며 자연스럽게 작성해주세요."
+            )
+
+        # 2단계: 본문에 없는 사실/경험 지어냄
+        for phrase in FinalQualityGate.FAKE_EXPERIENCE_PHRASES:
+            if phrase in normalized:
+                return DraftInspectionResult(
+                    passed=False, stage=2, code="fake_experience",
+                    matched=phrase,
+                    feedback=f"실제로 가봤거나 먹어봤다는 거짓 경험 표현('{phrase}')이 포함되어 있습니다. 방문/구매/사용 경험을 지어내지 말고, 본문 내용을 본 제3자의 시선에서 구체적 디테일에만 반응해주세요."
+                )
+        fake_match = FinalQualityGate._FAKE_EXPERIENCE_RE.search(normalized)
+        if fake_match:
+            matched_text = fake_match.group()
+            return DraftInspectionResult(
+                passed=False, stage=2, code="fake_experience",
+                matched=matched_text,
+                feedback=f"거짓 경험 표현('{matched_text}')이 포함되어 있습니다. 본문에 명시된 사실에 대해서만 반응해주세요."
+            )
+
+        # 3단계: 상투적인 요약·평가·중복 마무리
+        for phrase in cls.EXPLANATORY_PHRASES:
+            if phrase in normalized:
+                return DraftInspectionResult(
+                    passed=False, stage=3, code="explanatory_tone",
+                    matched=phrase,
+                    feedback=f"글을 설명하거나 평가하는 문구('{phrase}')가 포함되어 있습니다. 설명조를 빼고 본문의 구체적인 디테일(메뉴, 비주얼, 사물 등)에 대한 짧은 반응 1문장으로 작성해주세요."
+                )
+
+        # 습관적 중복 마무리 ("참고해야겠어요", "기억해둬야겠네요", "가봐야겠어요" 등 앞 문장에 덧붙인 경우)
+        sentences = [s.strip() for s in re.split(r'[\n\.\?!~]+', normalized) if s.strip()]
+        for tail in cls.REPETITIVE_TAILS:
+            if tail in normalized:
+                # 단독 1문장이 아닌 복문/2문장이거나 뒷부분에 붙은 경우
+                if len(sentences) >= 2 or normalized.find(tail) > (len(normalized) * 0.4):
+                    return DraftInspectionResult(
+                        passed=False, stage=3, code="repetitive_tail",
+                        matched=tail,
+                        feedback=f"마지막 문장에 습관적인 중복 마무리('{tail}')가 붙어 있습니다. 뒤의 군더더기를 삭제하고 본문의 구체적인 내용에 대한 1문장 반응만 남겨주세요."
+                    )
+
+        # 4단계: 최근 댓글과 지나친 유사도 (어미/구조 반복)
+        if recent_comments:
+            ending_tokens = ("네요", "겠어요", "겠네요", "보여요", "보이네요", "좋네요", "같아요", "있어요", "합니다", "입니다", "습니다", "듭니다")
+            cand_clean = re.sub(r'[^가-힣]', '', normalized)
+            cand_ending = next((tok for tok in ending_tokens if cand_clean.endswith(tok)), (cand_clean[-2:] if len(cand_clean) >= 2 else ""))
+
+            if cand_ending:
+                rep_count = 0
+                for rc in recent_comments[-3:]:
+                    rc_clean = re.sub(r'[^가-힣]', '', rc.strip())
+                    if rc_clean.endswith(cand_ending):
+                        rep_count += 1
+                if rep_count >= 2:
+                    return DraftInspectionResult(
+                        passed=False, stage=4, code="repetition_detected",
+                        matched=cand_ending,
+                        feedback=f"최근 작성된 댓글과 동일한 어미('{cand_ending}')가 반복되고 있습니다. 다른 자연스러운 어미나 새로운 시각의 반응을 선택해주세요."
+                    )
+
+        # 5단계: 실제 사용자 문체 이탈 (격식체/매크로 문구)
+        formal_endings = FinalQualityGate.FORMAL_SUBSTRINGS + ("듭니다", "습니다", "있습니다", "없습니다", "드립니다")
+        for phrase in FinalQualityGate.HARD_BANNED_MACROS:
+            if phrase in normalized:
+                return DraftInspectionResult(
+                    passed=False, stage=5, code="banned_macro",
+                    matched=phrase,
+                    feedback=f"기계적인 블로그 매크로 문구('{phrase}')가 포함되어 있습니다. 매크로 표현을 지우고 본문 속 구체적인 내용에 편안한 일상체로 반응해주세요."
+                )
+        for phrase in formal_endings:
+            if phrase in normalized:
+                return DraftInspectionResult(
+                    passed=False, stage=5, code="formal_register",
+                    matched=phrase,
+                    feedback=f"딱딱한 격식체 어미('{phrase}')가 사용되었습니다. 친근하고 편안한 일상 구어체 존댓말(~요, ~네요 등)로 바꿔주세요."
+                )
+
+        return DraftInspectionResult(
+            passed=True, stage=0, code="ok", feedback="", matched=None
+        )
+
+
 __all__ = [
     "COMMENT_POLICIES",
     "CommentLengthPolicy",
     "CommunityRhythmPreset",
     "FinalQualityGate",
     "FinalQualityResult",
+    "DraftInspectionResult",
+    "CommentDraftInspector",
 ]
+

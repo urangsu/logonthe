@@ -1,0 +1,106 @@
+[
+  {
+    "case_id": 1,
+    "domain": "맛집/카페",
+    "title": "[성수] 뚝섬역 에스프레소 바 카멜커피 7호점 - 앙버터와 시그니처 카멜커피 후기",
+    "legacy": {
+      "text": "달콤한 수제 크림 올린 카멜커피 밸런스가 좋아 보여요 성수동 갈 때 한번 가봐야겠어요",
+      "length": 47,
+      "passed": false,
+      "stage": 3,
+      "code": "repetitive_tail",
+      "feedback": "마지막 문장에 습관적인 중복 마무리('한번 가봐야겠')가 붙어 있습니다. 뒤의 군더더기를 삭제하고 본문의 구체적인 내용에 대한 1문장 반응만 남겨주세요."
+    },
+    "improved": {
+      "text": "바게트에 버터랑 팥앙금 듬뿍 들어간 앙버터 조합 최고네요~",
+      "length": 32,
+      "passed": true,
+      "stage": 0,
+      "code": "ok"
+    },
+    "metrics": {
+      "naturalness": "개선본 우수 (구어체 단문 직결)",
+      "bloat_removal": "설명조 및 습관적 중복 마무리 완전 제거",
+      "groundedness": "본문 디테일에 충실 (지어낸 경험 없음)",
+      "edit_burden": "0자 (수정 불필요 vs 기존본은 50% 이상 삭제 필요)"
+    }
+  },
+  {
+    "case_id": 2,
+    "domain": "여행",
+    "title": "1박 2일 강릉 뚜벅이 여행 코스 추천 | 안목해변 카페거리와 BTS 버스정류장",
+    "legacy": {
+      "text": "에메랄드빛 안목해변 바다 색깔을 이렇게 풀어주니 새롭게 보이네요 꼭 기억해둬야겠네요",
+      "length": 46,
+      "passed": false,
+      "stage": 3,
+      "code": "repetitive_tail",
+      "feedback": "마지막 문장에 습관적인 중복 마무리('기억해둬야겠')가 붙어 있습니다. 뒤의 군더더기를 삭제하고 본문의 구체적인 내용에 대한 1문장 반응만 남겨주세요."
+    },
+    "improved": {
+      "text": "카페 3층 통창에서 바다 보며 멍때리는 시간 넘 힐링이네요~",
+      "length": 33,
+      "passed": true,
+      "stage": 0,
+      "code": "ok"
+    },
+    "metrics": {
+      "naturalness": "개선본 우수 (구어체 단문 직결)",
+      "bloat_removal": "설명조 및 습관적 중복 마무리 완전 제거",
+      "groundedness": "본문 디테일에 충실 (지어낸 경험 없음)",
+      "edit_burden": "0자 (수정 불필요 vs 기존본은 50% 이상 삭제 필요)"
+    }
+  },
+  {
+    "case_id": 3,
+    "domain": "제품/리뷰",
+    "title": "로지텍 MX Master 3S 마우스 3개월 실사용 장단점 솔직 후기",
+    "legacy": {
+      "text": "무한 휠 스크롤 설명이 구체적이라 이해하기 편하네요 참고해야겠어요",
+      "length": 36,
+      "passed": false,
+      "stage": 3,
+      "code": "explanatory_tone",
+      "feedback": "글을 설명하거나 평가하는 문구('설명이 구체적이라')가 포함되어 있습니다. 설명조를 빼고 본문의 구체적인 디테일(메뉴, 비주얼, 사물 등)에 대한 짧은 반응 1문장으로 작성해주세요."
+    },
+    "improved": {
+      "text": "도서관에서도 쓸 수 있는 무소음 클릭감 진짜 탐나네요~",
+      "length": 30,
+      "passed": true,
+      "stage": 0,
+      "code": "ok"
+    },
+    "metrics": {
+      "naturalness": "개선본 우수 (구어체 단문 직결)",
+      "bloat_removal": "설명조 및 습관적 중복 마무리 완전 제거",
+      "groundedness": "본문 디테일에 충실 (지어낸 경험 없음)",
+      "edit_burden": "0자 (수정 불필요 vs 기존본은 50% 이상 삭제 필요)"
+    }
+  },
+  {
+    "case_id": 4,
+    "domain": "일상/공부",
+    "title": "주말 자격증 공부 일상과 도서관 집중 루틴 ☕",
+    "legacy": {
+      "text": "도서관 창가 자리에서 공부하는 부분이 제일 기억에 남네요 도움이 될 것 같아요",
+      "length": 43,
+      "passed": false,
+      "stage": 3,
+      "code": "repetitive_tail",
+      "feedback": "마지막 문장에 습관적인 중복 마무리('도움이 될 것 같')가 붙어 있습니다. 뒤의 군더더기를 삭제하고 본문의 구체적인 내용에 대한 1문장 반응만 남겨주세요."
+    },
+    "improved": {
+      "text": "아침 일찍 도서관 창가 자리 잡고 기출 푸신 거 넘 뿌듯하셨겠어요~",
+      "length": 37,
+      "passed": true,
+      "stage": 0,
+      "code": "ok"
+    },
+    "metrics": {
+      "naturalness": "개선본 우수 (구어체 단문 직결)",
+      "bloat_removal": "설명조 및 습관적 중복 마무리 완전 제거",
+      "groundedness": "본문 디테일에 충실 (지어낸 경험 없음)",
+      "edit_burden": "0자 (수정 불필요 vs 기존본은 50% 이상 삭제 필요)"
+    }
+  }
+]

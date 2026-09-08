@@ -197,6 +197,7 @@ class PostProcessor:
 
         self._context_retry_done = False
         self._food_retry_done = False
+        self._draft_rewrite_done = False
         # TargetPostGuard: 대상 글 일치 여부 확인 (Fail-Open 원천 차단)
         TargetPostGuard.verify(detail_page, post)
 
@@ -529,7 +530,44 @@ class PostProcessor:
                                             expected_request_id=request_id,
                                         )
                                         if gemini_answer:
-                                            from services.comments.community_rhythm import FinalQualityGate
+                                            from services.comments.community_rhythm import FinalQualityGate, CommentDraftInspector
+
+                                            # Step 0: 5단계 초안 검사 (사람 말투, 중복 마무리, 설명조 등)
+                                            recent_submits = []
+                                            if hasattr(self, "history_mgr") and self.history_mgr:
+                                                recent_submits = self.history_mgr.get_recent_submitted_comments(limit=5)
+
+                                            inspection = CommentDraftInspector.inspect(
+                                                gemini_answer, recent_comments=recent_submits, preset=preset
+                                            )
+                                            if not inspection.passed and inspection.code != "need_more_context":
+                                                if not getattr(self, "_draft_rewrite_done", False):
+                                                    self._draft_rewrite_done = True
+                                                    logger.log(
+                                                        f"⚠️ [DRAFT_INSPECT] 초안 검사 미통과 (stage {inspection.stage}: {inspection.code}) "
+                                                        f"-> 1회 재작성 피드백 반영: {inspection.feedback}",
+                                                        "WARNING",
+                                                    )
+                                                    request_id = uuid.uuid4().hex
+                                                    ai_prompt = AIPromptBuilder.build(
+                                                        post.title, post.excerpt, style=self.ai_prompt_style,
+                                                        preset=preset, request_id=request_id,
+                                                        content_focus=content_focus,
+                                                        verified_anchors=food_anchors,
+                                                        secondary_anchors=sec_anchors,
+                                                        style_plan=style_plan,
+                                                        recent_comments=recent_submits,
+                                                        recent_repeats=inspection.matched,
+                                                        rewrite_feedback=inspection.feedback,
+                                                    )
+                                                    if self.state_mgr:
+                                                        self.state_mgr.update(
+                                                            current_ai_prompt=ai_prompt,
+                                                            message="말투 개선 1회 재작성 중..."
+                                                        )
+                                                    gemini_answer = None
+                                                    continue
+
                                             # Step 1: Body validation
                                             body_gate = FinalQualityGate.validate_final_text(
                                                 gemini_answer, preset=preset, source="gemini_body"
@@ -817,9 +855,11 @@ class PostProcessor:
                             logger.log(f"[COMMENT][SUBMIT_REQUESTED] post={post.key} action={action.value}")
                             final_text = CommentInteractionService.read_final_text(detail_page)
                             submitted_cand = final_text or draft_text
+                            is_edited = bool(final_text and final_text.strip() != draft_text.strip())
+                            sub_source = "user_edit" if is_edited else "user_submission"
 
-                            # 등록 직전 최종 read-back 텍스트 Gate 검증
-                            final_gate = FinalQualityGate.validate_final_text(submitted_cand, preset=preset, source="user_submission")
+                            # 등록 직전 최종 read-back 텍스트 Gate 검증 (사용자 직접 수정본은 AI 문체 강제 면제)
+                            final_gate = FinalQualityGate.validate_final_text(submitted_cand, preset=preset, source=sub_source)
                             if not final_gate.valid:
                                 logger.log(f"  ❌ [COMMENT] 등록 직전 댓글 품질 게이트 통과 실패: [{final_gate.code}] {final_gate.reason} (매칭: {final_gate.matched}) - 등록 취소", "ERROR")
                                 cmt_res.status = CommentSubmitState.FAILED
