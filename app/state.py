@@ -40,6 +40,7 @@ class BotRuntimeState:
     comments_count: int = 0
     skipped_count: int = 0
     message: str = "대기 중"
+    pause_reason: Optional[str] = None
 
     # Granular sampling & pipeline metrics
     candidates_count: int = 0
@@ -91,11 +92,16 @@ class StateManager:
         current_post_title: Optional[str] = None,
         current_post_excerpt: Optional[str] = None,
         current_ai_prompt: Optional[str] = None,
-        ai_clipboard_ready: Optional[bool] = None
+        ai_clipboard_ready: Optional[bool] = None,
+        pause_reason: Optional[str] = None
     ):
         with self._lock:
             if new_state is not None:
                 self.state.current_state = new_state
+                if new_state != FeedState.PAUSED and pause_reason is None:
+                    self.state.pause_reason = None
+            if pause_reason is not None:
+                self.state.pause_reason = pause_reason
             if message is not None:
                 self.state.message = message
             if post is not None:

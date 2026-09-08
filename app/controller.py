@@ -22,6 +22,13 @@ from services.clipboard_bridge import ClipboardCommandBridge
 from services.blog_popularity import BlogPopularityService
 from services.like_transaction import LikeCircuitBreaker
 import time
+from naver.comment_guard import (
+    ServerCommentDuplicateGuard,
+    CommentPresenceState,
+    CommentPresenceResult,
+)
+from naver.interaction import CommentInteractionService
+from naver.editor_adapter import MobileDOMResolver
 from services.sampling_service import SamplingHistoryManager
 from services.style_service import StylePlanService
 from services.gemini_extension_bridge import GeminiExtensionBridge
@@ -44,8 +51,8 @@ class FeedController:
         self,
         config: ConfigService,
         history: HistoryStore,
-        state_mgr: StateManager,
-        stop_event: threading.Event,
+        state_mgr: Optional[StateManager] = None,
+        stop_event: Optional[threading.Event] = None,
         command_bridge: Optional[ClipboardCommandBridge] = None,
         pause_event: Optional[threading.Event] = None,
         gemini_extension_bridge: Optional[GeminiExtensionBridge] = None,
@@ -57,9 +64,9 @@ class FeedController:
         else:
             self.config = config
         self.history = history
-        self.state_mgr = state_mgr
-        self.stop_event = stop_event
-        self.pause_event = pause_event
+        self.state_mgr = state_mgr or StateManager()
+        self.stop_event = stop_event or threading.Event()
+        self.pause_event = pause_event or threading.Event()
         self.skip_event = skip_event or threading.Event()
         self.command_bridge = command_bridge or ClipboardCommandBridge()
         self.gemini_extension_bridge = gemini_extension_bridge
@@ -73,7 +80,60 @@ class FeedController:
         )
         self.sampling_manager = SamplingHistoryManager()
         self.campaign_id = self.config.get("campaign_id") or f"camp_{int(time.time())}"
+        if self.config.get("campaign_id") != self.campaign_id:
+            self.config["campaign_id"] = self.campaign_id
+            if hasattr(self.config_service, "set"):
+                try:
+                    self.config_service.set("campaign_id", self.campaign_id)
+                except Exception:
+                    pass
         self._thread: Optional[threading.Thread] = None
+        self.like_success_count = 0
+        self.comment_submitted_count = 0
+        self.skipped_count = 0
+        self.failed_count = 0
+        self.consecutive_gemini_failures = 0
+        self.gemini_consecutive_failure_limit = int(self.config.get("gemini_consecutive_failure_limit", 3))
+
+    def _handle_post_result(self, result: PostProcessResult) -> None:
+        """포스트 처리 결과에 따라 통계 및 Gemini 연속 실패 회로차단기를 갱신합니다."""
+        raw_err = getattr(result.comment_result, "error", "")
+        cmt_err = raw_err.lower() if isinstance(raw_err, str) else ""
+
+        is_gemini_failure = False
+        status = getattr(result.comment_result, "status", None)
+        if cmt_err and status in (CommentSubmitState.FAILED, CommentSubmitState.SKIPPED):
+            is_gemini_failure = cmt_err.startswith("gemini_failed") or cmt_err in (
+                "failed", "timeout", "publish_rejected", "response_timeout", "extension_not_ready", "context_insufficient"
+            )
+
+        if result.like_result.action_taken or result.like_result.state_after == LikeState.LIKED:
+            self.like_success_count += 1
+        if result.comment_result.status == CommentSubmitState.SUBMITTED:
+            self.comment_submitted_count += 1
+            self.consecutive_gemini_failures = 0
+        elif result.comment_result.status == CommentSubmitState.SUBMISSION_UNKNOWN:
+            self.state_mgr.update(inc_submission_unknown=True)
+        elif result.comment_result.status == CommentSubmitState.SKIPPED:
+            self.skipped_count += 1
+            if not is_gemini_failure:
+                self.consecutive_gemini_failures = 0
+
+        if result.like_result.error or result.comment_result.status == CommentSubmitState.FAILED:
+            self.failed_count += 1
+
+        if is_gemini_failure:
+            self.consecutive_gemini_failures += 1
+            logger.log(f"  ⚠️ [CONTROLLER] Gemini 실패 카운트 증가: {self.consecutive_gemini_failures}/{self.gemini_consecutive_failure_limit} (오류: {cmt_err})")
+            if self.consecutive_gemini_failures >= self.gemini_consecutive_failure_limit:
+                logger.log(f"🚨 [CONTROLLER] Gemini 연결/생성이 {self.consecutive_gemini_failures}회 연속 실패하여 작업을 일시 정지합니다.", "ERROR")
+                if self.pause_event:
+                    self.pause_event.set()
+                self.state_mgr.update(
+                    new_state=FeedState.PAUSED,
+                    pause_reason="gemini_circuit_breaker",
+                    message="Gemini 실패 (3회 연속) - 브라우저 확인 필요"
+                )
 
     def request_skip_current_post(self):
         """현재 처리 중인 글을 건너뛰고 다음 글로 즉시 이동"""
@@ -97,9 +157,76 @@ class FeedController:
     def stop(self):
         self.stop_event.set()
         self.pacing.interrupt()
+        if self.pause_event:
+            self.pause_event.clear()
         if self.session:
             self.session.close(reason="user_stop")
             self.session = None
+
+    def recover_unconfirmed_submissions(self, page=None) -> int:
+        """
+        미확정(SUBMISSION_UNKNOWN) 상태로 남아있는 모든 포스트에 대해
+        실제 네이버 서버 댓글 목록을 조회하여 상태를 복구(SUBMITTED 확정 또는 해제)합니다.
+        """
+        if not hasattr(self.history, "get_unconfirmed_posts"):
+            return 0
+        unconfirmed = self.history.get_unconfirmed_posts()
+        if not isinstance(unconfirmed, dict) or not unconfirmed:
+            return 0
+
+        logger.log(f"🔍 [RECOVERY] 미확정(SUBMISSION_UNKNOWN) 포스트 {len(unconfirmed)}건에 대해 서버 검증 복구를 시작합니다...")
+        resolved_count = 0
+        allocated_page = False
+        check_page = page
+
+        try:
+            if not check_page:
+                if not self.session:
+                    return 0
+                check_page = self.session.get_detail_page()
+                allocated_page = True
+
+            for post_key, post_data in list(unconfirmed.items()):
+                if self.stop_event and self.stop_event.is_set():
+                    break
+                url = post_data.get("url")
+                if not url:
+                    continue
+                expected_text = (post_data.get("comment", {}).get("submitted_text") or "").strip()
+                logger.log(f"  🔍 [RECOVERY] 대상 확인 중: {post_key} ({url})")
+                try:
+                    check_page.goto(url, wait_until="domcontentloaded", timeout=15000)
+                    open_ok, open_reason = CommentInteractionService.open_comment_layer(check_page, self.stop_event)
+                    if not open_ok:
+                        logger.log(f"  ⚠️ [RECOVERY] 댓글 레이어 오픈 불가({open_reason}) -> 미확정 격리 유지: {post_key}")
+                        continue
+
+                    editor_context = MobileDOMResolver.get_comment_editor_context(check_page)
+                    presence_frame = editor_context["frame"] if editor_context else check_page
+                    pres = ServerCommentDuplicateGuard.scan_page_for_my_comment(
+                        presence_frame,
+                        stop_event=self.stop_event,
+                        expected_text=expected_text
+                    )
+                    if pres.state == CommentPresenceState.PRESENT:
+                        logger.log(f"  ✅ [RECOVERY] 서버 목록에서 본인 댓글이 확인되었습니다 -> SUBMITTED로 확정: {post_key}")
+                        self.history.resolve_unconfirmed_post(post_key, CommentSubmitState.SUBMITTED)
+                        resolved_count += 1
+                    elif pres.state == CommentPresenceState.ABSENT and pres.list_complete:
+                        logger.log(f"  ℹ️ [RECOVERY] 서버 목록에 댓글이 없음이 확인되었습니다 -> 미확정 해제 및 재시도 허용: {post_key}")
+                        self.history.clear_unconfirmed_post(post_key)
+                        resolved_count += 1
+                    else:
+                        logger.log(f"  ⚠️ [RECOVERY] 댓글 상태 불완전(UNKNOWN) -> 중복 방지를 위해 미확정 격리 유지: {post_key}")
+                except Exception as rec_err:
+                    logger.log(f"  ⚠️ [RECOVERY] {post_key} 검증 중 예외 발생: {rec_err}", "WARNING")
+        finally:
+            if allocated_page and check_page:
+                try:
+                    check_page.close()
+                except Exception:
+                    pass
+        return resolved_count
 
     def pause(self):
         if self.pause_event:
@@ -195,6 +322,11 @@ class FeedController:
                 self.state_mgr.update(new_state=FeedState.ERROR, message=err_msg)
                 logger.log("❌ [LOGIN_REQUIRED] 네이버 로그인이 필요합니다.", "ERROR")
                 return
+
+            unconf = self.history.get_unconfirmed_posts() if hasattr(self.history, "get_unconfirmed_posts") else None
+            if comment_enabled and isinstance(unconf, dict) and unconf:
+                self.state_mgr.update(message="미확정 댓글 서버 상태 복구 확인 중...")
+                self.recover_unconfirmed_submissions()
 
             feed_page = self.session.get_feed_page()
             gemini_page = self.session.get_gemini_page() if (gemini_web_enabled and gemini_browser_mode == "managed_playwright") else None
@@ -299,9 +431,9 @@ class FeedController:
                     self.state_mgr.update(inc_candidate=True)
 
                     # 컴포넌트 레벨 멱등성 검사 (Like와 Comment 독립 판단)
-                    is_local_liked = self.history.is_liked(post.key)
-                    is_local_commented = self.history.is_comment_submitted(post.key)
-                    is_local_unconfirmed = self.history.is_comment_unconfirmed(post.key)
+                    is_local_liked = (self.history.is_liked(post.key) is True)
+                    is_local_commented = (self.history.is_comment_submitted(post.key) is True)
+                    is_local_unconfirmed = (self.history.is_comment_unconfirmed(post.key) is True) if hasattr(self.history, "is_comment_unconfirmed") else False
 
                     # 등록 결과 불명(SUBMISSION_UNKNOWN) 상태인 포스트의 재확인 및 복구 절차
                     if is_local_unconfirmed and comment_enabled:
@@ -309,19 +441,24 @@ class FeedController:
                         try:
                             check_page = self.session.get_detail_page()
                             check_page.goto(post.url, wait_until="domcontentloaded", timeout=15000)
-                            ServerCommentDuplicateGuard.ensure_comment_section_visible(check_page)
-                            pres = ServerCommentDuplicateGuard.scan_page_for_my_comment(check_page, stop_event=self.stop_event)
-                            if pres.state == CommentPresenceState.PRESENT:
-                                logger.log(f"  ✅ [RECOVERY] 서버 목록에서 본인 댓글이 확인되었습니다 -> SUBMITTED로 상태 확정: {post.key}")
-                                self.history.resolve_unconfirmed_post(post.key, CommentSubmitState.SUBMITTED)
-                                is_local_commented = True
-                                is_local_unconfirmed = False
-                            elif pres.state == CommentPresenceState.ABSENT and pres.list_complete:
-                                logger.log(f"  ℹ️ [RECOVERY] 서버 목록에 댓글이 확실히 없음이 확인되었습니다 -> 미확정 해제 및 재시도 허용: {post.key}")
-                                self.history.clear_unconfirmed_post(post.key)
-                                is_local_unconfirmed = False
+                            open_ok, open_reason = CommentInteractionService.open_comment_layer(check_page, self.stop_event)
+                            if open_ok:
+                                editor_context = MobileDOMResolver.get_comment_editor_context(check_page)
+                                presence_frame = editor_context["frame"] if editor_context else check_page
+                                pres = ServerCommentDuplicateGuard.scan_page_for_my_comment(presence_frame, stop_event=self.stop_event)
+                                if pres.state == CommentPresenceState.PRESENT:
+                                    logger.log(f"  ✅ [RECOVERY] 서버 목록에서 본인 댓글이 확인되었습니다 -> SUBMITTED로 상태 확정: {post.key}")
+                                    self.history.resolve_unconfirmed_post(post.key, CommentSubmitState.SUBMITTED)
+                                    is_local_commented = True
+                                    is_local_unconfirmed = False
+                                elif pres.state == CommentPresenceState.ABSENT and pres.list_complete:
+                                    logger.log(f"  ℹ️ [RECOVERY] 서버 목록에 댓글이 확실히 없음이 확인되었습니다 -> 미확정 해제 및 재시도 허용: {post.key}")
+                                    self.history.clear_unconfirmed_post(post.key)
+                                    is_local_unconfirmed = False
+                                else:
+                                    logger.log(f"  ⚠️ [RECOVERY] 댓글 상태 판정 불가(UNKNOWN) -> 중복 방지를 위해 미확정 격리를 유지합니다: {post.key}")
                             else:
-                                logger.log(f"  ⚠️ [RECOVERY] 댓글 상태 판정 불가(UNKNOWN) -> 중복 방지를 위해 미확정 격리를 유지합니다: {post.key}")
+                                logger.log(f"  ⚠️ [RECOVERY] 댓글 레이어 준비 실패({open_reason}) -> 미확정 격리 유지: {post.key}")
                         except Exception as rec_err:
                             logger.log(f"  ⚠️ [RECOVERY] 미확정 상태 재확인 중 예외: {rec_err}", "WARNING")
 
@@ -384,23 +521,14 @@ class FeedController:
                     try:
                         result = processor.process(detail_page, post, action_plan=action_plan)
                         self.history.record_result(result)
-                        if result.like_result.action_taken or result.like_result.state_after == LikeState.LIKED:
-                            like_success_count += 1
-                        if result.comment_result.status == CommentSubmitState.SUBMITTED:
-                            comment_submitted_count += 1
-                            consecutive_gemini_failures = 0
-                        elif result.comment_result.status == CommentSubmitState.SUBMISSION_UNKNOWN:
-                            self.state_mgr.update(inc_submission_unknown=True)
-                        elif result.comment_result.status == CommentSubmitState.SKIPPED:
-                            skipped_count += 1
-                            consecutive_gemini_failures = 0
-                        if result.like_result.error or result.comment_result.status == CommentSubmitState.FAILED:
-                            failed_count += 1
-                            if getattr(result.comment_result, "error", "") in ("failed", "timeout", "publish_rejected", "response_timeout", "extension_not_ready"):
-                                consecutive_gemini_failures += 1
-                                if consecutive_gemini_failures >= 3:
-                                    logger.log(f"🚨 [CONTROLLER] Gemini 연결/생성이 {consecutive_gemini_failures}회 연속 실패하여 작업을 일시 정지합니다.", "ERROR")
-                                    self.state_mgr.update(new_state=FeedState.PAUSED, message="Gemini 반복 실패 (3회 연속) - 브라우저 확인 필요")
+                        self._handle_post_result(result)
+                        while self.pause_event and self.pause_event.is_set() and not self.stop_event.is_set():
+                            time.sleep(0.3)
+                            cmd = self.command_bridge.pop_command() if self.command_bridge else None
+                            if cmd:
+                                self.consecutive_gemini_failures = 0
+                                self.pause_event.clear()
+                                break
                     except StopRequestedException:
                         final_close_reason = "user_stop"
                         raise
@@ -497,3 +625,6 @@ class FeedController:
                 self.session.close(reason=final_close_reason)
                 self.session = None
             self.pacing.reset()
+
+
+BotController = FeedController

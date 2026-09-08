@@ -167,7 +167,7 @@ async function startHeartbeatLoop() {
         buildId: contract.runtimeBuild,
         protocolVersion: contract.protocolVersion,
         bridgeSchemaVersion: contract.bridgeSchemaVersion,
-        consumerId: 'background-r8',
+        consumerId: 'background-r9',
         lastRuntimePingAt: now,
         busyRequestId: activeRuntime?.ping.busyRequestId || null,
         busySince: activeRuntime?.ping.busySince || null,
@@ -282,7 +282,7 @@ async function runCommandCycle() {
   try {
     const claim = await bridgeFetch('/v1/claim', 'POST', {
       requestId: command.requestId,
-      claimant: contract.runtimeBuild
+      claimant: `${contract.runtimeBuild}_tab_${activeRuntime.tabId}`
     }, 5000);
     if (!claim.claimed) {
       return;
@@ -369,7 +369,7 @@ async function runCommandCycle() {
         text: execResult?.text || '',
         error: execResult?.error || ''
       }, 10000);
-      if (res && res.ok) {
+      if (res && (res.accepted === true || res.reason === 'already_accepted')) {
         resultDelivered = true;
         break;
       }

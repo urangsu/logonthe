@@ -55,7 +55,7 @@ class TestHighReliabilityMatrix(unittest.TestCase):
 
     def test_gem_01_result_then_busy_heartbeat_settling_window(self):
         """GEM-01: 결과 수신 직후 이전 busy 하트비트 도착 시 settling 유예로 정상 전환 처리"""
-        bridge = GeminiExtensionBridge(expected_extension_version="13.2.3", expected_build_id="13.2.3-r8")
+        bridge = GeminiExtensionBridge(expected_extension_version="13.2.3", expected_build_id="13.2.3-r9")
         cmd = GeminiCommand("req_01", "post_01", 1, "prompt", time.time(), time.time() + 50)
         bridge.publish(cmd)
         bridge.claim_command("req_01")
@@ -68,7 +68,7 @@ class TestHighReliabilityMatrix(unittest.TestCase):
             "status": "busy",
             "busyRequestId": "req_01",
             "extensionVersion": "13.2.3",
-            "contentBuild": "13.2.3-r8",
+            "contentBuild": "13.2.3-r9",
             "protocolVersion": 3,
             "bridgeSchemaVersion": 2,
         })
@@ -80,7 +80,7 @@ class TestHighReliabilityMatrix(unittest.TestCase):
 
     def test_gem_03_active_request_not_cancelled_by_foreign_status(self):
         """GEM-03: 정상 생성 중 다른 요청 상태 보고로 활성 요청 오취소 방지"""
-        bridge = GeminiExtensionBridge(expected_extension_version="13.2.3", expected_build_id="13.2.3-r8")
+        bridge = GeminiExtensionBridge(expected_extension_version="13.2.3", expected_build_id="13.2.3-r9")
         cmd = GeminiCommand("req_active", "post_01", 1, "prompt", time.time(), time.time() + 50)
         bridge.publish(cmd)
 
@@ -89,7 +89,7 @@ class TestHighReliabilityMatrix(unittest.TestCase):
             "status": "busy",
             "busyRequestId": "req_active",
             "extensionVersion": "13.2.3",
-            "contentBuild": "13.2.3-r8",
+            "contentBuild": "13.2.3-r9",
             "protocolVersion": 3,
             "bridgeSchemaVersion": 2,
         })
@@ -99,7 +99,7 @@ class TestHighReliabilityMatrix(unittest.TestCase):
 
     def test_gem_04_skip_discards_late_response(self):
         """GEM-04: 건너뛰기(Skip) 후 도착한 늦은 응답은 다음 글에 적용 금지"""
-        bridge = GeminiExtensionBridge(expected_extension_version="13.2.3", expected_build_id="13.2.3-r8")
+        bridge = GeminiExtensionBridge(expected_extension_version="13.2.3", expected_build_id="13.2.3-r9")
         cmd1 = GeminiCommand("req_old", "post_old", 1, "prompt", time.time(), time.time() + 50)
         bridge.publish(cmd1)
 
@@ -115,7 +115,7 @@ class TestHighReliabilityMatrix(unittest.TestCase):
 
     def test_gem_05_idempotent_duplicate_result_submission(self):
         """GEM-05: 동일 결과 재전송 시 중복 처리 없이 멱등 응답(already_accepted) 반환"""
-        bridge = GeminiExtensionBridge(expected_extension_version="13.2.3", expected_build_id="13.2.3-r8")
+        bridge = GeminiExtensionBridge(expected_extension_version="13.2.3", expected_build_id="13.2.3-r9")
         cmd = GeminiCommand("req_05", "post_05", 1, "prompt", time.time(), time.time() + 50)
         bridge.publish(cmd)
         bridge.claim_command("req_05")
@@ -166,7 +166,7 @@ class TestHighReliabilityMatrix(unittest.TestCase):
 
     def test_gem_06_claim_fixes_ownership_to_specific_runtime(self):
         """GEM-06: 여러 제미나이 탭이 있을 때 claim한 런타임에 고정"""
-        bridge = GeminiExtensionBridge(expected_extension_version="13.2.3", expected_build_id="13.2.3-r8")
+        bridge = GeminiExtensionBridge(expected_extension_version="13.2.3", expected_build_id="13.2.3-r9")
         cmd = GeminiCommand("req_06", "post_06", 1, "prompt", time.time(), time.time() + 50)
         bridge.publish(cmd)
 
@@ -180,7 +180,7 @@ class TestHighReliabilityMatrix(unittest.TestCase):
 
     def test_gem_07_result_delivery_ack_lost_client_retries(self):
         """GEM-07: 결과 전달 응답(ACK) 유실 시 클라이언트 재전송 멱등 수용 및 브릿지 일관성"""
-        bridge = GeminiExtensionBridge(expected_extension_version="13.2.3", expected_build_id="13.2.3-r8")
+        bridge = GeminiExtensionBridge(expected_extension_version="13.2.3", expected_build_id="13.2.3-r9")
         cmd = GeminiCommand("req_07", "post_07", 1, "prompt", time.time(), time.time() + 50)
         bridge.publish(cmd)
         bridge.claim_command("req_07")
@@ -206,11 +206,11 @@ class TestHighReliabilityMatrix(unittest.TestCase):
     # -------------------------------------------------------------------------
 
     def test_sub_01_concurrent_timer_and_user_click_lock_maximum_one_submit(self):
-        """SUB-01: 타이머 만료와 사용자 클릭이 겹쳐도 브라우저 잠금으로 1회만 제출"""
+        """SUB-01: 타이머 만료와 사용자 클릭 경합 시 브라우저 잠금 및 1회용 제출 permit으로 1회만 제출"""
         mock_frame = MagicMock()
         mock_frame.is_closed.return_value = False
 
-        # 사용자 클릭이 먼저 잠금을 획득했다고 가정 (__LOCK_FAILED__ 반환)
+        # 1. Evaluate lock failure (__LOCK_FAILED__)
         def mock_evaluate(script, *args):
             if "return [act, dirty]" in script:
                 return [None, False]
@@ -222,7 +222,6 @@ class TestHighReliabilityMatrix(unittest.TestCase):
 
         with patch("naver.interaction.MobileDOMResolver.get_comment_editor_context", return_value={"frame": mock_frame}):
             stop_event = threading.Event()
-            # timer expires, but lock fails -> auto submit disarmed
             threading.Timer(0.1, stop_event.set).start()
             action = CommentInteractionService.wait_for_user_action(
                 self.mock_page,
@@ -230,6 +229,35 @@ class TestHighReliabilityMatrix(unittest.TestCase):
                 timeout_seconds=0.05
             )
             self.assertEqual(action, UserAction.STOP)
+
+        # 2. Test single-use permit consumption in submit_and_verify
+        btn_mock = MagicMock()
+        btn_mock.is_disabled.return_value = False
+        submit_ctx = {"button": btn_mock, "frame": mock_frame}
+
+        eval_scripts = []
+        def record_eval(script, *args):
+            eval_scripts.append(script)
+            if "currentText" in script:
+                return {"isComposing": False, "isDirty": False, "currentText": "테스트 댓글 작성 내용이 아주 유익하고 알차게 잘 읽히네요~"}
+            return None
+
+        mock_frame.evaluate.side_effect = record_eval
+        with patch("naver.interaction.MobileDOMResolver.get_comment_editor_context", return_value={"frame": mock_frame}), \
+             patch("naver.interaction.MobileDOMResolver.get_comment_submit_context", return_value=submit_ctx), \
+             patch("naver.interaction.ServerCommentDuplicateGuard.capture_submission_baseline", return_value=None), \
+             patch("naver.interaction.ServerCommentDuplicateGuard.scan_page_for_my_comment",
+                   return_value=CommentPresenceResult(state=CommentPresenceState.PRESENT, confidence=LikeConfidence.HIGH)):
+            status = CommentInteractionService.submit_and_verify(
+                self.mock_page,
+                "테스트 댓글 작성 내용이 아주 유익하고 알차게 잘 읽히네요~",
+                click=True
+            )
+            self.assertEqual(status, CommentSubmitState.SUBMITTED)
+            # Verify single-use permit was created
+            self.assertTrue(any("__NAVER_SUBMIT_PERMIT__" in s for s in eval_scripts))
+            # Verify btn.click() was called exactly once
+            self.assertEqual(btn_mock.click.call_count, 1)
 
     def test_sub_02_last_second_user_typing_disarms_auto_submit(self):
         """SUB-02: 마지막 순간 사용자 입력 감지 시 자동 등록 즉시 해제"""
@@ -319,21 +347,46 @@ class TestHighReliabilityMatrix(unittest.TestCase):
             self.assertNotEqual(action, UserAction.SUBMIT)
             self.assertEqual(action, UserAction.STOP)
 
-    def test_sub_06_post_verification_editor_mutation_does_not_double_submit(self):
-        """SUB-06: 검증 및 제출 완료 후 에디터 변경 시 추가 이중 제출 방지"""
-        mock_frame = MagicMock()
-        mock_frame.is_closed.return_value = False
-        mock_frame.evaluate.return_value = [None, False]
+    def test_sub_06_pre_click_editor_mutation_aborts_submit_fail_closed(self):
+        """SUB-06: 결정 후 제출 직전(Pre-click) 에디터 본문 변경 또는 IME 조합 감지 시 자동 제출 중단(Fail-closed)"""
+        btn_mock = MagicMock()
+        btn_mock.is_disabled.return_value = False
+        submit_ctx = {"button": btn_mock, "frame": self.mock_page}
 
-        with patch("naver.interaction.MobileDOMResolver.get_comment_editor_context", return_value={"frame": mock_frame}):
-            stop_event = threading.Event()
-            threading.Timer(0.05, stop_event.set).start()
-            action = CommentInteractionService.wait_for_user_action(
+        # Case 1: Editor text changed right before click
+        def mock_eval_mutated(script, *args):
+            if "currentText" in script:
+                return {"isComposing": False, "isDirty": False, "currentText": "사용자가 몰래 고친 다른 내용"}
+            return None
+
+        self.mock_page.evaluate.side_effect = mock_eval_mutated
+        with patch("naver.interaction.MobileDOMResolver.get_comment_editor_context", return_value={"frame": self.mock_page}), \
+             patch("naver.interaction.MobileDOMResolver.get_comment_submit_context", return_value=submit_ctx):
+            status = CommentInteractionService.submit_and_verify(
                 self.mock_page,
-                stop_event=stop_event,
-                timeout_seconds=0.02
+                "원래 작성하려던 댓글 내용",
+                click=True
             )
-            self.assertEqual(action, UserAction.STOP)
+            # Must fail without clicking button!
+            self.assertEqual(status, CommentSubmitState.FAILED)
+            btn_mock.click.assert_not_called()
+
+        # Case 2: IME composing right before click
+        def mock_eval_composing(script, *args):
+            if "currentText" in script:
+                return {"isComposing": True, "isDirty": False, "currentText": "원래 작성하려던 댓글 내용"}
+            return None
+
+        self.mock_page.evaluate.side_effect = mock_eval_composing
+        with patch("naver.interaction.MobileDOMResolver.get_comment_editor_context", return_value={"frame": self.mock_page}), \
+             patch("naver.interaction.MobileDOMResolver.get_comment_submit_context", return_value=submit_ctx):
+            status = CommentInteractionService.submit_and_verify(
+                self.mock_page,
+                "원래 작성하려던 댓글 내용",
+                click=True
+            )
+            self.assertEqual(status, CommentSubmitState.FAILED)
+            btn_mock.click.assert_not_called()
 
     def test_sub_07_clipboard_command_post_key_mismatch_rejected(self):
         """SUB-07: 이전 글의 클립보드 명령 도착 시 post_key 불일치로 적용 거절"""
@@ -458,23 +511,47 @@ class TestHighReliabilityMatrix(unittest.TestCase):
         self.assertEqual(res.state, CommentPresenceState.PRESENT)
         self.assertEqual(res.comment_no, "new_200")
 
-    def test_ver_06_restart_skips_unconfirmed_and_recovers_when_present(self):
-        """VER-06: 프로세스 재시작 시 unconfirmed 글의 복구 (서버 확인 시 SUBMITTED 승격, 없을 시 미확정 해제)"""
+    def test_ver_06_controller_recovers_unconfirmed_submissions_end_to_end(self):
+        """VER-06: 컨트롤러 시작 시 또는 복구 호출 시 실제 페이지 탐색과 scan_page_for_my_comment를 연동하여 미확정 글 복구"""
+        from app.controller import BotController
         history = HistoryStore(self.history_path)
-        history.record_pre_submit("testblog:12345", "제출 시도 댓글")
-        self.assertTrue(history.is_comment_unconfirmed("testblog:12345"))
-        self.assertFalse(history.is_comment_submitted("testblog:12345"))
+        history.record_pre_submit("testblog:12345", "서버에 이미 등록된 댓글", url="https://m.blog.naver.com/testblog/12345")
+        history.record_pre_submit("testblog:67890", "서버에 없는 댓글", url="https://m.blog.naver.com/testblog/67890")
+        history.record_pre_submit("testblog:99999", "확인 불가 댓글", url="https://m.blog.naver.com/testblog/99999")
 
-        # 1. 서버에 댓글이 실제로 등록된 것으로 확인된 경우 -> SUBMITTED로 복구
-        history.resolve_unconfirmed_post("testblog:12345", CommentSubmitState.SUBMITTED)
+        config = {"campaign_id": "test_camp_1"}
+        controller = BotController(config=config, history=history)
+
+        mock_page = MagicMock()
+        mock_page.is_closed.return_value = False
+
+        def mock_scan(frame, stop_event=None, expected_text="", baseline=None):
+            if "12345" in mock_page.url:
+                return CommentPresenceResult(state=CommentPresenceState.PRESENT, comment_no="1001", confidence=LikeConfidence.HIGH)
+            elif "67890" in mock_page.url:
+                return CommentPresenceResult(state=CommentPresenceState.ABSENT, confidence=LikeConfidence.HIGH, list_complete=True)
+            else:
+                return CommentPresenceResult(state=CommentPresenceState.UNKNOWN, confidence=LikeConfidence.LOW, list_complete=False)
+
+        def mock_goto(url, **kwargs):
+            mock_page.url = url
+
+        mock_page.goto.side_effect = mock_goto
+
+        with patch("naver.interaction.CommentInteractionService.open_comment_layer", return_value=(True, "ok")), \
+             patch("naver.interaction.MobileDOMResolver.get_comment_editor_context", return_value={"frame": mock_page}), \
+             patch("naver.comment_guard.ServerCommentDuplicateGuard.scan_page_for_my_comment", side_effect=mock_scan):
+            resolved = controller.recover_unconfirmed_submissions(mock_page)
+
+        self.assertEqual(resolved, 2)
+        # 12345 -> confirmed SUBMITTED
         self.assertTrue(history.is_comment_submitted("testblog:12345"))
         self.assertFalse(history.is_comment_unconfirmed("testblog:12345"))
-
-        # 2. 서버에 댓글이 없음이 확인된 경우 -> clear 후 재시도 가능
-        history.record_pre_submit("testblog:67890", "다른 미확정 글")
-        self.assertTrue(history.is_comment_unconfirmed("testblog:67890"))
-        history.clear_unconfirmed_post("testblog:67890")
+        # 67890 -> ABSENT with list_complete -> cleared from unconfirmed
         self.assertFalse(history.is_comment_unconfirmed("testblog:67890"))
+        self.assertFalse(history.is_comment_submitted("testblog:67890"))
+        # 99999 -> UNKNOWN -> stays unconfirmed
+        self.assertTrue(history.is_comment_unconfirmed("testblog:99999"))
 
     def test_ver_07_pre_submit_persists_unconfirmed_before_click(self):
         """VER-07: 등록 버튼 클릭 직전에 crash/비정상 종료 대비 사전 미확정 상태를 영속 저장"""
@@ -500,6 +577,120 @@ class TestHighReliabilityMatrix(unittest.TestCase):
         reloaded = HistoryStore(self.history_path)
         self.assertTrue(reloaded.is_comment_unconfirmed(self.post.key))
         self.assertIn(self.post.key, reloaded.get_unconfirmed_posts())
+
+    def test_ver_08_pre_submit_persistence_failure_aborts_submit(self):
+        """사전 미확정 기록(record_pre_submit) 파일 쓰기 실패 시 자동 제출 중단(Fail-closed)"""
+        from services.history import HistoryPersistenceError
+        history = MagicMock(spec=HistoryStore)
+        history.is_comment_unconfirmed.return_value = False
+        history.is_comment_submitted.return_value = False
+        history.record_pre_submit.side_effect = HistoryPersistenceError("Disk write failed: simulated out of space")
+
+        config = {"gemini_response_timeout": 50.0}
+        processor = PostProcessor(config=config, comment_enabled=True, gemini_web_enabled=False, history_store=history)
+
+        from naver.content_extractor import PostContext
+        with patch("naver.interaction.CommentInteractionService.open_comment_layer", return_value=(True, "ok")), \
+             patch("naver.comment_guard.ServerCommentDuplicateGuard.scan_page_for_my_comment", return_value=CommentPresenceResult(state=CommentPresenceState.ABSENT, confidence="high")), \
+             patch("naver.content_extractor.ContentContextExtractor.extract", return_value=PostContext(title=self.post.title, excerpt="본문")), \
+             patch("naver.editor_adapter.CommentEditorAdapter.set_text", return_value=True), \
+             patch("naver.interaction.CommentInteractionService.install_keyboard_listener"), \
+             patch("naver.editor_adapter.CommentEditorAdapter.focus"), \
+             patch("naver.interaction.CommentInteractionService.read_final_text", return_value="작성된 댓글이 정말 훌륭하고 유익하네요~"), \
+             patch("naver.interaction.CommentInteractionService.wait_for_user_action", return_value=UserAction.AUTO_SUBMIT), \
+             patch("naver.interaction.CommentInteractionService.submit_and_verify") as mock_submit:
+            res = processor.process(self.mock_page, self.post)
+
+            # Must NOT call submit_and_verify!
+            mock_submit.assert_not_called()
+            self.assertEqual(res.comment_result.status, CommentSubmitState.FAILED)
+            self.assertEqual(res.comment_result.error, "pre_submit_persistence_failed")
+
+    def test_ver_09_click_exception_returns_submission_unknown(self):
+        """버튼 클릭 도중/직후 예외 발생 시 FAILED로 단정하지 않고 SUBMISSION_UNKNOWN 반환"""
+        btn_mock = MagicMock()
+        btn_mock.is_disabled.return_value = False
+        btn_mock.click.side_effect = Exception("Page crashed right after click event dispatched")
+        submit_ctx = {"button": btn_mock, "frame": self.mock_page}
+
+        with patch("naver.interaction.MobileDOMResolver.get_comment_editor_context", return_value={"frame": self.mock_page}), \
+             patch("naver.interaction.MobileDOMResolver.get_comment_submit_context", return_value=submit_ctx), \
+             patch("naver.interaction.ServerCommentDuplicateGuard.capture_submission_baseline", return_value=None):
+            status = CommentInteractionService.submit_and_verify(
+                self.mock_page,
+                "테스트 본문 내용이 아주 유익하고 정성스러운 후기네요~",
+                click=True
+            )
+            self.assertEqual(status, CommentSubmitState.SUBMISSION_UNKNOWN)
+
+    def test_cb_01_gemini_circuit_breaker_pauses_worker_thread(self):
+        """3회 연속 Gemini 실패 시 feed_state=PAUSED, pause_event.set(), pause_reason='gemini_circuit_breaker' 확인"""
+        from app.controller import BotController
+        from app.models import (
+            FeedPost, FeedSourceType, PostProcessResult,
+            LikeProcessResult, CommentProcessResult,
+            CommentSubmitState, LikeState
+        )
+        from app.state import FeedState
+
+        history = HistoryStore(self.history_path)
+        config = {"gemini_consecutive_failure_limit": 3}
+        controller = BotController(config=config, history=history)
+
+        post1 = FeedPost(key="p1", source=FeedSourceType.NEIGHBOR, url="https://m.blog.naver.com/u/1", title="t1")
+        post2 = FeedPost(key="p2", source=FeedSourceType.NEIGHBOR, url="https://m.blog.naver.com/u/2", title="t2")
+        post3 = FeedPost(key="p3", source=FeedSourceType.NEIGHBOR, url="https://m.blog.naver.com/u/3", title="t3")
+
+        # 1차 실패 (SKIPPED with gemini_failed:timeout)
+        r1 = PostProcessResult(
+            post=post1,
+            like_result=LikeProcessResult(state_after=LikeState.UNKNOWN),
+            comment_result=CommentProcessResult(status=CommentSubmitState.SKIPPED, error="gemini_failed:timeout")
+        )
+        # 2차 실패 (FAILED with gemini_failed:connection_refused)
+        r2 = PostProcessResult(
+            post=post2,
+            like_result=LikeProcessResult(state_after=LikeState.UNKNOWN),
+            comment_result=CommentProcessResult(status=CommentSubmitState.FAILED, error="gemini_failed:connection_refused")
+        )
+        # 3차 실패 (SKIPPED with gemini_failed:timeout)
+        r3 = PostProcessResult(
+            post=post3,
+            like_result=LikeProcessResult(state_after=LikeState.UNKNOWN),
+            comment_result=CommentProcessResult(status=CommentSubmitState.SKIPPED, error="gemini_failed:timeout")
+        )
+
+        self.assertFalse(controller.pause_event.is_set())
+
+        # Process post 1
+        controller._handle_post_result(r1)
+        self.assertEqual(controller.consecutive_gemini_failures, 1)
+        self.assertFalse(controller.pause_event.is_set())
+
+        # Process post 2
+        controller._handle_post_result(r2)
+        self.assertEqual(controller.consecutive_gemini_failures, 2)
+        self.assertFalse(controller.pause_event.is_set())
+
+        # Process post 3 -> triggers circuit breaker
+        controller._handle_post_result(r3)
+        self.assertEqual(controller.consecutive_gemini_failures, 3)
+        self.assertTrue(controller.pause_event.is_set())
+        self.assertEqual(controller.state_mgr.state.current_state, FeedState.PAUSED)
+        self.assertEqual(controller.state_mgr.state.pause_reason, "gemini_circuit_breaker")
+
+    def test_camp_01_campaign_id_persists_across_controller_restarts(self):
+        """컨트롤러 생성 시 자동 부여된 campaign_id가 설정에 저장되어 재시작 시에도 유지"""
+        from app.controller import BotController
+        config = {}
+        c1 = BotController(config=config, history=HistoryStore(self.history_path))
+        camp_id = c1.campaign_id
+        self.assertTrue(camp_id.startswith("camp_"))
+        self.assertEqual(config.get("campaign_id"), camp_id)
+
+        # 재시작 시 동일 config로 컨트롤러 생성 시 동일 캠페인 유지
+        c2 = BotController(config=config, history=HistoryStore(self.history_path))
+        self.assertEqual(c2.campaign_id, camp_id)
 
     # -------------------------------------------------------------------------
     # RNG-01 ~ RNG-04: Sampling Range & Persistence Tests

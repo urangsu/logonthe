@@ -657,14 +657,23 @@ class MainWindow(ctk.CTk):
 
     def _update_ui_state(self, state: BotRuntimeState):
         self.status_msg_lbl.configure(text=f"상태: {state.message}")
+        unknown_text = f" | ⚠️ 미확정: {state.submission_unknown_count}" if state.submission_unknown_count > 0 else ""
         self.badge_lbl.configure(
-            text=f"처리: {state.processed_count}/{state.total_target_count} | ❤️ 공감: {state.likes_count} | 💬 댓글: {state.comments_count} | ⏭️ 건너뜀: {state.skipped_count}"
+            text=f"처리: {state.processed_count}/{state.total_target_count} | ❤️ 공감: {state.likes_count} | 💬 댓글: {state.comments_count} | ⏭️ 건너뜀: {state.skipped_count}{unknown_text}"
         )
         if state.current_post_title:
             self.ai_post_title_lbl.configure(text=f"현재 글: {state.current_post_title[:45]}")
+        else:
+            self.ai_post_title_lbl.configure(text="현재 글: -")
+
         if state.current_post_excerpt:
             self.ai_post_excerpt_lbl.configure(text=f"본문 요약: {state.current_post_excerpt[:70]}...")
-        gemini_failed_pause = state.current_state == FeedState.PAUSED and "Gemini 실패" in (state.message or "")
+        else:
+            self.ai_post_excerpt_lbl.configure(text="본문 요약: -")
+
+        gemini_failed_pause = state.current_state == FeedState.PAUSED and (
+            "Gemini 실패" in (state.message or "") or getattr(state, "pause_reason", "") == "gemini_circuit_breaker"
+        )
         button_state = "normal" if gemini_failed_pause else "disabled"
         for button_name in ("btn_gemini_retry", "btn_gemini_local", "btn_gemini_skip"):
             button = getattr(self, button_name, None)
@@ -714,8 +723,27 @@ class MainWindow(ctk.CTk):
         logger.log("📥 [AI] 클립보드의 댓글 텍스트를 현재 글 에디터에 적용 요청했습니다.")
 
     def _append_log(self, msg: str):
-        self.log_textbox.insert("end", msg + "\n")
-        self.log_textbox.see("end")
+        try:
+            # 1500행 초과 시 오래된 로그 트리밍하여 UI 버벅임 방지
+            line_count = int(float(self.log_textbox.index("end-1c")))
+            if line_count > 1500:
+                self.log_textbox.delete("1.0", "200.0")
+
+            # 사용자가 상단으로 스크롤하여 로그를 읽고 있는 중이면 자동 스크롤 보류
+            should_scroll = True
+            if hasattr(self.log_textbox, "_textbox"):
+                yview = self.log_textbox._textbox.yview()
+                should_scroll = (len(yview) >= 2 and yview[1] >= 0.95)
+
+            self.log_textbox.insert("end", msg + "\n")
+            if should_scroll:
+                self.log_textbox.see("end")
+        except Exception:
+            try:
+                self.log_textbox.insert("end", msg + "\n")
+                self.log_textbox.see("end")
+            except Exception:
+                pass
 
     def _clear_log(self):
         self.log_textbox.delete("1.0", "end")

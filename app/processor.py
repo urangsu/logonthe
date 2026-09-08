@@ -589,6 +589,7 @@ class PostProcessor:
                                                                 content_focus=content_focus,
                                                                 verified_anchors=food_anchors,
                                                                 secondary_anchors=food_focus_info.get("secondary_anchors", []),
+                                                                style_plan=style_plan,
                                                             )
                                                             gemini_answer = None
                                                             continue
@@ -665,6 +666,7 @@ class PostProcessor:
                                     content_focus=content_focus,
                                     verified_anchors=food_anchors,
                                     secondary_anchors=food_focus_info.get("secondary_anchors", []),
+                                    style_plan=style_plan,
                                 )
 
                         elif self.gemini_browser_mode == "existing_chrome_mac":
@@ -843,9 +845,13 @@ class PostProcessor:
 
                             if self.history_store and hasattr(self.history_store, "record_pre_submit"):
                                 try:
-                                    self.history_store.record_pre_submit(post.key, cmt_res.submitted_text)
+                                    self.history_store.record_pre_submit(post.key, cmt_res.submitted_text, url=post.url)
                                 except Exception as e:
-                                    logger.log(f"⚠️ [HISTORY] pre_submit 기록 실패: {e}", "WARNING")
+                                    logger.log(f"❌ [HISTORY] pre_submit 영속 저장 실패 -> 중복 등록 방지를 위해 제출을 중단합니다: {e}", "ERROR")
+                                    cmt_res.status = CommentSubmitState.FAILED
+                                    cmt_res.error = "pre_submit_persistence_failed"
+                                    result.comment_result = cmt_res
+                                    return result
 
                             submit_status = CommentInteractionService.submit_and_verify(
                                 detail_page,

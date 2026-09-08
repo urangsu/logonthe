@@ -111,10 +111,10 @@ def migrate_engagement_audit_recent_posts(data: Dict[str, Any]) -> Dict[str, Any
 
 
 def migrate_comment_style_preset(data: Dict[str, Any]) -> Dict[str, Any]:
-    """레거시 'thoughtful' 프리셋을 20대 커뮤니티 리듬 프리셋('community')으로 자동 승격"""
+    """프리셋이 미설정되거나 비어있는 경우에만 기본 프리셋('community')으로 설정하고 사용자 명시 선택은 보존"""
     migrated = dict(data)
     preset = str(migrated.get("comment_style_preset") or "").strip()
-    if not preset or preset == "thoughtful":
+    if not preset:
         migrated["comment_style_preset"] = "community"
     return migrated
 

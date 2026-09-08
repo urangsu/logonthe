@@ -1,4 +1,5 @@
 import time
+import uuid
 import threading
 from typing import Optional, Tuple
 from playwright.sync_api import Page, Locator
@@ -160,8 +161,11 @@ class CommentInteractionService:
                                      (rawBtn.tagName === 'BUTTON' && (rawBtn.textContent || '').trim() === '등록');
 
                     if (isSubmit) {
-                        if (window.__NAVER_PROGRAMMATIC_SUBMIT__) {
-                            // 자동 제출 경로에 의해 발생한 합법적인 클릭: 락 중복 체크 없이 통과
+                        if (window.__NAVER_SUBMIT_PERMIT__) {
+                            // 단일 소모성 제출 권한(permit) 원자적 소비: 최초 1회의 프로그램 클릭만 허용
+                            const permit = window.__NAVER_SUBMIT_PERMIT__;
+                            delete window.__NAVER_SUBMIT_PERMIT__;
+                            window.__NAVER_LAST_CONSUMED_PERMIT__ = permit;
                             return;
                         }
                         if (window.tryAcquireSubmitLock && !window.tryAcquireSubmitLock('user_click')) {
@@ -541,23 +545,51 @@ class CommentInteractionService:
                 return CommentSubmitState.FAILED
             btn = submit_context["button"]
             comment_frame = submit_context.get("frame") or comment_frame
+
+            # 클릭 직전 에디터 최종 상태 및 본문 변조 재확인
+            try:
+                pre_check = comment_frame.evaluate("""() => ({
+                    dirty: window.__NAVER_COMMENT_USER_DIRTY__ === true,
+                    isComposing: window.__NAVER_IS_COMPOSING__ === true,
+                    text: (() => {
+                        const el = document.querySelector('#naverComment__write_textarea, div.u_cbox_text[contenteditable="true"], textarea.u_cbox_text');
+                        return el ? (el.innerText || el.value || '').trim() : '';
+                    })()
+                })""")
+                if isinstance(pre_check, dict):
+                    if pre_check.get("dirty") or pre_check.get("isComposing"):
+                        logger.log("  ❌ [COMMENT] 클릭 직전 사용자 편집/한글 조합 감지 -> 자동 등록 중단", "WARNING")
+                        return CommentSubmitState.FAILED
+                    cur_text = pre_check.get("text", "")
+                    if cur_text and cur_text != final_text.strip():
+                        logger.log(f"  ❌ [COMMENT] 클릭 직전 본문 변조 감지 ('{cur_text}' != '{final_text.strip()}') -> 제출 중단", "ERROR")
+                        return CommentSubmitState.FAILED
+            except Exception as chk_err:
+                logger.log(f"  ⚠️ [COMMENT] 클릭 직전 에디터 검증 예외: {chk_err}", "WARNING")
+
             baseline = ServerCommentDuplicateGuard.capture_submission_baseline(comment_frame)
+            click_dispatched = False
+            permit_id = f"permit_{uuid.uuid4().hex}"
             try:
                 if btn.is_disabled():
                     logger.log("  ❌ [COMMENT] 등록 버튼이 비활성 상태입니다.", "ERROR")
                     return CommentSubmitState.FAILED
                 btn.scroll_into_view_if_needed(timeout=1000)
                 try:
-                    comment_frame.evaluate("() => { window.__NAVER_PROGRAMMATIC_SUBMIT__ = true; }")
+                    comment_frame.evaluate("(p) => { window.__NAVER_SUBMIT_PERMIT__ = p; }", permit_id)
                 except Exception:
                     pass
+                click_dispatched = True
                 btn.click(timeout=1000)
             except Exception as exc:
-                logger.log(f"  ❌ [COMMENT] 등록 버튼 클릭 실패: {exc}", "ERROR")
+                logger.log(f"  ❌ [COMMENT] 등록 버튼 클릭 실패: {exc} (click_dispatched={click_dispatched})", "ERROR")
+                # 클릭이 이미 디스패치된 후 예외가 발생한 경우, 서버에 도달했을 가능성이 있으므로 안전하게 SUBMISSION_UNKNOWN 반환
+                if click_dispatched:
+                    return CommentSubmitState.SUBMISSION_UNKNOWN
                 return CommentSubmitState.FAILED
             finally:
                 try:
-                    comment_frame.evaluate("() => { window.__NAVER_PROGRAMMATIC_SUBMIT__ = false; }")
+                    comment_frame.evaluate("() => { delete window.__NAVER_SUBMIT_PERMIT__; }")
                 except Exception:
                     pass
         else:

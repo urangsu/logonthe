@@ -12,6 +12,11 @@ from src.logger import logger
 DEFAULT_HISTORY_PATH = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "data", "history.json"))
 
 
+class HistoryPersistenceError(Exception):
+    """히스토리 파일 디스크 저장 실패 시 발생하는 예외"""
+    pass
+
+
 class HistoryStore:
     """
     히스토리 저장소 (Monotonic Merge & Atomic File I/O)
@@ -48,7 +53,7 @@ class HistoryStore:
             logger.log(f"[HISTORY] 히스토리 로드 중 예외: {e}", "WARNING")
             self.posts = {}
 
-    def save(self):
+    def save(self, raise_on_error: bool = False):
         target_dir = os.path.dirname(self.file_path)
         os.makedirs(target_dir, exist_ok=True)
 
@@ -70,6 +75,8 @@ class HistoryStore:
                 except Exception:
                     pass
             logger.log(f"[HISTORY] 히스토리 원자적 저장 실패: {e}", "WARNING")
+            if raise_on_error:
+                raise HistoryPersistenceError(f"히스토리 원자적 저장 실패: {e}") from e
 
     def is_processed(self, key: str) -> bool:
         return key in self.posts
@@ -86,21 +93,31 @@ class HistoryStore:
     def is_comment_submitted(self, key: str) -> bool:
         return self.get_comment_status(key) == CommentSubmitState.SUBMITTED.value
 
-    def record_pre_submit(self, post_key: str, text: str):
-        """클릭 직전 프로세스 비정상 종료를 대비한 사전 미확정 상태 영속 기록"""
+    def record_pre_submit(self, post_key: str, text: str, url: Optional[str] = None):
+        """클릭 직전 프로세스 비정상 종료를 대비한 사전 미확정 상태 영속 기록 (실패 시 예외 발생)"""
         existing = self.posts.get(post_key, {})
         comment_data = existing.get("comment", {})
-        if comment_data.get("status") != CommentSubmitState.SUBMITTED.value:
-            comment_data.update({
-                "status": CommentSubmitState.SUBMISSION_UNKNOWN.value,
-                "submitted_text": text,
-                "attempted_at": datetime.now().isoformat(),
-                "unconfirmed": True,
-            })
-            existing["comment"] = comment_data
-            existing["updated_at"] = datetime.now().isoformat()
-            self.posts[post_key] = existing
-            self.save()
+        
+        # 이미 제출되었거나 이미 미확정 상태면 덮어쓰지 않음
+        if comment_data.get("status") in [CommentSubmitState.SUBMITTED.value, CommentSubmitState.SUBMISSION_UNKNOWN.value]:
+            return
+
+        if url:
+            existing["url"] = url
+        elif not existing.get("url") and ":" in post_key:
+            parts = post_key.split(":", 1)
+            existing["url"] = f"https://m.blog.naver.com/{parts[0]}/{parts[1]}"
+
+        comment_data.update({
+            "status": CommentSubmitState.SUBMISSION_UNKNOWN.value,
+            "submitted_text": text,
+            "attempted_at": datetime.now().isoformat(),
+            "unconfirmed": True,
+        })
+        existing["comment"] = comment_data
+        existing["updated_at"] = datetime.now().isoformat()
+        self.posts[post_key] = existing
+        self.save(raise_on_error=True)
 
     def get_unconfirmed_posts(self) -> Dict[str, Any]:
         """미확정(SUBMISSION_UNKNOWN) 상태의 포스트 목록 반환"""
@@ -246,6 +263,10 @@ class HistoryStore:
 
         if existing_status == CommentSubmitState.SUBMITTED.value:
             final_comment_status = CommentSubmitState.SUBMITTED.value
+            final_submitted_text = existing_comment.get("submitted_text") or result.comment_result.submitted_text
+        elif existing_status == CommentSubmitState.SUBMISSION_UNKNOWN.value and new_status != CommentSubmitState.SUBMITTED.value:
+            # 미확정(SUBMISSION_UNKNOWN) 상태는 명시적인 SUBMITTED 확정 전에는 FAILED/SKIPPED로 덮어쓰지 않음
+            final_comment_status = CommentSubmitState.SUBMISSION_UNKNOWN.value
             final_submitted_text = existing_comment.get("submitted_text") or result.comment_result.submitted_text
 
         comment_record = {

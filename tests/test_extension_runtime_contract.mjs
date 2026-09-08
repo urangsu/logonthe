@@ -320,19 +320,19 @@ test('GEM-R8-007: WAIT_DIAG diagnostic payload generated', () => {
     responseTextLength: 25,
     lastMutationAgeMs: 1900,
     generationEvidence: 'idle',
-    runtimeBuild: '13.2.3-r8'
+    runtimeBuild: '13.2.3-r9'
   };
-  assert.strictEqual(diag.runtimeBuild, '13.2.3-r8');
+  assert.strictEqual(diag.runtimeBuild, '13.2.3-r9');
   assert.strictEqual(diag.freshChatVerified, true);
   assert.strictEqual(diag.responseBound, true);
 });
 
-test('GEM-R8-008: old r7 runtime with r8 contract triggers reinjection', () => {
-  const contract = { runtimeBuild: '13.2.3-r8' };
-  const pingResponse = { ok: true, build: '13.2.3-r7' };
+test('GEM-R9-008: old r8 runtime with r9 contract triggers reinjection', () => {
+  const contract = { runtimeBuild: '13.2.3-r9' };
+  const pingResponse = { ok: true, build: '13.2.3-r8' };
   let reinjected = false;
   if (!pingResponse.ok || pingResponse.build !== contract.runtimeBuild) {
     reinjected = true;
   }
-  assert.strictEqual(reinjected, true, 'r7 build must trigger reinjection under r8 contract');
+  assert.strictEqual(reinjected, true, 'r8 build must trigger reinjection under r9 contract');
 });

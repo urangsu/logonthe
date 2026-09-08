@@ -431,6 +431,12 @@ class GeminiExtensionBridge:
             if self._command is not None and self._command.deadline_at > time.time() and self._command_state in ("pending", "claimed"):
                 logger.log(f"[GEMINI][PUBLISH_REJECTED] Active command still running (rid={self._command.request_id})", "WARNING")
                 return False
+            if self._ever_seen_heartbeat and self._heartbeat_status in ("busy", "auth_required", "dom_unsupported", "captcha"):
+                now_t = time.time()
+                is_settling = bool(self._last_completed_request_id and (now_t - self._last_completed_at) < 2.5)
+                if not is_settling:
+                    logger.log(f"[GEMINI][PUBLISH_REJECTED] Extension runtime is not ready (status={self._heartbeat_status})", "WARNING")
+                    return False
             self._command = command
             self._command_state = "pending"
             self._command_claimed_by = ""
@@ -513,7 +519,10 @@ class GeminiExtensionBridge:
                 self._active_request_id = None
             self._last_completed_request_id = result.request_id
             self._last_completed_at = time.time()
-            self._heartbeat_status = "ready"
+            if result.status == GeminiResultStatus.COMPLETED:
+                self._heartbeat_status = "settling"
+            else:
+                self._heartbeat_status = "recovering"
             self._last_busy_request_id = None
             logger.log(f"[GEMINI][RESULT] rid={result.request_id} post={result.post_key} nav={result.navigation_version} status={result.status.value}")
             self._condition.notify_all()

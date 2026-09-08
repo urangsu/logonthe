@@ -30,7 +30,7 @@
   ].join(', ');
   let runtimeContract = {
     extensionVersion: '13.2.3',
-    runtimeBuild: '13.2.3-r8',
+    runtimeBuild: '13.2.3-r9',
     protocolVersion: 3,
     bridgeSchemaVersion: 2
   };
