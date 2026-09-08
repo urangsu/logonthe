@@ -70,6 +70,20 @@ class ContentContextExtractor:
                 pass
         return candidates
 
+    GREETING_PATTERNS = [
+        r"^안녕하세요", r"^반갑습니다", r"^오늘도\s*좋은\s*하루",
+        r"^다들\s*잘\s*지내셨나요", r"^오랜만에\s*포스팅", r"^서이추\s*환영",
+        r"^영업시간\s*:", r"^주소\s*:", r"^전화번호\s*:", r"^연락처\s*:", r"^오시는\s*길\s*:",
+        r"^위치\s*:", r"^주차\s*:"
+    ]
+
+    FACTUAL_PATTERNS = [
+        r"\d+(?:,\d+)?\s*원", r"\d+\s*g", r"\d+\s*ml", r"\d+\s*개", r"\d+\s*인분",
+        r"식감", r"맛있", r"단면", r"부드럽", r"바삭", r"달콤", r"고소", r"담백", r"촉촉", r"매콤",
+        r"비주얼", r"재료", r"소스", r"조합", r"메뉴", r"주문", r"가격", r"사이즈", r"웨이팅",
+        r"느껴", r"생각보다", r"직접", r"분위기", r"창가", r"햇빛", r"인테리어"
+    ]
+
     @classmethod
     def clean_text(cls, raw_text: str, max_chars: int = 700) -> str:
         if not raw_text:
@@ -79,13 +93,74 @@ class ContentContextExtractor:
         for pattern in cls.BOILERPLATE_PATTERNS:
             text = re.sub(pattern, " ", text, flags=re.IGNORECASE)
 
-        # 여러 줄바꿈 및 불필요한 공백 정리
-        text = re.sub(r"\s+", " ", text).strip()
+        # 문단 단위로 분리하여 보일러플레이트 제거 및 정제
+        raw_paras = [p.strip() for p in re.split(r"[\r\n]+", text) if p.strip()]
+        scored_paras: List[Tuple[int, int, str]] = []  # (score, original_index, text)
 
-        if len(text) > max_chars:
-            text = text[:max_chars].rsplit(" ", 1)[0] + "..."
+        for idx, p in enumerate(raw_paras):
+            # 너무 짧거나 단순 기호 문단 제외
+            cleaned_p = re.sub(r"\s+", " ", p).strip()
+            if len(cleaned_p) < 8:
+                continue
 
-        return text
+            score = 10
+            # 인사말/안내문 감점
+            for g_pat in cls.GREETING_PATTERNS:
+                if re.search(g_pat, cleaned_p, re.IGNORECASE):
+                    score -= 40
+                    break
+
+            # 구체적 사실/음식/수치/특징 가점
+            for f_pat in cls.FACTUAL_PATTERNS:
+                if re.search(f_pat, cleaned_p, re.IGNORECASE):
+                    score += 25
+
+            # 적절한 문장 길이 가점
+            if 30 <= len(cleaned_p) <= 200:
+                score += 15
+
+            scored_paras.append((score, idx, cleaned_p))
+
+        if not scored_paras:
+            # 폴백: 단순 공백 정돈
+            flat = re.sub(r"\s+", " ", text).strip()
+            return flat[:max_chars].rsplit(" ", 1)[0] + "..." if len(flat) > max_chars else flat
+
+        total_full_len = sum(len(p[2]) + 1 for p in scored_paras)
+        if total_full_len <= max_chars:
+            return "\n".join(p[2] for p in scored_paras)
+
+        # max_chars 초과 시: 고득점 핵심 문단 우선 선별하되, 원문 순서(문맥 흐름)를 보존하여 조립
+        sorted_by_score = sorted(scored_paras, key=lambda x: x[0], reverse=True)
+        selected_indices = set()
+        accumulated_len = 0
+
+        # 1) 첫 도입 문단(배경 맥락) 1개 우선 포함 검토 (인사말이 아닌 경우)
+        if scored_paras and scored_paras[0][0] >= 0:
+            selected_indices.add(scored_paras[0][1])
+            accumulated_len += len(scored_paras[0][2]) + 1
+
+        # 2) 고득점 사실 문단 우선 추가
+        for score, orig_idx, p_text in sorted_by_score:
+            if orig_idx in selected_indices:
+                continue
+            if accumulated_len + len(p_text) + 1 > max_chars:
+                # 앞 문단이 비어있는 경우 일부라도 수용
+                if not selected_indices:
+                    selected_indices.add(orig_idx)
+                break
+            selected_indices.add(orig_idx)
+            accumulated_len += len(p_text) + 1
+
+        # 3) 원문 등장 순서대로 정렬하여 문맥 보존 조립
+        ordered_selected = [p for p in scored_paras if p[1] in selected_indices]
+        ordered_selected.sort(key=lambda x: x[1])
+
+        result_text = "\n".join(p[2] for p in ordered_selected).strip()
+        if len(result_text) > max_chars:
+            result_text = result_text[:max_chars].rsplit(" ", 1)[0] + "..."
+
+        return result_text
 
     @classmethod
     def extract(cls, page: Page, post: FeedPost, max_chars: int = 700) -> PostContext:

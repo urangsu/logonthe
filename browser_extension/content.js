@@ -667,7 +667,9 @@
       return { status: 'failed', text: '', error: 'send_not_confirmed' };
     }
 
-    const deadline = Math.min(execState.deadlineAt, Date.now() + 65000);
+    const deadline = (execState.deadlineAt && execState.deadlineAt > 1000000000)
+      ? execState.deadlineAt * 1000
+      : (execState.deadlineAt || (Date.now() + 60000));
     let lastMutationAt = Date.now();
     let previous = '';
 

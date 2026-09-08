@@ -27,7 +27,7 @@ DEFAULT_CONFIG_V2: Dict[str, Any] = {
     "fixed_suffix": "",
     "recommendation_suffix_enabled": False,
     "recommendation_suffix": "",
-    "comment_style_preset": "thoughtful",
+    "comment_style_preset": "community",
     "secret_comment": False,
     "browser_mode": "persistent",
     "direct_urls": [],
@@ -107,6 +107,15 @@ def migrate_engagement_audit_recent_posts(data: Dict[str, Any]) -> Dict[str, Any
     if current == 5:
         current = 10
     migrated["engagement_audit_recent_posts"] = max(1, current)
+    return migrated
+
+
+def migrate_comment_style_preset(data: Dict[str, Any]) -> Dict[str, Any]:
+    """레거시 'thoughtful' 프리셋을 20대 커뮤니티 리듬 프리셋('community')으로 자동 승격"""
+    migrated = dict(data)
+    preset = str(migrated.get("comment_style_preset") or "").strip()
+    if not preset or preset == "thoughtful":
+        migrated["comment_style_preset"] = "community"
     return migrated
 
 
@@ -235,6 +244,7 @@ class ConfigService:
             merged.update(loaded)
             merged = migrate_workflow_mode(merged)
             merged = normalize_auto_comment_config(merged)
+            merged = migrate_comment_style_preset(merged)
             migrated_audit = migrate_engagement_audit_recent_posts(merged)
             if migrated_audit != merged:
                 self._atomic_save(migrated_audit)

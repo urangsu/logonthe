@@ -36,6 +36,12 @@ class CommentSubmissionBaseline:
     captured_at: float
 
 
+@dataclass
+class ServerCommentItem:
+    text: str = ""
+    info: str = ""
+
+
 class ServerCommentDuplicateGuard:
     """
     서버 사이드 중복 댓글 방지 가드 (Server-Side Duplicate Comment Guard)
@@ -127,71 +133,112 @@ class ServerCommentDuplicateGuard:
                 if stop_event and stop_event.is_set():
                     break
 
-                scan_res = page.evaluate("""
-                    () => {
-                        const items = Array.from(document.querySelectorAll("li.u_cbox_comment, li[class*='cbox_comment']"));
-                        let foundMine = false;
-                        let foundCommentNo = null;
-                        let foundText = null;
-                        const evidence = [];
+                try:
+                    scan_res = page.evaluate("""
+                        () => {
+                            const items = Array.from(document.querySelectorAll("li.u_cbox_comment, li[class*='cbox_comment']"));
+                            const mineCandidates = [];
 
-                        for (const item of items) {
-                            const dataInfo = item.getAttribute("data-info") || "";
-                            const clsList = (item.className || "").split(/\\s+/);
+                            for (const item of items) {
+                                const dataInfo = item.getAttribute("data-info") || "";
+                                const clsList = (item.className || "").split(/\\s+/);
 
-                            // Strong Signal 1: data-info regex mine:true
-                            const isMineDataInfo = /(?:^|[,{\\s])mine\\s*:\\s*true(?:[,}\\s]|$)/i.test(dataInfo);
-                            // Strong Signal 2: exact class u_cbox_type_mine
-                            const isMineClass = clsList.includes("u_cbox_type_mine");
+                                // Strong Signal 1: data-info regex mine:true
+                                const isMineDataInfo = /(?:^|[,{\\s])mine\\s*:\\s*true(?:[,}\\s]|$)/i.test(dataInfo);
+                                // Strong Signal 2: exact class u_cbox_type_mine
+                                const isMineClass = clsList.includes("u_cbox_type_mine");
 
-                            if (isMineDataInfo || isMineClass) {
-                                foundMine = true;
-                                const contentEl = item.querySelector(".u_cbox_contents, .u_cbox_text_mention, p.text");
-                                foundText = contentEl ? contentEl.innerText.trim() : "";
-                                const noMatch = dataInfo.match(/commentNo\\s*:\\s*['"]?([0-9]+)['"]?/i);
-                                foundCommentNo = noMatch ? noMatch[1] : null;
+                                if (isMineDataInfo || isMineClass) {
+                                    const contentEl = item.querySelector(".u_cbox_contents, .u_cbox_text_mention, p.text");
+                                    const foundText = contentEl ? (contentEl.innerText || "").trim() : "";
+                                    const noMatch = dataInfo.match(/commentNo\\s*:\\s*['"]?([0-9]+)['"]?/i);
+                                    const foundCommentNo = noMatch ? noMatch[1] : null;
+                                    const evidence = [];
+                                    if (isMineDataInfo) evidence.push("data_info_mine_true");
+                                    if (isMineClass) evidence.push("class_u_cbox_type_mine");
 
-                                if (isMineDataInfo) evidence.push("data_info_mine_true");
-                                if (isMineClass) evidence.push("class_u_cbox_type_mine");
+                                    mineCandidates.push({
+                                        commentNo: foundCommentNo,
+                                        text: foundText,
+                                        evidence: evidence
+                                    });
+                                }
                             }
+
+                            // 더보기 버튼 확인
+                            const moreBtn = document.querySelector(".u_cbox_btn_more, button[data-action*='paginate'], a.u_cbox_paginate_next");
+                            const hasMore = moreBtn ? (moreBtn.offsetParent !== null && !moreBtn.disabled) : false;
+
+                            return {
+                                mineCandidates: mineCandidates,
+                                loadedCount: items.length,
+                                hasMore: hasMore
+                            };
                         }
-
-                        // 더보기 버튼 확인
-                        const moreBtn = document.querySelector(".u_cbox_btn_more, button[data-action*='paginate'], a.u_cbox_paginate_next");
-                        const hasMore = moreBtn ? (moreBtn.offsetParent !== null && !moreBtn.disabled) : false;
-
-                        return {
-                            foundMine: foundMine,
-                            foundCommentNo: foundCommentNo,
-                            foundText: foundText,
-                            evidence: evidence,
-                            loadedCount: items.length,
-                            hasMore: hasMore
-                        };
-                    }
-                """)
-
-                # 제출 후에는 기존 mine 댓글이 아니라 새 댓글 + 정확한 본문이어야 한다.
-                candidate_no = scan_res.get("foundCommentNo")
-                candidate_hash = cls._text_hash(scan_res.get("foundText", ""))
-                if baseline is not None:
-                    is_new = (candidate_no and candidate_no not in baseline.mine_comment_nos) or (
-                        candidate_hash and candidate_hash not in baseline.mine_text_hashes
+                    """)
+                except Exception as e:
+                    logger.log(f"⚠️ [SERVER_GUARD] 댓글 스캔 evaluate 중 예외: {e}", "WARNING")
+                    return CommentPresenceResult(
+                        state=CommentPresenceState.UNKNOWN,
+                        confidence=LikeConfidence.LOW,
+                        evidence=["evaluate_exception"],
+                        loaded_comment_count=0,
+                        total_comment_count=total_count,
+                        list_complete=False
                     )
-                    text_matches = not expected_text or re.sub(r"\s+", " ", scan_res.get("foundText", "").strip()) == re.sub(r"\s+", " ", expected_text.strip())
-                    scan_res["baseline_match"] = bool(scan_res.get("foundMine") and not is_new)
-                    if not (scan_res.get("foundMine") and is_new and text_matches):
-                        scan_res["foundMine"] = False
+
+                if not isinstance(scan_res, dict):
+                    return CommentPresenceResult(
+                        state=CommentPresenceState.UNKNOWN,
+                        confidence=LikeConfidence.LOW,
+                        evidence=["invalid_scan_res_type"],
+                        loaded_comment_count=0,
+                        total_comment_count=total_count,
+                        list_complete=False
+                    )
+
+                mine_candidates = scan_res.get("mineCandidates")
+                if mine_candidates is None and scan_res.get("foundMine"):
+                    mine_candidates = [{
+                        "commentNo": scan_res.get("foundCommentNo"),
+                        "text": (scan_res.get("foundText") or "").strip(),
+                        "evidence": scan_res.get("evidence", ["data_info_mine_true"]),
+                    }]
+                elif mine_candidates is None:
+                    mine_candidates = []
+                expected_norm = re.sub(r"\s+", " ", (expected_text or "").strip())
+                baseline_match_found = False
+                matched_candidate = None
+
+                for cand in mine_candidates:
+                    c_no = cand.get("commentNo")
+                    c_text = (cand.get("text") or "").strip()
+                    c_hash = cls._text_hash(c_text)
+                    c_norm = re.sub(r"\s+", " ", c_text)
+
+                    if baseline is not None:
+                        is_new = (c_no and c_no not in baseline.mine_comment_nos) or (
+                            c_hash and c_hash not in baseline.mine_text_hashes
+                        )
+                        text_matches = not expected_text or (c_norm == expected_norm)
+                        if not is_new:
+                            baseline_match_found = True
+                        if is_new and text_matches:
+                            matched_candidate = cand
+                            break
+                    else:
+                        matched_candidate = cand
+                        break
 
                 # Strong Signal 발견 시 즉시 PRESENT 반환
-                if scan_res.get("foundMine"):
-                    logger.log(f"  🛑 [SERVER_GUARD] 서버 댓글 목록에서 내 댓글 발견! ({scan_res.get('evidence')}) - 중복 작성 차단")
+                if matched_candidate:
+                    logger.log(f"  🛑 [SERVER_GUARD] 서버 댓글 목록에서 내 댓글 발견! ({matched_candidate.get('evidence')}) - 중복 작성 차단")
                     return CommentPresenceResult(
                         state=CommentPresenceState.PRESENT,
                         confidence=LikeConfidence.HIGH,
-                        comment_no=scan_res.get("foundCommentNo"),
-                        comment_text=scan_res.get("foundText"),
-                        evidence=scan_res.get("evidence"),
+                        comment_no=matched_candidate.get("commentNo"),
+                        comment_text=matched_candidate.get("text"),
+                        evidence=matched_candidate.get("evidence"),
                         loaded_comment_count=scan_res.get("loadedCount", 0),
                         total_comment_count=total_count,
                         list_complete=True
@@ -202,7 +249,7 @@ class ServerCommentDuplicateGuard:
 
                 # 더 이상 로드할 댓글이 없거나, 이미 전체 댓글 수 이상 로드된 경우
                 if not has_more or (total_count is not None and loaded_count >= total_count):
-                    if baseline is not None and scan_res.get("baseline_match"):
+                    if baseline is not None and baseline_match_found and not matched_candidate:
                         return CommentPresenceResult(
                             state=CommentPresenceState.UNKNOWN,
                             confidence=LikeConfidence.MEDIUM,

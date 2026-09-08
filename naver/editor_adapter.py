@@ -142,22 +142,14 @@ class CommentEditorAdapter:
                 f"selector={context['selector']}"
             )
 
-            # --- Path A: Direct focus() -> fill() (Pointer Event Interception 방지) ---
             try:
-                editor.focus()
-                logger.log("[NAVER][EDITOR_FOCUS_OK]")
-                editor.fill(clean_t)
-                logger.log(f"[NAVER][EDITOR_FILL_OK] chars={len(clean_t)}")
-                if cls._verify_and_confirm(editor, clean_t, is_textarea, frame, page):
-                    return True
-            except Exception as e:
-                logger.log(f"ℹ️ [NAVER][EDITOR_PATH_A_NOTE] focus/fill 시도 중: {e}")
+                frame.evaluate("() => { window.__NAVER_PROGRAMMATIC_SET__ = true; }")
+            except Exception:
+                pass
 
-            # --- Path B: Placeholder Click -> Focus -> Fill (Overlay 제거 후 재시도) ---
-            if placeholder_ctx and placeholder_ctx.get("placeholder"):
+            try:
+                # --- Path A: Direct focus() -> fill() (Pointer Event Interception 방지) ---
                 try:
-                    logger.log(f"[NAVER][EDITOR_PLACEHOLDER_FALLBACK] selector={placeholder_ctx['selector']}")
-                    placeholder_ctx["placeholder"].click(timeout=1000)
                     editor.focus()
                     logger.log("[NAVER][EDITOR_FOCUS_OK]")
                     editor.fill(clean_t)
@@ -165,39 +157,60 @@ class CommentEditorAdapter:
                     if cls._verify_and_confirm(editor, clean_t, is_textarea, frame, page):
                         return True
                 except Exception as e:
-                    logger.log(f"ℹ️ [NAVER][EDITOR_PATH_B_NOTE] placeholder click/fill 시도 중: {e}")
+                    logger.log(f"ℹ️ [NAVER][EDITOR_PATH_A_NOTE] focus/fill 시도 중: {e}")
 
-            # --- Path C: execCommand insertText + beforeinput/input dispatch fallback ---
-            try:
-                logger.log("[NAVER][EDITOR_EXEC_COMMAND_FALLBACK] insertText with input events")
-                editor.evaluate("""(el, text) => {
-                    el.focus();
-                    if (el.tagName.toLowerCase() === 'textarea') {
-                        el.value = text;
-                        el.dispatchEvent(new Event('input', { bubbles: true }));
-                        el.dispatchEvent(new Event('change', { bubbles: true }));
-                    } else {
-                        document.execCommand("selectAll", false, null);
-                        document.execCommand("insertText", false, text);
-                        el.dispatchEvent(new InputEvent("beforeinput", {
-                            bubbles: true,
-                            inputType: "insertText",
-                            data: text
-                        }));
-                        el.dispatchEvent(new InputEvent("input", {
-                            bubbles: true,
-                            inputType: "insertText",
-                            data: text
-                        }));
-                    }
-                }""", clean_t)
-                if cls._verify_and_confirm(editor, clean_t, is_textarea, frame, page):
-                    return True
-            except Exception as e:
-                logger.log(f"ℹ️ [NAVER][EDITOR_PATH_C_NOTE] execCommand 시도 중: {e}")
+                # --- Path B: Placeholder Click -> Focus -> Fill (Overlay 제거 후 재시도) ---
+                if placeholder_ctx and placeholder_ctx.get("placeholder"):
+                    try:
+                        logger.log(f"[NAVER][EDITOR_PLACEHOLDER_FALLBACK] selector={placeholder_ctx['selector']}")
+                        placeholder_ctx["placeholder"].click(timeout=1000)
+                        editor.focus()
+                        logger.log("[NAVER][EDITOR_FOCUS_OK]")
+                        editor.fill(clean_t)
+                        logger.log(f"[NAVER][EDITOR_FILL_OK] chars={len(clean_t)}")
+                        if cls._verify_and_confirm(editor, clean_t, is_textarea, frame, page):
+                            return True
+                    except Exception as e:
+                        logger.log(f"ℹ️ [NAVER][EDITOR_PATH_B_NOTE] placeholder click/fill 시도 중: {e}")
 
-            logger.log("[NAVER][EDITOR_INPUT_FAIL] stage=fill_or_readback", "ERROR")
-            return False
+                # --- Path C: execCommand insertText + beforeinput/input dispatch fallback ---
+                try:
+                    logger.log("[NAVER][EDITOR_EXEC_COMMAND_FALLBACK] insertText with input events")
+                    editor.evaluate("""(el, text) => {
+                        el.focus();
+                        if (el.tagName.toLowerCase() === 'textarea') {
+                            el.value = text;
+                            el.dispatchEvent(new Event('input', { bubbles: true, cancelable: true }));
+                            el.dispatchEvent(new Event('change', { bubbles: true, cancelable: true }));
+                        } else {
+                            document.execCommand('selectAll', false, null);
+                            document.execCommand('insertText', false, text);
+                            el.dispatchEvent(new InputEvent('beforeinput', {
+                                bubbles: true,
+                                cancelable: true,
+                                inputType: 'insertText',
+                                data: text
+                            }));
+                            el.dispatchEvent(new InputEvent('input', {
+                                bubbles: true,
+                                cancelable: true,
+                                inputType: 'insertText',
+                                data: text
+                            }));
+                        }
+                    }""", clean_t)
+                    if cls._verify_and_confirm(editor, clean_t, is_textarea, frame, page):
+                        return True
+                except Exception as e:
+                    logger.log(f"ℹ️ [NAVER][EDITOR_PATH_C_NOTE] execCommand 시도 중: {e}")
+
+                logger.log("[NAVER][EDITOR_INPUT_FAIL] stage=fill_or_readback", "ERROR")
+                return False
+            finally:
+                try:
+                    frame.evaluate("() => { window.__NAVER_PROGRAMMATIC_SET__ = false; }")
+                except Exception:
+                    pass
 
         except Exception as e:
             logger.log(f"[EDITOR] 텍스트 설정 중 예외: {e}", "WARNING")

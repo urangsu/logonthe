@@ -41,6 +41,14 @@ class BotRuntimeState:
     skipped_count: int = 0
     message: str = "대기 중"
 
+    # Granular sampling & pipeline metrics
+    candidates_count: int = 0
+    sampled_in_count: int = 0
+    sampled_out_count: int = 0
+    generated_success_count: int = 0
+    generated_fail_count: int = 0
+    submission_unknown_count: int = 0
+
     # AI Context & Prompt state
     current_post_title: str = ""
     current_post_excerpt: str = ""
@@ -73,6 +81,12 @@ class StateManager:
         inc_comment: bool = False,
         inc_skip: bool = False,
         inc_processed: bool = False,
+        inc_candidate: bool = False,
+        inc_sampled_in: bool = False,
+        inc_sampled_out: bool = False,
+        inc_gen_success: bool = False,
+        inc_gen_fail: bool = False,
+        inc_submission_unknown: bool = False,
         total_targets: Optional[int] = None,
         current_post_title: Optional[str] = None,
         current_post_excerpt: Optional[str] = None,
@@ -94,6 +108,18 @@ class StateManager:
                 self.state.skipped_count += 1
             if inc_processed:
                 self.state.processed_count += 1
+            if inc_candidate:
+                self.state.candidates_count += 1
+            if inc_sampled_in:
+                self.state.sampled_in_count += 1
+            if inc_sampled_out:
+                self.state.sampled_out_count += 1
+            if inc_gen_success:
+                self.state.generated_success_count += 1
+            if inc_gen_fail:
+                self.state.generated_fail_count += 1
+            if inc_submission_unknown:
+                self.state.submission_unknown_count += 1
             if total_targets is not None:
                 self.state.total_target_count = total_targets
             if current_post_title is not None:

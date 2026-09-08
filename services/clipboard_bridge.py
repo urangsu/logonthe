@@ -11,6 +11,10 @@ class ClipboardCommandBridge:
     def __init__(self):
         self._queue: queue.Queue[WorkerCommand] = queue.Queue()
 
+    def push_command(self, cmd: WorkerCommand):
+        """WorkerCommand 객체를 직접 큐에 전달"""
+        self._queue.put(cmd)
+
     def send_apply_clipboard_comment(self, text: str):
         """UI 스레드에서 복사된 댓글 텍스트를 Worker 스레드로 전달"""
         cmd = WorkerCommand(kind=WorkerCommandType.APPLY_CLIPBOARD_COMMENT, text=text)

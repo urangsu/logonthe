@@ -74,11 +74,79 @@ class HistoryStore:
     def is_processed(self, key: str) -> bool:
         return key in self.posts
 
-    def is_comment_submitted(self, key: str) -> bool:
+    def get_comment_status(self, key: str) -> Optional[str]:
         item = self.posts.get(key)
         if not item:
-            return False
-        return item.get("comment", {}).get("status") == CommentSubmitState.SUBMITTED.value
+            return None
+        return item.get("comment", {}).get("status")
+
+    def is_comment_unconfirmed(self, key: str) -> bool:
+        return self.get_comment_status(key) == CommentSubmitState.SUBMISSION_UNKNOWN.value
+
+    def is_comment_submitted(self, key: str) -> bool:
+        return self.get_comment_status(key) == CommentSubmitState.SUBMITTED.value
+
+    def record_pre_submit(self, post_key: str, text: str):
+        """클릭 직전 프로세스 비정상 종료를 대비한 사전 미확정 상태 영속 기록"""
+        existing = self.posts.get(post_key, {})
+        comment_data = existing.get("comment", {})
+        if comment_data.get("status") != CommentSubmitState.SUBMITTED.value:
+            comment_data.update({
+                "status": CommentSubmitState.SUBMISSION_UNKNOWN.value,
+                "submitted_text": text,
+                "attempted_at": datetime.now().isoformat(),
+                "unconfirmed": True,
+            })
+            existing["comment"] = comment_data
+            existing["updated_at"] = datetime.now().isoformat()
+            self.posts[post_key] = existing
+            self.save()
+
+    def get_unconfirmed_posts(self) -> Dict[str, Any]:
+        """미확정(SUBMISSION_UNKNOWN) 상태의 포스트 목록 반환"""
+        unconfirmed = {}
+        for k, v in self.posts.items():
+            cmt = v.get("comment", {})
+            if cmt.get("status") == CommentSubmitState.SUBMISSION_UNKNOWN.value or cmt.get("unconfirmed"):
+                unconfirmed[k] = v
+        return unconfirmed
+
+    def resolve_unconfirmed_post(self, post_key: str, status: CommentSubmitState):
+        """미확정 포스트의 최종 등록 확인 후 상태 확정 (SUBMITTED 또는 SKIPPED/FAILED)"""
+        if post_key in self.posts:
+            cmt = self.posts[post_key].get("comment", {})
+            cmt["status"] = status.value
+            cmt["unconfirmed"] = (status == CommentSubmitState.SUBMISSION_UNKNOWN)
+            cmt["resolved_at"] = datetime.now().isoformat()
+            self.posts[post_key]["comment"] = cmt
+            self.posts[post_key]["updated_at"] = datetime.now().isoformat()
+            self.save()
+
+    def clear_unconfirmed_post(self, post_key: str):
+        """사용자 확인 또는 미등록 확정에 따른 미확정 플래그 해제"""
+        if post_key in self.posts:
+            cmt = self.posts[post_key].get("comment", {})
+            if cmt.get("status") == CommentSubmitState.SUBMISSION_UNKNOWN.value:
+                del self.posts[post_key]["comment"]
+                self.save()
+
+    def get_recent_submitted_comments(self, limit: int = 10) -> list[str]:
+        results = []
+        # Sort posts by updated_at descending
+        sorted_posts = sorted(
+            self.posts.values(),
+            key=lambda x: x.get("updated_at", ""),
+            reverse=True
+        )
+        for p in sorted_posts:
+            cmt = p.get("comment", {})
+            if cmt.get("status") == CommentSubmitState.SUBMITTED.value:
+                text = cmt.get("submitted_text") or cmt.get("draft")
+                if text and text.strip():
+                    results.append(text.strip())
+            if len(results) >= limit:
+                break
+        return results
 
     def is_liked(self, key: str) -> bool:
         item = self.posts.get(key)

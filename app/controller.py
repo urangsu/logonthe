@@ -21,6 +21,9 @@ from services.pacing import PacingService
 from services.clipboard_bridge import ClipboardCommandBridge
 from services.blog_popularity import BlogPopularityService
 from services.like_transaction import LikeCircuitBreaker
+import time
+from services.sampling_service import SamplingHistoryManager
+from services.style_service import StylePlanService
 from services.gemini_extension_bridge import GeminiExtensionBridge
 from src.logger import logger
 
@@ -68,6 +71,8 @@ class FeedController:
             pause_event=self.pause_event,
             skip_event=self.skip_event,
         )
+        self.sampling_manager = SamplingHistoryManager()
+        self.campaign_id = self.config.get("campaign_id") or f"camp_{int(time.time())}"
         self._thread: Optional[threading.Thread] = None
 
     def request_skip_current_post(self):
@@ -245,6 +250,7 @@ class FeedController:
                 auto_comment_chance=auto_comment_chance,
                 auto_comment_delay_min=auto_comment_delay_min,
                 auto_comment_delay_max=auto_comment_delay_max,
+                history_store=self.history,
             )
 
             seen_candidate_keys: Set[str] = set()
@@ -253,6 +259,7 @@ class FeedController:
             comment_submitted_count = 0
             skipped_count = 0
             failed_count = 0
+            consecutive_gemini_failures = 0
             scroll_attempts = 0
             max_candidate_scan = max_items * 5
 
@@ -289,16 +296,43 @@ class FeedController:
                         break
 
                     seen_candidate_keys.add(post.key)
+                    self.state_mgr.update(inc_candidate=True)
 
                     # 컴포넌트 레벨 멱등성 검사 (Like와 Comment 독립 판단)
                     is_local_liked = self.history.is_liked(post.key)
                     is_local_commented = self.history.is_comment_submitted(post.key)
+                    is_local_unconfirmed = self.history.is_comment_unconfirmed(post.key)
+
+                    # 등록 결과 불명(SUBMISSION_UNKNOWN) 상태인 포스트의 재확인 및 복구 절차
+                    if is_local_unconfirmed and comment_enabled:
+                        logger.log(f"  🔍 [RECOVERY] 이전 실행 미확정(SUBMISSION_UNKNOWN) 포스트 감지: {post.key}. 본인 댓글 존재 여부를 서버에서 재확인합니다...")
+                        try:
+                            check_page = self.session.get_detail_page()
+                            check_page.goto(post.url, wait_until="domcontentloaded", timeout=15000)
+                            ServerCommentDuplicateGuard.ensure_comment_section_visible(check_page)
+                            pres = ServerCommentDuplicateGuard.scan_page_for_my_comment(check_page, stop_event=self.stop_event)
+                            if pres.state == CommentPresenceState.PRESENT:
+                                logger.log(f"  ✅ [RECOVERY] 서버 목록에서 본인 댓글이 확인되었습니다 -> SUBMITTED로 상태 확정: {post.key}")
+                                self.history.resolve_unconfirmed_post(post.key, CommentSubmitState.SUBMITTED)
+                                is_local_commented = True
+                                is_local_unconfirmed = False
+                            elif pres.state == CommentPresenceState.ABSENT and pres.list_complete:
+                                logger.log(f"  ℹ️ [RECOVERY] 서버 목록에 댓글이 확실히 없음이 확인되었습니다 -> 미확정 해제 및 재시도 허용: {post.key}")
+                                self.history.clear_unconfirmed_post(post.key)
+                                is_local_unconfirmed = False
+                            else:
+                                logger.log(f"  ⚠️ [RECOVERY] 댓글 상태 판정 불가(UNKNOWN) -> 중복 방지를 위해 미확정 격리를 유지합니다: {post.key}")
+                        except Exception as rec_err:
+                            logger.log(f"  ⚠️ [RECOVERY] 미확정 상태 재확인 중 예외: {rec_err}", "WARNING")
 
                     should_like = like_enabled and not is_local_liked
-                    should_comment = comment_enabled and not is_local_commented
+                    should_comment = comment_enabled and not is_local_commented and not is_local_unconfirmed
 
                     if not should_like and not should_comment:
-                        logger.log(f"  ⏭️ [IDEMPOTENT] 로컬 기록 상 이미 공감 및 댓글 완료된 글입니다: {post.key}")
+                        if is_local_unconfirmed:
+                            logger.log(f"  🛑 [IDEMPOTENT] 등록 결과 불명(SUBMISSION_UNKNOWN) 상태의 글이므로 중복 등록 방지를 위해 댓글 작성을 건너뜁니다: {post.key}")
+                        else:
+                            logger.log(f"  ⏭️ [IDEMPOTENT] 로컬 기록 상 이미 공감 및 댓글 완료된 글입니다: {post.key}")
                         continue
 
                     # 실제 처리 진입 대상 카운트 등록
@@ -307,8 +341,26 @@ class FeedController:
                     sample_selected = None
                     sample_roll = None
                     if should_comment and auto_comment_submit_enabled:
-                        sample_roll = random.random()
-                        sample_selected = (sample_roll <= auto_comment_chance)
+                        account_id = self.config.get("my_blog_id") or "default_user"
+                        sample_selected, sample_roll = self.sampling_manager.get_or_create_sample(
+                            campaign_id=self.campaign_id,
+                            account_id=account_id,
+                            post_key=post.key,
+                            chance=auto_comment_chance,
+                        )
+                        if sample_selected:
+                            self.state_mgr.update(inc_sampled_in=True)
+                        else:
+                            self.state_mgr.update(inc_sampled_out=True)
+
+                    recent_comments = self.history.get_recent_submitted_comments(5)
+                    applied_preset = self.config.get("comment_style_preset", "community")
+                    style_plan = StylePlanService.select_style_plan(
+                        post_key=post.key,
+                        recent_comments=recent_comments,
+                        preset=applied_preset,
+                    )
+                    logger.log(f"  🎨 [STYLE] 최종 적용 프리셋: {applied_preset} | StylePlan: {style_plan}")
 
                     action_plan = PostActionPlan(
                         process_like=should_like,
@@ -317,6 +369,7 @@ class FeedController:
                         local_comment_recorded=is_local_commented,
                         comment_sample_selected=sample_selected,
                         comment_sample_roll=sample_roll,
+                        style_plan=style_plan,
                     )
 
                     # 매 글 처리마다 살아있는 detail_page 획득
@@ -335,10 +388,19 @@ class FeedController:
                             like_success_count += 1
                         if result.comment_result.status == CommentSubmitState.SUBMITTED:
                             comment_submitted_count += 1
+                            consecutive_gemini_failures = 0
+                        elif result.comment_result.status == CommentSubmitState.SUBMISSION_UNKNOWN:
+                            self.state_mgr.update(inc_submission_unknown=True)
                         elif result.comment_result.status == CommentSubmitState.SKIPPED:
                             skipped_count += 1
+                            consecutive_gemini_failures = 0
                         if result.like_result.error or result.comment_result.status == CommentSubmitState.FAILED:
                             failed_count += 1
+                            if getattr(result.comment_result, "error", "") in ("failed", "timeout", "publish_rejected", "response_timeout", "extension_not_ready"):
+                                consecutive_gemini_failures += 1
+                                if consecutive_gemini_failures >= 3:
+                                    logger.log(f"🚨 [CONTROLLER] Gemini 연결/생성이 {consecutive_gemini_failures}회 연속 실패하여 작업을 일시 정지합니다.", "ERROR")
+                                    self.state_mgr.update(new_state=FeedState.PAUSED, message="Gemini 반복 실패 (3회 연속) - 브라우저 확인 필요")
                     except StopRequestedException:
                         final_close_reason = "user_stop"
                         raise

@@ -31,21 +31,45 @@ class LikeInteractionService:
 
 class CommentInteractionService:
     @staticmethod
-    def install_keyboard_listener(page: Page):
+    def install_keyboard_listener(page: Page, post_key: str = ""):
         """
         Document 레벨 캡처링 키보드 및 Delegated 마우스 등록/닫기 이벤트 리스너 설치
         (표준 CSS 매칭만 사용하여 브라우저 evaluate 내 SyntaxError 완전 방지)
+        - 단일 제출 락 (window.tryAcquireSubmitLock)
+        - 한글 IME 조합 보호 (compositionstart, compositionend, isComposing)
+        - 사용자 직접 편집(input, keydown) 시 자동 등록 해제 및 상태 전환
         """
         ensure_page_alive(page)
 
         context = MobileDOMResolver.get_comment_editor_context(page)
         frame = context["frame"] if context else page.main_frame
         frame.evaluate("""
-            () => {
+            (postKey) => {
+                window.__NAVER_CURRENT_POST_KEY__ = postKey || '';
                 window.__NAVER_FEED_ACTION__ = null;
+                window.__NAVER_COMMENT_STATE__ = 'DRAFT_READY';
                 window.__NAVER_COMMENT_SUBMITTED_FLAG__ = false;
                 window.__NAVER_COMMENT_USER_DIRTY__ = false;
                 window.__NAVER_COMMENT_LAST_INPUT_AT__ = 0;
+                window.__NAVER_IS_COMPOSING__ = false;
+                window.__NAVER_SUBMIT_LOCK_ACQUIRED__ = null;
+                window.__NAVER_COMMENT_FINAL_TEXT__ = '';
+                window.__NAVER_COMMENT_SUBMISSION_BASELINE__ = null;
+
+                // 원자적 단일 제출 락 획득 함수 (Enter, 수동 클릭, 자동 타이머 간 경합 방지)
+                window.tryAcquireSubmitLock = (source) => {
+                    if (window.__NAVER_SUBMIT_LOCK_ACQUIRED__) {
+                        return false;
+                    }
+                    if (window.__NAVER_COMMENT_STATE__ === 'SUBMITTING' ||
+                        window.__NAVER_COMMENT_STATE__ === 'SUBMITTED' ||
+                        window.__NAVER_COMMENT_STATE__ === 'CANCELLED') {
+                        return false;
+                    }
+                    window.__NAVER_SUBMIT_LOCK_ACQUIRED__ = source;
+                    window.__NAVER_COMMENT_STATE__ = 'SUBMITTING';
+                    return true;
+                };
 
                 if (window.__NAVER_FEED_KEY_HANDLER__) {
                     document.removeEventListener('keydown', window.__NAVER_FEED_KEY_HANDLER__, true);
@@ -56,9 +80,29 @@ class CommentInteractionService:
                 if (window.__NAVER_FEED_INPUT_HANDLER__) {
                     document.removeEventListener('input', window.__NAVER_FEED_INPUT_HANDLER__, true);
                 }
+                if (window.__NAVER_COMPOSITION_START_HANDLER__) {
+                    document.removeEventListener('compositionstart', window.__NAVER_COMPOSITION_START_HANDLER__, true);
+                }
+                if (window.__NAVER_COMPOSITION_END_HANDLER__) {
+                    document.removeEventListener('compositionend', window.__NAVER_COMPOSITION_END_HANDLER__, true);
+                }
+
+                // 한글 IME 조합 상태 추적
+                window.__NAVER_COMPOSITION_START_HANDLER__ = (e) => {
+                    window.__NAVER_IS_COMPOSING__ = true;
+                    window.__NAVER_COMMENT_USER_DIRTY__ = true;
+                    window.__NAVER_COMMENT_STATE__ = 'USER_EDITING';
+                };
+                window.__NAVER_COMPOSITION_END_HANDLER__ = (e) => {
+                    window.__NAVER_IS_COMPOSING__ = false;
+                    window.__NAVER_COMMENT_USER_DIRTY__ = true;
+                    window.__NAVER_COMMENT_STATE__ = 'USER_EDITING';
+                    window.__NAVER_COMMENT_LAST_INPUT_AT__ = Date.now();
+                };
 
                 // 1. 키보드 단축키 핸들러 (Enter=등록, Shift+Enter=줄바꿈, Esc=건너뛰기)
                 window.__NAVER_FEED_KEY_HANDLER__ = (e) => {
+                    const isComposing = e.isComposing || e.keyCode === 229 || window.__NAVER_IS_COMPOSING__ === true;
                     const editor = e.target.closest ? (
                         e.target.closest('#naverComment__write_textarea') || 
                         e.target.closest('.u_cbox_text') ||
@@ -66,10 +110,16 @@ class CommentInteractionService:
                     ) : null;
 
                     if (editor && e.key !== 'Escape') {
-                        if (e.key !== 'Enter' || e.shiftKey) {
+                        if (isComposing || (e.key !== 'Enter' || e.shiftKey)) {
                             window.__NAVER_COMMENT_USER_DIRTY__ = true;
+                            window.__NAVER_COMMENT_STATE__ = 'USER_EDITING';
                             window.__NAVER_COMMENT_LAST_INPUT_AT__ = Date.now();
                         }
+                    }
+
+                    // 한글 조합 중의 키 입력(조합 확정 Enter 포함)은 제출하지 않음
+                    if (isComposing) {
+                        return;
                     }
 
                     if ((e.metaKey || e.ctrlKey) && (e.key === 'v' || e.key === 'V')) {
@@ -84,6 +134,9 @@ class CommentInteractionService:
                         if (editor) {
                             e.preventDefault();
                             e.stopPropagation();
+                            if (window.tryAcquireSubmitLock && !window.tryAcquireSubmitLock('user_enter')) {
+                                return;
+                            }
                             window.__NAVER_FEED_ACTION__ = 'SUBMIT';
                             return;
                         }
@@ -107,10 +160,19 @@ class CommentInteractionService:
                                      (rawBtn.tagName === 'BUTTON' && (rawBtn.textContent || '').trim() === '등록');
 
                     if (isSubmit) {
+                        if (window.__NAVER_PROGRAMMATIC_SUBMIT__) {
+                            // 자동 제출 경로에 의해 발생한 합법적인 클릭: 락 중복 체크 없이 통과
+                            return;
+                        }
+                        if (window.tryAcquireSubmitLock && !window.tryAcquireSubmitLock('user_click')) {
+                            e.preventDefault();
+                            e.stopPropagation();
+                            return;
+                        }
                         window.__NAVER_COMMENT_SUBMISSION_BASELINE__ = Array.from(
                             document.querySelectorAll("li.u_cbox_comment, li[class*='cbox_comment']")
-                        ).filter(item => /(?:^|[,{\\s])mine\\s*:\\s*true(?:[,}\\s]|$)/i.test(item.getAttribute('data-info') || '') ||
-                                         (item.className || '').split(/\\s+/).includes('u_cbox_type_mine')).map(item => ({
+                        ).filter(item => /(?:^|[,{\\\\s])mine\\\\s*:\\\\s*true(?:[,}\\\\s]|$)/i.test(item.getAttribute('data-info') || '') ||
+                                         (item.className || '').split(/\\\\s+/).includes('u_cbox_type_mine')).map(item => ({
                             info: item.getAttribute('data-info') || '',
                             text: (item.querySelector('.u_cbox_contents, .u_cbox_text_mention, p.text')?.innerText || '').trim()
                         }));
@@ -133,6 +195,9 @@ class CommentInteractionService:
 
                 // 3. 에디터 텍스트 수정(input) 감지 리스너
                 window.__NAVER_FEED_INPUT_HANDLER__ = (e) => {
+                    if (window.__NAVER_PROGRAMMATIC_SET__) {
+                        return;
+                    }
                     const editor = e.target.closest ? (
                         e.target.closest('#naverComment__write_textarea') ||
                         e.target.closest('.u_cbox_text') ||
@@ -140,6 +205,7 @@ class CommentInteractionService:
                     ) : null;
                     if (editor) {
                         window.__NAVER_COMMENT_USER_DIRTY__ = true;
+                        window.__NAVER_COMMENT_STATE__ = 'USER_EDITING';
                         window.__NAVER_COMMENT_LAST_INPUT_AT__ = Date.now();
                     }
                 };
@@ -147,8 +213,10 @@ class CommentInteractionService:
                 document.addEventListener('keydown', window.__NAVER_FEED_KEY_HANDLER__, true);
                 document.addEventListener('click', window.__NAVER_FEED_CLICK_HANDLER__, true);
                 document.addEventListener('input', window.__NAVER_FEED_INPUT_HANDLER__, true);
+                document.addEventListener('compositionstart', window.__NAVER_COMPOSITION_START_HANDLER__, true);
+                document.addEventListener('compositionend', window.__NAVER_COMPOSITION_END_HANDLER__, true);
             }
-        """)
+        """, post_key)
 
     @staticmethod
     def replace_editor_text(page: Page, text: str) -> bool:
@@ -223,7 +291,8 @@ class CommentInteractionService:
         page: Page,
         draft_text: str,
         secret_comment: bool = False,
-        stop_event: Optional[threading.Event] = None
+        stop_event: Optional[threading.Event] = None,
+        post_key: str = "",
     ) -> CommentProcessResult:
         """
         1. 댓글창 열기 Polling
@@ -278,7 +347,7 @@ class CommentInteractionService:
                     pass
 
         # 리스너 설치 및 포커스
-        cls.install_keyboard_listener(page)
+        cls.install_keyboard_listener(page, post_key=post_key)
         CommentEditorAdapter.focus(page)
 
         logger.log(f"  💬 [COMMENT] 초안 자동 입력 완료 (수정 후 Enter=등록 / Cmd+V=붙여넣기 / Esc=건너뛰기)")
@@ -294,6 +363,7 @@ class CommentInteractionService:
         skip_event: Optional[threading.Event] = None,
         post_key: str = "",
         timeout_seconds: Optional[float] = None,
+        state_mgr: Optional[object] = None,
     ) -> UserAction:
         start_time = time.time()
         while True:
@@ -316,7 +386,9 @@ class CommentInteractionService:
                     () => {
                         const act = window.__NAVER_FEED_ACTION__;
                         window.__NAVER_FEED_ACTION__ = null;
-                        const dirty = window.__NAVER_COMMENT_USER_DIRTY__ === true;
+                        const dirty = (window.__NAVER_COMMENT_USER_DIRTY__ === true || 
+                                       window.__NAVER_COMMENT_STATE__ === 'USER_EDITING' || 
+                                       window.__NAVER_IS_COMPOSING__ === true);
                         return [act, dirty];
                     }
                 """)
@@ -330,21 +402,35 @@ class CommentInteractionService:
                 elif action_data in ("SKIP", "CLOSED"):
                     return UserAction.SKIP
 
-                # P0-2: 사용자가 키 입력/수정을 시작한 경우 AUTO_SUBMIT 즉시 해제 (수동 검토 모드로 전환)
+                # P0-2: 사용자가 키 입력/수정을 시작하거나 조합 중인 경우 AUTO_SUBMIT 즉시 해제 (수동 검토 모드로 전환)
                 if is_dirty and timeout_seconds is not None:
-                    logger.log("  ✍️ [COMMENT] 사용자의 직접 댓글 수정/입력 감지 -> 자동 등록 취소 (수동 확인 모드로 전환)")
+                    logger.log("  ✍️ [COMMENT] 사용자의 직접 댓글 수정/입력/조합 감지 -> 자동 등록 취소 (수동 확인 모드로 전환)")
                     timeout_seconds = None
-            except Exception:
-                pass
+                    if state_mgr and hasattr(state_mgr, "update"):
+                        try:
+                            state_mgr.update(message="사용자 편집 중 / 자동 등록 해제")
+                        except Exception:
+                            pass
+            except Exception as e:
+                # ⑥ 상태 조회 실패는 자동 제출 중단으로 처리 (Fail-Closed)
+                if timeout_seconds is not None:
+                    logger.log(f"  ⚠️ [COMMENT] 브라우저 상태 조회 실패로 자동 등록을 중단합니다: {e}", "WARNING")
+                    timeout_seconds = None
+                    if state_mgr and hasattr(state_mgr, "update"):
+                        try:
+                            state_mgr.update(message="브라우저 상태 조회 실패 / 자동 등록 중단")
+                        except Exception:
+                            pass
 
-            # 3. UI 스레드로부터 전달된 명령 처리
+            # 3. UI 스레드로부터 전달된 명령 처리 (글 식별자 유효성 검증)
             if command_bridge:
                 cmd = command_bridge.pop_command()
                 if cmd:
-                    if cmd.kind in (WorkerCommandType.SKIP_POST, WorkerCommandType.GEMINI_SKIP_POST):
-                        if not cmd.post_key or not post_key or cmd.post_key == post_key:
-                            logger.log("  ⏭️ [USER] 다음 글로 바로 넘어가기 요청을 수신했습니다 (스킵).")
-                            return UserAction.SKIP
+                    if cmd.post_key and post_key and cmd.post_key != post_key:
+                        logger.log(f"  ⚠️ [COMMAND] 이전 글({cmd.post_key}) 명령이 현재 글({post_key})에 도착하여 무시합니다.", "WARNING")
+                    elif cmd.kind in (WorkerCommandType.SKIP_POST, WorkerCommandType.GEMINI_SKIP_POST):
+                        logger.log("  ⏭️ [USER] 다음 글로 바로 넘어가기 요청을 수신했습니다 (스킵).")
+                        return UserAction.SKIP
                     elif cmd.kind == WorkerCommandType.APPLY_CLIPBOARD_COMMENT:
                         from services.comments.community_rhythm import FinalQualityGate
                         gate_res = FinalQualityGate.validate_final_text(cmd.text, preset=preset, source="clipboard")
@@ -357,7 +443,7 @@ class CommentInteractionService:
                         else:
                             logger.log(f"  ⚠️ [COMMENT] 클립보드 텍스트가 품질 게이트를 통과하지 못해 적용을 거부했습니다: [{gate_res.code}] {gate_res.reason} (매칭: {gate_res.matched})", "WARNING")
 
-            # 4. 마지막으로 timeout 검사 (모든 브라우저 액션 drain 후 평가)
+            # 4. 마지막으로 timeout 검사 (모든 브라우저 액션 drain 후 단일 락 획득)
             if timeout_seconds is not None and timeout_seconds >= 0:
                 if (time.time() - start_time) >= timeout_seconds:
                     # Timeout 만료 순간 마지막 1회 브라우저 액션 최종 drain
@@ -367,19 +453,42 @@ class CommentInteractionService:
                             action_frame = editor_context["frame"] if editor_context else page.main_frame
                         final_act = action_frame.evaluate("""
                             () => {
+                                if (window.__NAVER_COMMENT_USER_DIRTY__ || window.__NAVER_IS_COMPOSING__ || window.__NAVER_COMMENT_STATE__ === 'USER_EDITING') {
+                                    return '__USER_EDITING__';
+                                }
+                                if (window.tryAcquireSubmitLock && !window.tryAcquireSubmitLock('auto_timer')) {
+                                    return '__LOCK_FAILED__';
+                                }
                                 const act = window.__NAVER_FEED_ACTION__;
                                 window.__NAVER_FEED_ACTION__ = null;
                                 return act;
                             }
                         """)
+                        if final_act in ("__USER_EDITING__", "__LOCK_FAILED__"):
+                            logger.log("  ⚠️ [COMMENT] 자동 등록 직전 사용자 편집 또는 제출 잠금 실패로 자동 제출을 취소합니다.")
+                            timeout_seconds = None
+                            if state_mgr and hasattr(state_mgr, "update"):
+                                try:
+                                    state_mgr.update(message="사용자 편집 감지 / 자동 등록 취소")
+                                except Exception:
+                                    pass
+                            continue
+
                         if final_act == "SUBMIT":
                             return UserAction.SUBMIT
                         elif final_act == "SUBMIT_MANUAL":
                             return UserAction.NATIVE_SUBMIT
                         elif final_act in ("SKIP", "CLOSED"):
                             return UserAction.SKIP
-                    except Exception:
-                        pass
+                    except Exception as e:
+                        logger.log(f"  ⚠️ [COMMENT] 최종 액션 확인 조회 실패로 자동 제출을 중단합니다: {e}", "WARNING")
+                        timeout_seconds = None
+                        if state_mgr and hasattr(state_mgr, "update"):
+                            try:
+                                state_mgr.update(message="상태 확인 실패 / 자동 등록 중단")
+                            except Exception:
+                                pass
+                        continue
 
                     logger.log(f"  ⏱️ [COMMENT] 자동 등록 대기 시간({timeout_seconds:.1f}초) 만료 - 댓글을 자동 등록합니다.")
                     return UserAction.AUTO_SUBMIT
@@ -410,6 +519,9 @@ class CommentInteractionService:
     ) -> CommentSubmitState:
         """
         댓글 등록 버튼 클릭 및 Fail-closed 검증 (에디터 클리어 및 서버 목록 내 댓글 등장 확인)
+        - 클릭 전 오류/비활성은 FAILED
+        - 클릭 후 서버 반영 지연/미확인은 SUBMISSION_UNKNOWN (중복 재등록 방지)
+        - 수동 등록(click=False) 시 버튼 소멸/비활성화 상태여도 서버 확인 지속
         """
         ensure_page_alive(page)
 
@@ -420,34 +532,40 @@ class CommentInteractionService:
             return CommentSubmitState.FAILED
 
         editor_context = MobileDOMResolver.get_comment_editor_context(page)
-        submit_context = MobileDOMResolver.get_comment_submit_context(page, editor_context["frame"] if editor_context else None)
-        if not submit_context:
-            logger.log("  ❌ [COMMENT] 등록 버튼을 찾지 못했습니다.", "ERROR")
-            return CommentSubmitState.FAILED
-        btn = submit_context["button"]
-        # Capture server truth before the click so an older own comment cannot
-        # be mistaken for the comment submitted in this action.
-        comment_frame = submit_context.get("frame") or (editor_context.get("frame") if editor_context else page.main_frame)
-        baseline = ServerCommentDuplicateGuard.capture_submission_baseline(comment_frame)
-        try:
-            if btn.is_disabled():
-                logger.log("  ❌ [COMMENT] 등록 버튼이 비활성 상태입니다.", "ERROR")
-                return CommentSubmitState.FAILED
-            if click:
-                try:
-                    btn.scroll_into_view_if_needed(timeout=1000)
-                    btn.click(timeout=1000)
-                except Exception as exc:
-                    logger.log(f"  ❌ [COMMENT] 등록 버튼 클릭 실패: {exc}", "ERROR")
-                    return CommentSubmitState.FAILED
-            else:
-                logger.log("  ℹ️ [COMMENT][SUBMIT_NATIVE_CLICK] 네이버 기본 등록 동작을 검증합니다")
-        except Exception:
-            return CommentSubmitState.FAILED
+        comment_frame = editor_context.get("frame") if editor_context else page.main_frame
 
+        if click:
+            submit_context = MobileDOMResolver.get_comment_submit_context(page, editor_context["frame"] if editor_context else None)
+            if not submit_context:
+                logger.log("  ❌ [COMMENT] 등록 버튼을 찾지 못했습니다.", "ERROR")
+                return CommentSubmitState.FAILED
+            btn = submit_context["button"]
+            comment_frame = submit_context.get("frame") or comment_frame
+            baseline = ServerCommentDuplicateGuard.capture_submission_baseline(comment_frame)
+            try:
+                if btn.is_disabled():
+                    logger.log("  ❌ [COMMENT] 등록 버튼이 비활성 상태입니다.", "ERROR")
+                    return CommentSubmitState.FAILED
+                btn.scroll_into_view_if_needed(timeout=1000)
+                try:
+                    comment_frame.evaluate("() => { window.__NAVER_PROGRAMMATIC_SUBMIT__ = true; }")
+                except Exception:
+                    pass
+                btn.click(timeout=1000)
+            except Exception as exc:
+                logger.log(f"  ❌ [COMMENT] 등록 버튼 클릭 실패: {exc}", "ERROR")
+                return CommentSubmitState.FAILED
+            finally:
+                try:
+                    comment_frame.evaluate("() => { window.__NAVER_PROGRAMMATIC_SUBMIT__ = false; }")
+                except Exception:
+                    pass
+        else:
+            logger.log("  ℹ️ [COMMENT][SUBMIT_NATIVE_CLICK] 네이버 기본 등록 동작을 검증합니다")
+            baseline = ServerCommentDuplicateGuard.capture_submission_baseline(comment_frame)
+
+        # 등록 후 서버 목록 확인
         try:
-            # 에디터가 비워지는 것은 네이버의 로컬 UI 반응일 뿐 등록 증거가 아니다.
-            # 서버 목록에서 본인 댓글이 확인될 때만 SUBMITTED를 반환한다.
             unknown_seen = False
             for delay in (0.5, 1.0, 2.0):
                 interruptible_wait(stop_event, delay)
@@ -468,10 +586,10 @@ class CommentInteractionService:
                     )
 
             logger.log(
-                "  ❌ [COMMENT] " + ("server_verification_unavailable" if unknown_seen else "server_comment_not_found") + ": 서버 목록에 본인 댓글이 확인되지 않았습니다",
-                "ERROR",
+                "  ⚠️ [COMMENT] " + ("server_verification_unavailable" if unknown_seen else "server_comment_not_found") + ": 클릭 후 서버 목록에 본인 댓글이 즉시 확인되지 않아 SUBMISSION_UNKNOWN 처리합니다 (재등록 방지)",
+                "WARNING",
             )
-            return CommentSubmitState.FAILED
+            return CommentSubmitState.SUBMISSION_UNKNOWN
         except Exception as e:
-            logger.log(f"  ❌ [COMMENT] 등록 검증 중 예외: {e}", "ERROR")
-            return CommentSubmitState.FAILED
+            logger.log(f"  ⚠️ [COMMENT] 등록 검증 중 예외 발생 (클릭 이후이므로 SUBMISSION_UNKNOWN 처리): {e}", "WARNING")
+            return CommentSubmitState.SUBMISSION_UNKNOWN

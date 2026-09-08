@@ -33,9 +33,10 @@ class GeminiCommand:
     deadline_at: float
 
     @classmethod
-    def create(cls, post_key: str, navigation_version: int, prompt: str, request_id: Optional[str] = None):
+    def create(cls, post_key: str, navigation_version: int, prompt: str, request_id: Optional[str] = None, timeout_seconds: float = 60.0):
         now = time.time()
-        return cls(request_id or uuid.uuid4().hex, post_key, navigation_version, prompt, now, now + 70.0)
+        timeout = max(10.0, float(timeout_seconds or 60.0))
+        return cls(request_id or uuid.uuid4().hex, post_key, navigation_version, prompt, now, now + timeout)
 
     def to_json(self) -> Dict[str, object]:
         return {
@@ -142,6 +143,8 @@ class GeminiExtensionBridge:
         self._last_busy_request_id: Optional[str] = None
         self._last_busy_since: Optional[float] = None
         self._last_busy_deadline_at: Optional[float] = None
+        self._last_completed_request_id: Optional[str] = None
+        self._last_completed_at: float = 0.0
         self._cancel_requests: set[str] = set()
         self._expected_extension_version = expected_extension_version or contract.extension_version
         self._expected_build_id = expected_build_id or contract.runtime_build
@@ -152,7 +155,7 @@ class GeminiExtensionBridge:
 
     def record_heartbeat(
         self,
-        status: str,
+        status: object,
         title: str = "",
         url: str = "",
         extension_version: str = "",
@@ -168,8 +171,36 @@ class GeminiExtensionBridge:
         busy_since: Optional[float] = None,
         busy_deadline_at: Optional[float] = None
     ) -> None:
+        if isinstance(status, dict):
+            payload = status
+            status = str(payload.get("status", "failed"))
+            title = str(payload.get("title", ""))
+            url = str(payload.get("url", ""))
+            extension_version = str(payload.get("extensionVersion", ""))
+            content_build = str(payload.get("buildId", payload.get("contentBuild", "")))
+            protocol_version = int(payload.get("protocolVersion", 0) or 0)
+            bridge_schema_version = int(payload.get("bridgeSchemaVersion", 0) or 0)
+            transport_alive = bool(payload.get("transportAlive", True))
+            runtime_alive = bool(payload.get("runtimeAlive", True))
+            runtime_status = str(payload.get("runtimeStatus", payload.get("status", "ready")))
+            consumer_id = str(payload.get("consumerId", ""))
+            last_runtime_ping_at = float(payload.get("lastRuntimePingAt", 0.0) or 0.0)
+            busy_request_id = payload.get("busyRequestId")
+            busy_since = payload.get("busySince")
+            busy_deadline_at = payload.get("busyDeadlineAt")
+
         with self._condition:
-            self._heartbeat_at = time.time()
+            now = time.time()
+            # If a late busy heartbeat arrives for a recently completed request, treat as settling
+            if status == "busy" and busy_request_id and busy_request_id == self._last_completed_request_id:
+                if (now - self._last_completed_at) < 2.5:
+                    status = "settling"
+                    busy_request_id = None
+            elif status == "busy" and not busy_request_id and self._last_completed_request_id:
+                if (now - self._last_completed_at) < 2.5:
+                    status = "settling"
+
+            self._heartbeat_at = now
             self._ever_seen_heartbeat = True
             self._heartbeat_status = status
             self._heartbeat_title = title
@@ -188,11 +219,18 @@ class GeminiExtensionBridge:
             self._last_busy_deadline_at = busy_deadline_at
             self._condition.notify_all()
 
+    def get_result(self, request_id: str) -> Optional[GeminiResult]:
+        with self._condition:
+            return self._results.get(request_id)
+
     def cancel_command(self, request_id: Optional[str] = None) -> bool:
         with self._condition:
             target_rid = request_id or self._active_request_id
             if target_rid:
                 self._cancel_requests.add(target_rid)
+                if len(self._cancel_requests) > 100:
+                    oldest = next(iter(self._cancel_requests))
+                    self._cancel_requests.discard(oldest)
                 if self._command and self._command.request_id == target_rid:
                     self._command_state = "cancelled"
                     self._command = None
@@ -288,7 +326,26 @@ class GeminiExtensionBridge:
                     self.bridge_session_id, self._active_request_id, self._command_state
                 )
 
+            if self._heartbeat_status == "settling":
+                return GeminiPreflight(
+                    False, "settling", self._heartbeat_title, self._heartbeat_url,
+                    "Gemini runtime settling after completed command",
+                    self._extension_version, self._content_build, self._protocol_version, self._bridge_schema_version, age_ms,
+                    self.bridge_session_id, self._active_request_id, self._command_state
+                )
+
             if self._heartbeat_status == "busy":
+                # Check if this busy belongs to a recently completed command in transition
+                now_t = time.time()
+                if self._last_completed_request_id and (now_t - self._last_completed_at) < 2.5:
+                    if not self._last_busy_request_id or self._last_busy_request_id == self._last_completed_request_id:
+                        return GeminiPreflight(
+                            False, "settling", self._heartbeat_title, self._heartbeat_url,
+                            f"Gemini runtime settling after completed request (rid={self._last_completed_request_id})",
+                            self._extension_version, self._content_build, self._protocol_version, self._bridge_schema_version, age_ms,
+                            self.bridge_session_id, self._active_request_id, self._command_state
+                        )
+
                 # Classify busy into busy_active_command, busy_orphaned, busy_stale_deadline
                 if self._last_busy_deadline_at and time.time() > (self._last_busy_deadline_at / 1000.0 if self._last_busy_deadline_at > 100_000_000_000 else self._last_busy_deadline_at):
                     return GeminiPreflight(
@@ -342,23 +399,38 @@ class GeminiExtensionBridge:
                 self.bridge_session_id, self._active_request_id, self._command_state
             )
 
-    def await_ready(self, timeout: float = 5.0, stop_event: Optional[threading.Event] = None) -> GeminiPreflight:
-        """피드 작업 시작 시 단기 유예 시간(5초)을 두고 ready 상태를 대기하며, orphan/stale은 자동 복구"""
+    def await_ready(
+        self,
+        timeout: float = 5.0,
+        stop_event: Optional[threading.Event] = None,
+        skip_event: Optional[threading.Event] = None,
+    ) -> GeminiPreflight:
+        """피드 작업 시작 및 재시도 시 유예 시간(5초)을 두고 ready 상태를 대기하며, orphan/stale은 자동 복구"""
         deadline = time.monotonic() + max(0.1, timeout)
         while time.monotonic() < deadline:
             if stop_event and stop_event.is_set():
                 break
+            if skip_event and skip_event.is_set():
+                break
             pf = self.preflight()
             if pf.ready:
                 return pf
+            if pf.status == "settling":
+                with self._condition:
+                    self._condition.wait(timeout=0.2)
+                continue
             if pf.status in ("busy_orphaned", "busy_stale_deadline"):
                 logger.log(f"⚠️ [GEMINI][RECOVERY] {pf.status} 감지 -> 자동 정리 요청", "WARNING")
                 self.cancel_command(self._last_busy_request_id)
-            time.sleep(0.2)
+            with self._condition:
+                self._condition.wait(timeout=0.2)
         return self.preflight()
 
-    def publish(self, command: GeminiCommand) -> None:
+    def publish(self, command: GeminiCommand) -> bool:
         with self._condition:
+            if self._command is not None and self._command.deadline_at > time.time() and self._command_state in ("pending", "claimed"):
+                logger.log(f"[GEMINI][PUBLISH_REJECTED] Active command still running (rid={self._command.request_id})", "WARNING")
+                return False
             self._command = command
             self._command_state = "pending"
             self._command_claimed_by = ""
@@ -366,6 +438,7 @@ class GeminiExtensionBridge:
             self._results.pop(command.request_id, None)
             logger.log(f"[GEMINI][PUBLISH] rid={command.request_id} post={command.post_key} nav={command.navigation_version}")
             self._condition.notify_all()
+            return True
 
     def current_command(self) -> Optional[GeminiCommand]:
         with self._condition:
@@ -415,6 +488,9 @@ class GeminiExtensionBridge:
         with self._condition:
             command = self._command
             if not command:
+                cached_res = self._results.get(result.request_id)
+                if cached_res and cached_res.post_key == result.post_key:
+                    return True, "already_accepted"
                 return False, "no_active_command"
             if time.time() > command.deadline_at:
                 self._command = None
@@ -427,11 +503,18 @@ class GeminiExtensionBridge:
             if result.navigation_version != command.navigation_version:
                 return False, "navigation_version_mismatch"
             self._results[result.request_id] = result
+            if len(self._results) > 100:
+                oldest_key = next(iter(self._results))
+                self._results.pop(oldest_key, None)
             self._command_state = "completed" if result.status == GeminiResultStatus.COMPLETED else "failed"
             self._command = None
             self._command_claimed_by = ""
             if self._active_request_id == result.request_id:
                 self._active_request_id = None
+            self._last_completed_request_id = result.request_id
+            self._last_completed_at = time.time()
+            self._heartbeat_status = "ready"
+            self._last_busy_request_id = None
             logger.log(f"[GEMINI][RESULT] rid={result.request_id} post={result.post_key} nav={result.navigation_version} status={result.status.value}")
             self._condition.notify_all()
             return True, "accepted"

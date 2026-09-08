@@ -32,17 +32,24 @@ class DraftService:
 
         text = raw_text.strip()
 
-        # 1. Request ID 마커 우선 추출
+        # 1. Request ID 마커 우선 추출 및 불일치 거부
         if expected_request_id:
             marker_pattern = rf"\[\[CMT:{re.escape(expected_request_id)}\]\](.*?)\[\[/CMT\]\]"
             match = re.search(marker_pattern, text, re.DOTALL | re.IGNORECASE)
             if match:
                 text = match.group(1).strip()
             else:
-                # 범용 마커 추출 폴백
-                general_match = re.search(r"\[\[CMT:[a-zA-Z0-9_-]+\]\](.*?)\[\[/CMT\]\]", text, re.DOTALL | re.IGNORECASE)
-                if general_match:
-                    text = general_match.group(1).strip()
+                # 다른 요청 마커([[CMT:other]])가 존재하는 경우 다른 요청의 응답이므로 즉시 거부
+                other_marker_match = re.search(r"\[\[CMT:([a-zA-Z0-9_-]+)\]\]", text, re.IGNORECASE)
+                if other_marker_match:
+                    other_id = other_marker_match.group(1)
+                    if other_id.lower() != expected_request_id.lower():
+                        return None
+        else:
+            # expected_request_id가 없는 경우만 범용 마커 추출
+            general_match = re.search(r"\[\[CMT:[a-zA-Z0-9_-]+\]\](.*?)\[\[/CMT\]\]", text, re.DOTALL | re.IGNORECASE)
+            if general_match:
+                text = general_match.group(1).strip()
 
         # 남아있는 마커 태그 청소
         text = re.sub(r"\[\[/?CMT(?::[a-zA-Z0-9_-]+)?\]\]", "", text).strip()

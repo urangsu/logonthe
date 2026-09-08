@@ -311,8 +311,8 @@ async function runCommandCycle() {
   const dispatchPromise = new Promise((resolve) => {
     const deadlineMs = typeof command.deadlineAt === 'number' && command.deadlineAt > 1000000000
       ? (command.deadlineAt * 1000 - Date.now())
-      : (typeof command.deadlineAt === 'number' ? (command.deadlineAt - Date.now() / 1000) * 1000 : 65000);
-    const timeoutMs = Math.min(65000, Math.max(10000, deadlineMs));
+      : (typeof command.deadlineAt === 'number' ? (command.deadlineAt - Date.now() / 1000) * 1000 : 60000);
+    const timeoutMs = Math.max(5000, deadlineMs);
 
     const timer = setTimeout(() => {
       if (inFlightCommandResolvers.has(command.requestId)) {
@@ -357,19 +357,53 @@ async function runCommandCycle() {
     execResult = { status: 'failed', text: '', error: String(e?.message || e) };
   }
 
-  // 4. Submit execution result to Python
-  try {
-    await bridgeFetch('/v1/result', 'POST', {
-      requestId: command.requestId,
-      postKey: command.postKey,
-      navigationVersion: command.navigationVersion,
-      status: execResult?.status || 'failed',
-      text: execResult?.text || '',
-      error: execResult?.error || ''
-    }, 10000);
-  } catch (resErr) {
-    console.debug('[GEMINI][BACKGROUND] result submit fail:', resErr);
+  // 4. Submit execution result to Python with retry on transient delivery failure (GEM-07)
+  let resultDelivered = false;
+  for (let attempt = 0; attempt < 3; attempt++) {
+    try {
+      const res = await bridgeFetch('/v1/result', 'POST', {
+        requestId: command.requestId,
+        postKey: command.postKey,
+        navigationVersion: command.navigationVersion,
+        status: execResult?.status || 'failed',
+        text: execResult?.text || '',
+        error: execResult?.error || ''
+      }, 10000);
+      if (res && res.ok) {
+        resultDelivered = true;
+        break;
+      }
+    } catch (resErr) {
+      console.debug(`[GEMINI][BACKGROUND] result submit attempt ${attempt + 1} fail:`, resErr);
+      await new Promise(r => setTimeout(r, 500));
+    }
   }
+
+  // 5. Immediately query runtime tab and report fresh status to bridge
+  try {
+    const postExecRuntime = await findActiveGeminiRuntime();
+    const now = Date.now();
+    const heartbeatPayload = {
+      status: postExecRuntime ? (postExecRuntime.ping.status || 'ready') : 'gemini_tab_not_found',
+      transportAlive: true,
+      runtimeAlive: Boolean(postExecRuntime),
+      runtimeStatus: postExecRuntime ? postExecRuntime.ping.status : 'disconnected',
+      title: postExecRuntime?.ping.title || 'Google Gemini',
+      url: postExecRuntime?.ping.url || 'https://gemini.google.com/app',
+      extensionVersion: contract.extensionVersion,
+      contentBuild: contract.runtimeBuild,
+      buildId: contract.runtimeBuild,
+      protocolVersion: contract.protocolVersion,
+      bridgeSchemaVersion: contract.bridgeSchemaVersion,
+      consumerId: 'background-r8',
+      lastRuntimePingAt: now,
+      busyRequestId: postExecRuntime?.ping.busyRequestId || null,
+      busySince: postExecRuntime?.ping.busySince || null,
+      busyDeadlineAt: postExecRuntime?.ping.busyDeadlineAt || null
+    };
+    await bridgeFetch('/v1/heartbeat', 'POST', heartbeatPayload, 5000);
+    lastHeartbeatSentAt = now;
+  } catch (_) {}
 }
 
 async function startTransportEngine() {

@@ -70,9 +70,11 @@ class PostProcessor:
         auto_comment_chance: Optional[float] = None,
         auto_comment_delay_min: Optional[float] = None,
         auto_comment_delay_max: Optional[float] = None,
+        history_store: Optional[Any] = None,
     ):
         self.config = config
         self.session = session
+        self.history_store = history_store
         self.like_enabled = like_enabled
         self.comment_enabled = comment_enabled
         self.comment_template = comment_template
@@ -397,12 +399,14 @@ class PostProcessor:
 
                     request_id = uuid.uuid4().hex
                     ai_prompt = ""
+                    style_plan = (action_plan.style_plan if action_plan else None)
                     if self.ai_clipboard_enabled or self.gemini_web_enabled:
                         ai_prompt = AIPromptBuilder.build(
                             post.title, post.excerpt, style=self.ai_prompt_style,
                             preset=preset, request_id=request_id,
                             content_focus=content_focus,
                             verified_anchors=food_anchors,
+                            style_plan=style_plan,
                         )
 
                     if self.state_mgr:
@@ -428,18 +432,30 @@ class PostProcessor:
                         if self.gemini_browser_mode == "extension_existing_chrome":
                             while not gemini_answer and not use_local_requested:
                                 failure = "invalid_response"
-                                preflight = self.gemini_extension_bridge.preflight() if self.gemini_extension_bridge else None
+                                preflight = (
+                                    self.gemini_extension_bridge.await_ready(
+                                        timeout=5.0,
+                                        stop_event=self.stop_event,
+                                        skip_event=self.skip_event
+                                    )
+                                    if self.gemini_extension_bridge
+                                    else None
+                                )
                                 if preflight and preflight.ready:
                                     command_created_at = time.time()
+                                    gemini_timeout = float(self.config.get("gemini_response_timeout", 55.0))
                                     command = GeminiCommand(
                                         request_id=request_id,
                                         post_key=post.key,
                                         navigation_version=navigation_version,
                                         prompt=ai_prompt,
                                         created_at=command_created_at,
-                                        deadline_at=command_created_at + 70.0,
+                                        deadline_at=command_created_at + gemini_timeout,
                                     )
-                                    self.gemini_extension_bridge.publish(command)
+                                    if not self.gemini_extension_bridge.publish(command):
+                                        failure = "publish_rejected"
+                                        logger.log(f"[GEMINI/EXTENSION] 명령 발행 거부: {failure}", "ERROR")
+                                        break
                                     extension_result = self.gemini_extension_bridge.wait_for_result(
                                         command,
                                         stop_event=self.stop_event,
@@ -465,7 +481,19 @@ class PostProcessor:
                                                 setattr(self, "_context_retry_done", True)
                                                 logger.log("  ℹ️ [GEMINI] 'NEED_MORE_CONTEXT' 수신 -> 본문 1800자 재추출 및 음식 앵커 재분석 후 1회 retry 시도")
                                                 context = ContentContextExtractor.extract(detail_page, post, max_chars=1800)
-                                                post.excerpt = context.excerpt or post.excerpt
+                                                new_excerpt = (context.excerpt or "").strip()
+                                                prev_excerpt = (post.excerpt or "").strip()
+                                                if not new_excerpt or new_excerpt == prev_excerpt:
+                                                    logger.log("  ⏭️ [COMMENT] 본문 1800자 재수집 후에도 신규 근거 없음 -> context_insufficient로 안전하게 스킵")
+                                                    result.comment_result = CommentProcessResult(
+                                                        status=CommentSubmitState.SKIPPED,
+                                                        error="context_insufficient"
+                                                    )
+                                                    if self.state_mgr:
+                                                        self.state_mgr.update(new_state=FeedState.SKIPPING, inc_skip=True)
+                                                    return result
+
+                                                post.excerpt = new_excerpt
                                                 food_focus_info = FoodCommentFocus.analyze(post.title or "", post.excerpt or "")
                                                 content_focus = food_focus_info["focus"]
                                                 food_anchors = food_focus_info["food_anchors"]
@@ -477,6 +505,7 @@ class PostProcessor:
                                                     content_focus=content_focus,
                                                     verified_anchors=food_anchors,
                                                     secondary_anchors=sec_anchors,
+                                                    style_plan=style_plan,
                                                 )
                                                 if self.state_mgr:
                                                     self.state_mgr.update(
@@ -732,7 +761,7 @@ class PostProcessor:
                                 except Exception:
                                     pass
 
-                        CommentInteractionService.install_keyboard_listener(detail_page)
+                        CommentInteractionService.install_keyboard_listener(detail_page, post_key=post.key)
                         CommentEditorAdapter.focus(detail_page)
 
                         cmt_res = CommentProcessResult(status=CommentSubmitState.DRAFTED, draft_text=draft_text)
@@ -762,6 +791,7 @@ class PostProcessor:
                             skip_event=self.skip_event,
                             post_key=post.key,
                             timeout_seconds=auto_submit_timeout,
+                            state_mgr=self.state_mgr,
                         )
 
                         if action == UserAction.STOP:
@@ -811,6 +841,12 @@ class PostProcessor:
                             if self.state_mgr:
                                 self.state_mgr.update(new_state=FeedState.SUBMITTING, message="댓글 등록 및 검증 중...")
 
+                            if self.history_store and hasattr(self.history_store, "record_pre_submit"):
+                                try:
+                                    self.history_store.record_pre_submit(post.key, cmt_res.submitted_text)
+                                except Exception as e:
+                                    logger.log(f"⚠️ [HISTORY] pre_submit 기록 실패: {e}", "WARNING")
+
                             submit_status = CommentInteractionService.submit_and_verify(
                                 detail_page,
                                 cmt_res.submitted_text,
@@ -828,7 +864,6 @@ class PostProcessor:
                                     final_submitted=cmt_res.submitted_text,
                                     category=detected_category,
                                     anchor=(local_res.anchor if 'local_res' in locals() and local_res else ""),
-                                    evidence_span=(local_res.evidence_span if 'local_res' in locals() and local_res else ""),
                                     source=("gemini" if draft_source_label == "Gemini 생성" else "local"),
                                     decision_origin=("auto_submit" if action == UserAction.AUTO_SUBMIT else "user"),
                                 )

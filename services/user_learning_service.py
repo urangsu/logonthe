@@ -132,3 +132,13 @@ class UserLearningService:
                 logger.log("  📝 [LEARNING] 등록된 댓글을 학습용 데이터셋(user_learning_corpus.json)에 기록했습니다.")
         except Exception as e:
             logger.log(f"  ⚠️ [LEARNING] 학습 데이터 저장 중 예외: {e}", "WARNING")
+
+    @classmethod
+    def load_corpus(cls) -> list[dict]:
+        if not os.path.exists(USER_LEARNING_FILE):
+            return []
+        try:
+            with open(USER_LEARNING_FILE, "r", encoding="utf-8") as f:
+                return json.load(f)
+        except Exception:
+            return []

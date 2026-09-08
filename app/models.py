@@ -23,6 +23,7 @@ class CommentSubmitState(str, Enum):
     SKIPPED = "skipped"
     FAILED = "failed"
     UNKNOWN = "unknown"
+    SUBMISSION_UNKNOWN = "submission_unknown"
 
 
 class UserAction(str, Enum):
@@ -46,6 +47,10 @@ class FailureReason(str, Enum):
     COMMENT_EDITOR_NOT_FOUND = "comment_editor_not_found"
     COMMENT_SUBMIT_NOT_FOUND = "comment_submit_not_found"
     COMMENT_SUBMIT_UNVERIFIED = "comment_submit_unverified"
+    COMMENT_INPUT_FAILED = "comment_input_failed"
+    COMMENT_SUBMIT_FAILED = "comment_submit_failed"
+    DAILY_LIMIT_REACHED = "daily_limit_reached"
+    UNKNOWN_ERROR = "unknown_error"
     BROWSER_DISCONNECTED = "browser_disconnected"
 
 
@@ -65,6 +70,24 @@ class WorkerCommand:
 
 
 @dataclass
+class StylePlan:
+    reaction_type: str = "detail_empathy"  # "short_impression", "detail_empathy", "light_curiosity"
+    length_band: str = "standard"  # "concise", "standard"
+    intensity: str = "crisp"  # "crisp", "playful"
+    ending_family: str = "~네요"  # "~네요", "~겠어요", "~보여요"
+    emphasis: str = "none"  # "none", "once"
+
+    def to_dict(self) -> dict:
+        return {
+            "reaction_type": self.reaction_type,
+            "length_band": self.length_band,
+            "intensity": self.intensity,
+            "ending_family": self.ending_family,
+            "emphasis": self.emphasis,
+        }
+
+
+@dataclass
 class PostActionPlan:
     """개별 글에 대한 컴포넌트 레벨 멱등성 실행 계획"""
     process_like: bool = True
@@ -73,6 +96,7 @@ class PostActionPlan:
     local_comment_recorded: bool = False
     comment_sample_selected: Optional[bool] = None
     comment_sample_roll: Optional[float] = None
+    style_plan: Optional[StylePlan] = None
 
 
 @dataclass
