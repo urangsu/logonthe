@@ -15,7 +15,7 @@ from app.processor import PostProcessor, StopRequestedException
 from browser.session import BrowserSession, interruptible_wait
 from naver.sources import NeighborFeedSource, RecommendationFeedSource, DirectUrlSource, TargetedSearchFeedSource, FeedSource
 from naver.auth_guard import NaverAuthGuard
-from services.config import ConfigService
+from services.config import ConfigService, resolve_comment_workflow
 from services.history import HistoryStore
 from services.pacing import PacingService
 from services.clipboard_bridge import ClipboardCommandBridge
@@ -250,11 +250,13 @@ class FeedController:
         source_type = FeedSourceType(source_type_str)
         max_items = int(self.config.get("max_feed_items", 20))
         like_enabled = bool(self.config.get("like_enabled", True))
-        auto_comment_submit_enabled = bool(self.config.get("auto_comment_submit_enabled", False))
-        comment_enabled = bool(self.config.get("comment_enabled", True)) or auto_comment_submit_enabled
+        cfg_dict = self.config.data if hasattr(self.config, "data") else (self.config if isinstance(self.config, dict) else {})
+        comment_workflow = resolve_comment_workflow(cfg_dict)
+        comment_enabled = comment_workflow.effective_comment_enabled
+        auto_comment_submit_enabled = comment_workflow.effective_auto_submit_enabled
+        auto_comment_chance = comment_workflow.chance
         comment_template = str(self.config.get("comment_template", ""))
         secret_comment = bool(self.config.get("secret_comment", False))
-        auto_comment_chance = float(self.config.get("auto_comment_chance", 0.60))
         auto_comment_delay_min = float(self.config.get("auto_comment_delay_min", 3.0))
         auto_comment_delay_max = float(self.config.get("auto_comment_delay_max", 6.0))
         direct_urls = self.config.get("direct_urls", [])
@@ -287,7 +289,7 @@ class FeedController:
             f"categories={log_cats}\n"
             f"max_items={max_items}\n"
             f"like_enabled={like_enabled}\n"
-            f"comment_enabled={comment_enabled}\n"
+            f"comment_enabled={comment_enabled} (mode={comment_workflow.mode.value})\n"
             f"auto_comment_submit={auto_comment_submit_enabled} (chance={auto_comment_chance})\n"
             f"topic_filter={log_topic_filter}\n"
             f"like_threshold={self.config.get('like_count_skip_threshold', 999)}\n"
@@ -387,11 +389,11 @@ class FeedController:
 
             seen_candidate_keys: Set[str] = set()
             attempted_post_keys: Set[str] = set()
-            like_success_count = 0
-            comment_submitted_count = 0
-            skipped_count = 0
-            failed_count = 0
-            consecutive_gemini_failures = 0
+            self.like_success_count = 0
+            self.comment_submitted_count = 0
+            self.skipped_count = 0
+            self.failed_count = 0
+            self.consecutive_gemini_failures = 0
             scroll_attempts = 0
             max_candidate_scan = max_items * 5
 
@@ -490,6 +492,25 @@ class FeedController:
                         else:
                             self.state_mgr.update(inc_sampled_out=True)
 
+                    effective_post_comment = should_comment
+                    if should_comment and auto_comment_submit_enabled and sample_selected is False:
+                        effective_post_comment = False
+
+                    # If neither like nor comment is needed on this post, skip detail page navigation entirely!
+                    if not should_like and not effective_post_comment:
+                        roll_str = f"{sample_roll:.2f}" if sample_roll is not None else "n/a"
+                        logger.log(f"  ⏭️ [SAMPLING] 공감 불필요 및 랜덤 댓글 제외 대상({post.key}, roll={roll_str}) -> 상세 페이지 진입을 건너뜁니다.")
+                        skipped_result = PostProcessResult(
+                            post=post,
+                            like_result=LikeProcessResult(action_taken=False, state_after=LikeState.UNKNOWN),
+                            comment_result=CommentProcessResult(status=CommentSubmitState.SKIPPED, error="random_chance_skipped")
+                        )
+                        self.history.record_result(skipped_result)
+                        self._handle_post_result(skipped_result)
+                        if self.state_mgr:
+                            self.state_mgr.update(inc_processed=True, inc_skip=True)
+                        continue
+
                     recent_comments = self.history.get_recent_submitted_comments(5)
                     applied_preset = self.config.get("comment_style_preset", "community")
                     style_plan = StylePlanService.select_style_plan(
@@ -501,7 +522,7 @@ class FeedController:
 
                     action_plan = PostActionPlan(
                         process_like=should_like,
-                        process_comment=should_comment,
+                        process_comment=effective_post_comment,
                         local_like_recorded=is_local_liked,
                         local_comment_recorded=is_local_commented,
                         comment_sample_selected=sample_selected,
@@ -542,35 +563,37 @@ class FeedController:
                                 detail_page = self.session.get_detail_page()
                                 result = processor.process(detail_page, post, action_plan=action_plan)
                                 self.history.record_result(result)
-                                if result.like_result.action_taken or result.like_result.state_after == LikeState.LIKED:
-                                    like_success_count += 1
-                                if result.comment_result.status == CommentSubmitState.SUBMITTED:
-                                    comment_submitted_count += 1
-                                elif result.comment_result.status == CommentSubmitState.SKIPPED:
-                                    skipped_count += 1
-                                if result.like_result.error or result.comment_result.status == CommentSubmitState.FAILED:
-                                    failed_count += 1
+                                self._handle_post_result(result)
                             except (StopRequestedException, FatalSessionError):
                                 raise
                             except Exception as rpe2:
                                 logger.log(f"  ⚠️ [POST_RECOVERABLE] 재시도 후 글 처리 오류 격리 ({post.key}): {rpe2}", "WARNING")
-                                failed_count += 1
                                 failed_res = PostProcessResult(
                                     post=post,
                                     like_result=LikeProcessResult(state_before=LikeState.UNKNOWN, action_taken=False, state_after=LikeState.UNKNOWN, error=str(rpe2)),
                                     comment_result=CommentProcessResult(status=CommentSubmitState.FAILED, error=str(rpe2))
                                 )
                                 self.history.record_result(failed_res)
+                                self._handle_post_result(failed_res)
                         else:
                             logger.log(f"  ⚠️ [POST_RECOVERABLE] 글 처리 오류 격리 ({post.key}): {rpe}", "WARNING")
-                            failed_count += 1
                             failed_res = PostProcessResult(
                                 post=post,
                                 like_result=LikeProcessResult(state_before=LikeState.UNKNOWN, action_taken=False, state_after=LikeState.UNKNOWN, error=str(rpe)),
                                 comment_result=CommentProcessResult(status=CommentSubmitState.FAILED, error=str(rpe))
                             )
                             self.history.record_result(failed_res)
+                            self._handle_post_result(failed_res)
                             continue
+                    except Exception as pe:
+                        logger.log(f"  ⚠️ [POST_ERROR] 글 처리 예기치 않은 오류 격리 ({post.key}): {pe}", "WARNING")
+                        failed_res = PostProcessResult(
+                            post=post,
+                            like_result=LikeProcessResult(state_before=LikeState.UNKNOWN, action_taken=False, state_after=LikeState.UNKNOWN, error=str(pe)),
+                            comment_result=CommentProcessResult(status=CommentSubmitState.FAILED, error=str(pe))
+                        )
+                        self.history.record_result(failed_res)
+                        self._handle_post_result(failed_res)
 
                     if self.stop_event.is_set():
                         final_close_reason = "user_stop"
@@ -596,11 +619,21 @@ class FeedController:
                 logger.log("⏹ [ASSISTANT] 사용자 요청으로 작업 중지 완료.", "WARNING")
                 final_close_reason = "user_stop"
             else:
+                st = self.state_mgr.get_state() if self.state_mgr else None
+                sampled_in = st.sampled_in_count if st else 0
+                sampled_out = st.sampled_out_count if st else 0
+                gen_success = st.generated_success_count if st else 0
+                sub_unknown = st.submission_unknown_count if st else 0
                 self.state_mgr.update(new_state=FeedState.COMPLETED, message=f"작업 완료! (총 {len(attempted_post_keys)}개 처리)")
                 logger.log(
-                    f"✅ [ASSISTANT] 전체 피드 작업 완료! (진입: {len(attempted_post_keys)}개, "
-                    f"공감 성공: {like_success_count}개, 댓글 등록: {comment_submitted_count}개, "
-                    f"건너뜀: {skipped_count}개, 실패: {failed_count}개)"
+                    f"✅ [ASSISTANT] 전체 피드 작업 완료!\n"
+                    f"  - 처리 포스트: {len(attempted_post_keys)}개\n"
+                    f"  - 공감 성공: {self.like_success_count}개\n"
+                    f"  - 랜덤 댓글 표본: 선정 {sampled_in}개 / 제외 {sampled_out}개\n"
+                    f"  - Gemini 생성 성공: {gen_success}개\n"
+                    f"  - 댓글 등록 완료: {self.comment_submitted_count}개\n"
+                    f"  - 건너뜀(스킵): {self.skipped_count}개 (결과불명 격리: {sub_unknown}개)\n"
+                    f"  - 실패: {self.failed_count}개"
                 )
                 final_close_reason = "completed"
 

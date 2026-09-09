@@ -405,9 +405,9 @@ class FinalQualityGate:
         if not effective_allow_period and not legacy and ("." in normalized or "。" in normalized):
             matched = "." if "." in normalized else "。"
             return result(False, "forbidden_period", f"period is forbidden: {matched}", matched=matched)
-        max_tilde_allowed = 4 if is_user_source else (2 if is_thoughtful else 1)
-        if not legacy and normalized.count("~") > max_tilde_allowed:
-            return result(False, "excessive_tilde", f"at most {max_tilde_allowed} tildes allowed", matched="~")
+        if not legacy and not is_user_source and normalized.count("~") > (2 if is_thoughtful else 1):
+            max_tilde = 2 if is_thoughtful else 1
+            return result(False, "excessive_tilde", f"at most {max_tilde} tildes allowed", matched="~")
         strong_slang = re.findall(r"(?:^|\s)(헐|와|세상에|대박)(?=\s)|미쳤|맛도리", normalized)
         if not legacy and not is_user_source and len(strong_slang) > (2 if is_thoughtful else 1):
             return result(False, "excessive_slang", "at most one strong slang expression is allowed")
@@ -570,12 +570,31 @@ class CommentDraftInspector:
         "좋겠어요",
     )
 
+    UNVERIFIED_TEXTURE_WORDS: ClassVar[Tuple[str, ...]] = (
+        "꼬독꼬독",
+        "바삭바삭",
+        "야들야들",
+        "포슬포슬",
+        "탱글탱글",
+        "꾸덕",
+        "쫄깃",
+        "쫀득",
+        "촉촉",
+        "바삭",
+    )
+
+    INVENTED_CAUSALITY_PATTERNS: ClassVar[Tuple[re.Pattern[str], ...]] = (
+        re.compile(r"구워서\s+더\s+(?:통통|촉촉|쫀득|고소|맛있)"),
+        re.compile(r"조합이라\s+(?:꼬독|쫀득|바삭|고소)"),
+    )
+
     @classmethod
     def inspect(
         cls,
         text: str,
         recent_comments: Optional[List[str]] = None,
         preset: PresetLike = CommunityRhythmPreset.THOUGHTFUL,
+        excerpt: Optional[str] = None,
     ) -> DraftInspectionResult:
         if not text or not isinstance(text, str):
             return DraftInspectionResult(
@@ -591,6 +610,7 @@ class CommentDraftInspector:
             )
 
         normalized = FinalQualityGate.normalize(raw)
+        norm_excerpt = FinalQualityGate.normalize(excerpt) if excerpt else ""
 
         # 1단계: 현재 글/요청 적합성 및 최소 길이
         if len(normalized) < 10:
@@ -599,7 +619,7 @@ class CommentDraftInspector:
                 feedback="댓글 길이가 너무 짧습니다. 본문의 구체적인 내용 하나를 언급하며 자연스럽게 작성해주세요."
             )
 
-        # 2단계: 본문에 없는 사실/경험 지어냄
+        # 2단계: 사실성 검사 (거짓 방문/사용 경험, 본문에 없는 식감 추측, 가짜 인과관계)
         for phrase in FinalQualityGate.FAKE_EXPERIENCE_PHRASES:
             if phrase in normalized:
                 return DraftInspectionResult(
@@ -616,6 +636,26 @@ class CommentDraftInspector:
                 feedback=f"거짓 경험 표현('{matched_text}')이 포함되어 있습니다. 본문에 명시된 사실에 대해서만 반응해주세요."
             )
 
+        # 2-1. 본문에 없는 식감 추측 검사
+        if norm_excerpt:
+            for tex_word in cls.UNVERIFIED_TEXTURE_WORDS:
+                if tex_word in normalized and tex_word not in norm_excerpt:
+                    return DraftInspectionResult(
+                        passed=False, stage=2, code="unsupported_texture",
+                        matched=tex_word,
+                        feedback=f"본문에 언급되지 않은 식감 추측 표현('{tex_word}')이 포함되어 있습니다. 본문에 없는 식감이나 맛을 추측하지 말고 본문의 실제 내용에만 반응해주세요."
+                    )
+
+            # 2-2. 임의의 인과관계 왜곡 검사
+            for pat in cls.INVENTED_CAUSALITY_PATTERNS:
+                c_match = pat.search(normalized)
+                if c_match and c_match.group() not in norm_excerpt:
+                    return DraftInspectionResult(
+                        passed=False, stage=2, code="invented_causality",
+                        matched=c_match.group(),
+                        feedback=f"본문에 없는 인과관계 표현('{c_match.group()}')이 포함되어 있습니다. 두 특징을 원인과 결과로 연결하지 말고 본문의 구체적 사실에만 반응해주세요."
+                    )
+
         # 3단계: 상투적인 요약·평가·중복 마무리
         for phrase in cls.EXPLANATORY_PHRASES:
             if phrase in normalized:
@@ -625,24 +665,48 @@ class CommentDraftInspector:
                     feedback=f"글을 설명하거나 평가하는 문구('{phrase}')가 포함되어 있습니다. 설명조를 빼고 본문의 구체적인 디테일(메뉴, 비주얼, 사물 등)에 대한 짧은 반응 1문장으로 작성해주세요."
                 )
 
-        # 습관적 중복 마무리 ("참고해야겠어요", "기억해둬야겠네요", "가봐야겠어요" 등 앞 문장에 덧붙인 경우)
+        # 습관적 중복 마무리 ('좋겠어요' 자체를 일괄 금지하지 않고, 사족으로 덧붙여진 복문 형태일 때만 차단)
         sentences = [s.strip() for s in re.split(r'[\n\.\?!~]+', normalized) if s.strip()]
         for tail in cls.REPETITIVE_TAILS:
             if tail in normalized:
-                # 단독 1문장이 아닌 복문/2문장이거나 뒷부분에 붙은 경우
-                if len(sentences) >= 2 or normalized.find(tail) > (len(normalized) * 0.4):
+                tail_pos = normalized.find(tail)
+                is_appended = (len(sentences) >= 2) or (tail_pos > (len(normalized) * 0.45))
+                if is_appended:
                     return DraftInspectionResult(
                         passed=False, stage=3, code="repetitive_tail",
                         matched=tail,
                         feedback=f"마지막 문장에 습관적인 중복 마무리('{tail}')가 붙어 있습니다. 뒤의 군더더기를 삭제하고 본문의 구체적인 내용에 대한 1문장 반응만 남겨주세요."
                     )
 
-        # 4단계: 최근 댓글과 지나친 유사도 (어미/구조 반복)
+        # 4단계: 최근 댓글과 반복 검사 (전체 일치 차단, 구조 클론 차단, 단순 어미 일치는 허용)
         if recent_comments:
+            # 4-1. 문장 전체 동일
+            for rc in recent_comments[-5:]:
+                if rc and FinalQualityGate.normalize(rc.strip()) == normalized:
+                    return DraftInspectionResult(
+                        passed=False, stage=4, code="exact_duplicate",
+                        matched=normalized,
+                        feedback="최근 작성된 댓글과 완전히 동일한 문장입니다. 본문의 다른 내용에 반응해주세요."
+                    )
+
+            # 4-2. 구조적 템플릿 클론 ("... 진짜/너무/특히 ... 보여요" 템플릿 2회 이상 반복 시)
+            clone_match = re.search(r"(?:진짜|너무|특히|더)\s*(?:맛있어|고소해|촉촉해|좋아|달콤해|예뻐)\s*(?:보여요|보이네요)", normalized)
+            if clone_match:
+                clone_count = 0
+                for rc in recent_comments[-3:]:
+                    if rc and re.search(r"(?:진짜|너무|특히|더)\s*(?:맛있어|고소해|촉촉해|좋아|달콤해|예뻐)\s*(?:보여요|보이네요)", FinalQualityGate.normalize(rc)):
+                        clone_count += 1
+                if clone_count >= 2:
+                    return DraftInspectionResult(
+                        passed=False, stage=4, code="structural_clone_detected",
+                        matched=clone_match.group(),
+                        feedback="최근 댓글과 동일한 감상 묘사 문장 구조('... 진짜/특히 ... 보여요')가 반복되고 있습니다. 설명형 문장 대신 본문의 다른 구체적인 사실(주문, 크기, 대기, 비교 등)에 반응해주세요."
+                    )
+
+            # 4-3. 동일한 어미/어구 3회 연속 반복 (최근 2개 모두 동일 어미일 때만 반려)
             ending_tokens = ("네요", "겠어요", "겠네요", "보여요", "보이네요", "좋네요", "같아요", "있어요", "합니다", "입니다", "습니다", "듭니다")
             cand_clean = re.sub(r'[^가-힣]', '', normalized)
             cand_ending = next((tok for tok in ending_tokens if cand_clean.endswith(tok)), (cand_clean[-2:] if len(cand_clean) >= 2 else ""))
-
             if cand_ending:
                 rep_count = 0
                 for rc in recent_comments[-3:]:
@@ -653,7 +717,7 @@ class CommentDraftInspector:
                     return DraftInspectionResult(
                         passed=False, stage=4, code="repetition_detected",
                         matched=cand_ending,
-                        feedback=f"최근 작성된 댓글과 동일한 어미('{cand_ending}')가 반복되고 있습니다. 다른 자연스러운 어미나 새로운 시각의 반응을 선택해주세요."
+                        feedback=f"최근 작성된 댓글과 동일한 어미/어구('{cand_ending}')가 반복되고 있습니다. 다른 자연스러운 어미나 새로운 시각의 반응을 선택해주세요."
                     )
 
         # 5단계: 실제 사용자 문체 이탈 (격식체/매크로 문구)

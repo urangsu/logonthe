@@ -17,6 +17,7 @@ data/user_profile/
 data/cdp_profile/
 data/browser_profile/
 data/history.json
+data/sampling_history.json
 data/*.log
 
 # Generated Audit Outputs & Local Corpus (v8.0)

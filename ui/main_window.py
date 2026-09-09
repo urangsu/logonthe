@@ -220,8 +220,12 @@ class MainWindow(ctk.CTk):
         self.secret_comment_var = ctk.BooleanVar(value=self.config_service.get("secret_comment", False))
         ctk.CTkCheckBox(opt_frame, text="비밀댓글", font=ctk.CTkFont(size=11), variable=self.secret_comment_var).pack(side="left", padx=4)
 
+        def _on_auto_comment_toggle():
+            if self.auto_comment_submit_var.get():
+                self.comment_enabled_var.set(True)
+
         self.auto_comment_submit_var = ctk.BooleanVar(value=self.config_service.get("auto_comment_submit_enabled", False))
-        ctk.CTkCheckBox(opt_frame, text="랜덤 자동 등록", font=ctk.CTkFont(size=11), variable=self.auto_comment_submit_var).pack(side="left", padx=4)
+        ctk.CTkCheckBox(opt_frame, text="랜덤 자동 등록", font=ctk.CTkFont(size=11), variable=self.auto_comment_submit_var, command=_on_auto_comment_toggle).pack(side="left", padx=4)
 
         ctk.CTkLabel(opt_frame, text="작성 확률:", font=ctk.CTkFont(size=11)).pack(side="left", padx=(4, 1))
         self.auto_comment_chance_entry = ctk.CTkEntry(opt_frame, width=36, height=22, font=ctk.CTkFont(size=11))
@@ -658,8 +662,9 @@ class MainWindow(ctk.CTk):
     def _update_ui_state(self, state: BotRuntimeState):
         self.status_msg_lbl.configure(text=f"상태: {state.message}")
         unknown_text = f" | ⚠️ 미확정: {state.submission_unknown_count}" if state.submission_unknown_count > 0 else ""
+        sampled_text = f"선정 {state.sampled_in_count}·등록 {state.comments_count}" if state.sampled_in_count > 0 else f"{state.comments_count}"
         self.badge_lbl.configure(
-            text=f"처리: {state.processed_count}/{state.total_target_count} | ❤️ 공감: {state.likes_count} | 💬 댓글: {state.comments_count} | ⏭️ 건너뜀: {state.skipped_count}{unknown_text}"
+            text=f"처리: {state.processed_count}/{state.total_target_count} | ❤️ 공감: {state.likes_count} | 💬 댓글: {sampled_text} | ⏭️ 건너뜀: {state.skipped_count}{unknown_text}"
         )
         if state.current_post_title:
             self.ai_post_title_lbl.configure(text=f"현재 글: {state.current_post_title[:45]}")
@@ -947,14 +952,16 @@ class MainWindow(ctk.CTk):
         custom_queries_list = [q.strip() for q in raw_custom_q.split(",") if q.strip()]
 
         # Config 단조 업데이트 및 원자적 저장 (update_many 사용)
+        auto_submit_val = bool(self.auto_comment_submit_var.get())
+        comment_val = bool(self.comment_enabled_var.get()) or auto_submit_val
         cfg_data = {
             "feed_source": source_val,
             "discovery_categories": enabled_discovery_cats,
             "custom_discovery_queries": custom_queries_list,
             "max_feed_items": max_items,
             "like_enabled": self.like_enabled_var.get(),
-            "comment_enabled": self.comment_enabled_var.get(),
-            "auto_comment_submit_enabled": self.auto_comment_submit_var.get(),
+            "comment_enabled": comment_val,
+            "auto_comment_submit_enabled": auto_submit_val,
             "auto_comment_chance": auto_chance,
             "auto_comment_delay_min": auto_cmt_min,
             "auto_comment_delay_max": auto_cmt_max,

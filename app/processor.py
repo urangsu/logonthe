@@ -3,7 +3,8 @@ import threading
 import time
 import uuid
 import traceback
-from typing import Any, Callable, Optional
+from dataclasses import dataclass, field
+from typing import Any, Callable, Optional, List, Dict
 from playwright.sync_api import Page
 from app.models import (
     FeedPost, PostProcessResult, LikeProcessResult, CommentProcessResult,
@@ -38,6 +39,62 @@ from src.logger import logger
 
 class StopRequestedException(UserStopRequestedError):
     pass
+
+
+@dataclass
+class GenerationContext:
+    """
+    포스트별 AI 댓글 생성 상태 및 재작성 컨텍스트를 일관되게 관리하는 객체.
+    - 최초 분석 시점부터 핵심 앵커와 보조 앵커를 항상 확보
+    - 본문 확장(NEED_MORE_CONTEXT) 시 update_excerpt()를 통해 앵커를 완전 갱신
+    - 모든 재작성/재시도 경로가 동일한 컨텍스트와 인자를 사용하도록 단일화
+    - 시도 횟수 상한(최대 3회: 최초 1회 + 재작성 최대 2회)으로 무한 루프 차단
+    """
+    title: str
+    excerpt: str
+    preset: str
+    style: str
+    content_focus: str
+    verified_anchors: List[str]
+    secondary_anchors: List[str]
+    style_plan: Optional[Any] = None
+    attempt_count: int = 0
+    max_attempts: int = 3
+    rewrite_reasons: List[str] = field(default_factory=list)
+
+    def update_excerpt(self, new_excerpt: str) -> None:
+        from services.food_comment_focus import FoodCommentFocus
+        self.excerpt = new_excerpt
+        info = FoodCommentFocus.analyze(self.title or "", self.excerpt or "")
+        self.content_focus = info.get("focus", "GENERAL")
+        self.verified_anchors = info.get("food_anchors", [])
+        self.secondary_anchors = info.get("secondary_anchors", [])
+
+    def build_prompt(
+        self,
+        rewrite_feedback: Optional[str] = None,
+        recent_repeats: Optional[str] = None,
+        recent_comments: Optional[List[str]] = None,
+        request_id: Optional[str] = None,
+    ) -> str:
+        self.attempt_count += 1
+        rid = request_id or uuid.uuid4().hex
+        if rewrite_feedback:
+            self.rewrite_reasons.append(rewrite_feedback)
+        return AIPromptBuilder.build(
+            title=self.title,
+            excerpt=self.excerpt,
+            style=self.style,
+            preset=self.preset,
+            request_id=rid,
+            content_focus=self.content_focus,
+            verified_anchors=self.verified_anchors,
+            secondary_anchors=self.secondary_anchors,
+            style_plan=self.style_plan,
+            recent_comments=recent_comments,
+            recent_repeats=recent_repeats,
+            rewrite_feedback=rewrite_feedback,
+        )
 
 
 class PostProcessor:
@@ -149,6 +206,15 @@ class PostProcessor:
 
         effective_like = self.like_enabled and (action_plan.process_like if action_plan else True)
         effective_comment = self.comment_enabled and (action_plan.process_comment if action_plan else True)
+
+        if action_plan and action_plan.comment_sample_selected is False:
+            result.comment_result = CommentProcessResult(
+                status=CommentSubmitState.SKIPPED,
+                error="random_chance_skipped",
+            )
+            if self.state_mgr:
+                self.state_mgr.update(new_state=FeedState.SKIPPING, inc_skip=True, inc_processed=True)
+            effective_comment = False
 
         # 1. 상세 페이지 이동 및 TargetPostGuard 엄격 검증
         if self.state_mgr:
@@ -300,7 +366,29 @@ class PostProcessor:
                 result.comment_result.error = "user_skipped"
                 return result
 
-        # 3. 댓글 처리 (댓글창 오픈 -> 서버 중복 확인 -> 초안 생성 -> 입력 -> 승인)
+        # 3. 댓글 처리 (랜덤 표본 확인 -> 댓글창 오픈 -> 서버 중복 확인 -> 초안 생성 -> 입력 -> 승인)
+        if effective_comment and self.auto_comment_submit_enabled:
+            if action_plan and action_plan.comment_sample_selected is not None:
+                sample_selected = action_plan.comment_sample_selected
+                roll = action_plan.comment_sample_roll if action_plan.comment_sample_roll is not None else 0.0
+            else:
+                roll = random.random()
+                sample_selected = roll <= self.auto_comment_chance
+
+            if not sample_selected:
+                logger.log(
+                    f"  🎲 [COMMENT] 이번 글은 랜덤 작성 비율({int(self.auto_comment_chance * 100)}%, roll={roll:.2f})에 따라 댓글 작성을 건너뜁니다 (댓글창 미오픈)."
+                )
+                result.comment_result = CommentProcessResult(
+                    status=CommentSubmitState.SKIPPED,
+                    error="random_chance_skipped",
+                )
+                effective_comment = False
+            else:
+                logger.log(
+                    f"  🎲 [COMMENT] 랜덤 댓글 작성 대상 선정 ({int(self.auto_comment_chance * 100)}%, roll={roll:.2f}) - Gemini 댓글 생성 및 자동 등록을 진행합니다."
+                )
+
         if effective_comment:
             TargetPostGuard.verify(detail_page, post)
 
@@ -348,30 +436,6 @@ class PostProcessor:
                     result.comment_result = CommentProcessResult(status=CommentSubmitState.SKIPPED, error="server_duplicate_check_unknown")
                 else:
                     # 3-3. 내 댓글이 없는 것이 확실한 경우(ABSENT HIGH)에만 초안 생성 및 주입
-                    if self.auto_comment_submit_enabled:
-                        if action_plan and action_plan.comment_sample_selected is not None:
-                            sample_selected = action_plan.comment_sample_selected
-                            roll = action_plan.comment_sample_roll if action_plan.comment_sample_roll is not None else 0.0
-                        else:
-                            roll = random.random()
-                            sample_selected = roll <= self.auto_comment_chance
-
-                        if not sample_selected:
-                            logger.log(
-                                f"  🎲 [COMMENT] 이번 글은 랜덤 작성 비율({int(self.auto_comment_chance * 100)}%, roll={roll:.2f})에 따라 댓글 작성을 건너뜁니다."
-                            )
-                            result.comment_result = CommentProcessResult(
-                                status=CommentSubmitState.SKIPPED,
-                                error="random_chance_skipped",
-                            )
-                            if self.state_mgr:
-                                self.state_mgr.update(new_state=FeedState.SKIPPING, inc_skip=True, inc_processed=True)
-                            return result
-                        else:
-                            logger.log(
-                                f"  🎲 [COMMENT] 랜덤 댓글 작성 대상 선정 ({int(self.auto_comment_chance * 100)}%, roll={roll:.2f}) - Gemini 댓글 생성 및 자동 등록을 진행합니다."
-                            )
-
                     context = detail_context or ContentContextExtractor.extract(detail_page, post, max_chars=self.ai_context_max_chars)
                     post.title = context.title or post.title
                     post.excerpt = context.excerpt
@@ -395,20 +459,27 @@ class PostProcessor:
                     food_focus_info = FoodCommentFocus.analyze(post.title or "", post.excerpt or "")
                     content_focus = food_focus_info["focus"]
                     food_anchors = food_focus_info["food_anchors"]
+                    sec_anchors = food_focus_info.get("secondary_anchors", [])
                     if content_focus != "GENERAL":
-                        logger.log(f"[FOOD_FOCUS] focus={content_focus} anchors={food_anchors[:3]}")
+                        logger.log(f"[FOOD_FOCUS] focus={content_focus} anchors={food_anchors[:3]} secondary={sec_anchors[:3]}")
+
+                    style_plan = (action_plan.style_plan if action_plan else None)
+                    gen_ctx = GenerationContext(
+                        title=post.title or "",
+                        excerpt=post.excerpt or "",
+                        preset=preset,
+                        style=self.ai_prompt_style,
+                        content_focus=content_focus,
+                        verified_anchors=food_anchors,
+                        secondary_anchors=sec_anchors,
+                        style_plan=style_plan,
+                        max_attempts=3,
+                    )
 
                     request_id = uuid.uuid4().hex
                     ai_prompt = ""
-                    style_plan = (action_plan.style_plan if action_plan else None)
                     if self.ai_clipboard_enabled or self.gemini_web_enabled:
-                        ai_prompt = AIPromptBuilder.build(
-                            post.title, post.excerpt, style=self.ai_prompt_style,
-                            preset=preset, request_id=request_id,
-                            content_focus=content_focus,
-                            verified_anchors=food_anchors,
-                            style_plan=style_plan,
-                        )
+                        ai_prompt = gen_ctx.build_prompt(request_id=request_id)
 
                     if self.state_mgr:
                         self.state_mgr.update(
@@ -478,9 +549,9 @@ class PostProcessor:
                                         )
                                         raw_result_text = (extension_result.text or "").strip()
                                         if raw_result_text == "NEED_MORE_CONTEXT":
-                                            if not getattr(self, "_context_retry_done", False):
+                                            if not getattr(self, "_context_retry_done", False) and gen_ctx.attempt_count < gen_ctx.max_attempts:
                                                 setattr(self, "_context_retry_done", True)
-                                                logger.log("  ℹ️ [GEMINI] 'NEED_MORE_CONTEXT' 수신 -> 본문 1800자 재추출 및 음식 앵커 재분석 후 1회 retry 시도")
+                                                logger.log("  ℹ️ [GEMINI] 'NEED_MORE_CONTEXT' 수신 -> 본문 1800자 재추출 및 앵커 재분석 후 1회 retry 시도")
                                                 context = ContentContextExtractor.extract(detail_page, post, max_chars=1800)
                                                 new_excerpt = (context.excerpt or "").strip()
                                                 prev_excerpt = (post.excerpt or "").strip()
@@ -495,19 +566,9 @@ class PostProcessor:
                                                     return result
 
                                                 post.excerpt = new_excerpt
-                                                food_focus_info = FoodCommentFocus.analyze(post.title or "", post.excerpt or "")
-                                                content_focus = food_focus_info["focus"]
-                                                food_anchors = food_focus_info["food_anchors"]
-                                                sec_anchors = food_focus_info.get("secondary_anchors", [])
+                                                gen_ctx.update_excerpt(new_excerpt)
                                                 request_id = uuid.uuid4().hex
-                                                ai_prompt = AIPromptBuilder.build(
-                                                    post.title, post.excerpt, style=self.ai_prompt_style,
-                                                    preset=preset, request_id=request_id,
-                                                    content_focus=content_focus,
-                                                    verified_anchors=food_anchors,
-                                                    secondary_anchors=sec_anchors,
-                                                    style_plan=style_plan,
-                                                )
+                                                ai_prompt = gen_ctx.build_prompt(request_id=request_id)
                                                 if self.state_mgr:
                                                     self.state_mgr.update(
                                                         current_post_excerpt=post.excerpt or "",
@@ -516,7 +577,7 @@ class PostProcessor:
                                                     )
                                                 continue
                                             else:
-                                                logger.log("  ⏭️ [COMMENT] 본문 1800자 재수집 후에도 컨텍스트 부족(NEED_MORE_CONTEXT) -> context_insufficient로 안전하게 스킵")
+                                                logger.log("  ⏭️ [COMMENT] 본문 1800자 재수집 후에도 컨텍스트 부족(NEED_MORE_CONTEXT) 또는 한도 초과 -> context_insufficient로 안전하게 스킵")
                                                 result.comment_result = CommentProcessResult(
                                                     status=CommentSubmitState.SKIPPED,
                                                     error="context_insufficient"
@@ -532,16 +593,19 @@ class PostProcessor:
                                         if gemini_answer:
                                             from services.comments.community_rhythm import FinalQualityGate, CommentDraftInspector
 
-                                            # Step 0: 5단계 초안 검사 (사람 말투, 중복 마무리, 설명조 등)
+                                            # Step 0: 5단계 초안 검사 (사람 말투, 사실성 검사, 중복 마무리, 설명조 등)
                                             recent_submits = []
                                             if hasattr(self, "history_mgr") and self.history_mgr:
                                                 recent_submits = self.history_mgr.get_recent_submitted_comments(limit=5)
 
                                             inspection = CommentDraftInspector.inspect(
-                                                gemini_answer, recent_comments=recent_submits, preset=preset
+                                                gemini_answer,
+                                                recent_comments=recent_submits,
+                                                preset=preset,
+                                                excerpt=gen_ctx.excerpt,
                                             )
                                             if not inspection.passed and inspection.code != "need_more_context":
-                                                if not getattr(self, "_draft_rewrite_done", False):
+                                                if not getattr(self, "_draft_rewrite_done", False) and gen_ctx.attempt_count < gen_ctx.max_attempts:
                                                     self._draft_rewrite_done = True
                                                     logger.log(
                                                         f"⚠️ [DRAFT_INSPECT] 초안 검사 미통과 (stage {inspection.stage}: {inspection.code}) "
@@ -549,16 +613,11 @@ class PostProcessor:
                                                         "WARNING",
                                                     )
                                                     request_id = uuid.uuid4().hex
-                                                    ai_prompt = AIPromptBuilder.build(
-                                                        post.title, post.excerpt, style=self.ai_prompt_style,
-                                                        preset=preset, request_id=request_id,
-                                                        content_focus=content_focus,
-                                                        verified_anchors=food_anchors,
-                                                        secondary_anchors=sec_anchors,
-                                                        style_plan=style_plan,
-                                                        recent_comments=recent_submits,
-                                                        recent_repeats=inspection.matched,
+                                                    ai_prompt = gen_ctx.build_prompt(
                                                         rewrite_feedback=inspection.feedback,
+                                                        recent_repeats=inspection.matched,
+                                                        recent_comments=recent_submits,
+                                                        request_id=request_id,
                                                     )
                                                     if self.state_mgr:
                                                         self.state_mgr.update(
@@ -600,11 +659,11 @@ class PostProcessor:
                                                         f"length={combined_gate.length} source=gemini"
                                                     )
                                                     selected_anchor = "none"
-                                                    matched_food = [a for a in food_anchors if a in gemini_answer]
+                                                    matched_food = [a for a in gen_ctx.verified_anchors if a in gemini_answer]
                                                     if matched_food:
                                                         selected_anchor = matched_food[0]
-                                                    elif food_focus_info.get("secondary_anchors"):
-                                                        matched_sec = [s for s in food_focus_info["secondary_anchors"] if s in gemini_answer]
+                                                    elif gen_ctx.secondary_anchors:
+                                                        matched_sec = [s for s in gen_ctx.secondary_anchors if s in gemini_answer]
                                                         if matched_sec:
                                                             selected_anchor = f"secondary:{matched_sec[0]}"
 
@@ -613,21 +672,17 @@ class PostProcessor:
 
                                                     # Check if food anchors were available but Gemini only commented on secondary place anchors
                                                     if (
-                                                        food_focus_info.get("has_food_details")
+                                                        FoodCommentFocus.analyze(gen_ctx.title, gen_ctx.excerpt).get("has_food_details")
                                                         and not matched_food
                                                         and any(sec in gemini_answer for sec in ("주차", "위치", "인테리어", "매장", "공간", "접근성"))
                                                     ):
-                                                        if not getattr(self, "_food_retry_done", False):
+                                                        if not getattr(self, "_food_retry_done", False) and gen_ctx.attempt_count < gen_ctx.max_attempts:
                                                             self._food_retry_done = True
                                                             logger.log("⚠️ [FOOD_FOCUS] 음식 정보가 본문에 있음에도 장소 정보에만 반응하여 1회 재시도합니다 (food_focus_missed)", "WARNING")
                                                             request_id = uuid.uuid4().hex
-                                                            ai_prompt = AIPromptBuilder.build(
-                                                                post.title, post.excerpt, style=self.ai_prompt_style,
-                                                                preset=preset, request_id=request_id,
-                                                                content_focus=content_focus,
-                                                                verified_anchors=food_anchors,
-                                                                secondary_anchors=food_focus_info.get("secondary_anchors", []),
-                                                                style_plan=style_plan,
+                                                            ai_prompt = gen_ctx.build_prompt(
+                                                                rewrite_feedback="장소/시설 언급 대신 본문에 나온 구체적인 음식/메뉴 특징에 반응해 주세요.",
+                                                                request_id=request_id,
                                                             )
                                                             gemini_answer = None
                                                             continue
@@ -698,14 +753,7 @@ class PostProcessor:
                                 if use_local_requested:
                                     break
                                 request_id = uuid.uuid4().hex
-                                ai_prompt = AIPromptBuilder.build(
-                                    post.title, post.excerpt, style=self.ai_prompt_style,
-                                    preset=preset, request_id=request_id,
-                                    content_focus=content_focus,
-                                    verified_anchors=food_anchors,
-                                    secondary_anchors=food_focus_info.get("secondary_anchors", []),
-                                    style_plan=style_plan,
-                                )
+                                ai_prompt = gen_ctx.build_prompt(request_id=request_id)
 
                         elif self.gemini_browser_mode == "existing_chrome_mac":
                             try:
@@ -745,6 +793,8 @@ class PostProcessor:
                         if gate_res.valid:
                             draft_text = cand_composed
                             draft_source_label = "Gemini 생성"
+                            if self.state_mgr:
+                                self.state_mgr.update(inc_gen_success=True)
                         else:
                             logger.log(f"[GEMINI] 생성된 텍스트가 품질 게이트를 통과하지 못했습니다 ([{gate_res.code}] {gate_res.reason}).", "ERROR")
 

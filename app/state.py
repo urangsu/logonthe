@@ -73,6 +73,9 @@ class StateManager:
         with self._lock:
             return copy.deepcopy(self.state)
 
+    def get_state(self) -> BotRuntimeState:
+        return self.get_snapshot()
+
     def update(
         self,
         new_state: Optional[FeedState] = None,

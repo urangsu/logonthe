@@ -125,11 +125,11 @@ class UserLearningService:
             if decision == "skipped":
                 logger.log("  📝 [LEARNING] 사용자가 건너뛴 초안과 사유를 기록했습니다.")
             elif is_edited:
-                logger.log("  📝 [LEARNING] 사용자가 수정한 댓글을 학습용 데이터셋(user_learning_corpus.json)에 기록했습니다.")
+                logger.log("  📝 [LEARNING] 사용자가 수정한 댓글을 참고용 코퍼스(user_learning_corpus.json)에 기록했습니다.")
             elif decision_origin == "auto_submit":
-                logger.log("  📝 [LEARNING] 자동 등록 댓글이 학습용 데이터셋(user_learning_corpus.json)에 기록되었습니다 (출처: auto_submit).")
+                logger.log("  📝 [LEARNING] 자동 등록 댓글을 참고용 코퍼스(user_learning_corpus.json)에 기록했습니다 (출처: auto_submit).")
             else:
-                logger.log("  📝 [LEARNING] 등록된 댓글을 학습용 데이터셋(user_learning_corpus.json)에 기록했습니다.")
+                logger.log("  📝 [LEARNING] 등록된 댓글을 참고용 코퍼스(user_learning_corpus.json)에 기록했습니다.")
         except Exception as e:
             logger.log(f"  ⚠️ [LEARNING] 학습 데이터 저장 중 예외: {e}", "WARNING")
 

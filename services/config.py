@@ -155,6 +155,63 @@ def normalize_auto_comment_config(data: Dict[str, Any]) -> Dict[str, Any]:
     return normalized
 
 
+from dataclasses import dataclass
+from enum import Enum
+
+
+class CommentWorkflowMode(str, Enum):
+    NONE = "none"
+    DRAFT_REVIEW = "draft_review"
+    AUTO_SUBMIT = "auto_submit"
+
+
+@dataclass(frozen=True)
+class CommentWorkflowConfig:
+    mode: CommentWorkflowMode
+    effective_comment_enabled: bool
+    effective_auto_submit_enabled: bool
+    chance: float
+    raw_comment_enabled: bool
+    raw_auto_comment_submit_enabled: bool
+
+
+def resolve_comment_workflow(data: Dict[str, Any]) -> CommentWorkflowConfig:
+    """
+    단일 유효 설정 해석 함수:
+    | 댓글 초안 | 랜덤 자동 등록 | 기대 동작 |
+    | OFF | OFF | NONE: 댓글 작업 없음 |
+    | ON | OFF | DRAFT_REVIEW: 초안 생성 후 사용자 확인 대기 |
+    | OFF | ON | AUTO_SUBMIT: 랜덤 선정 글 초안 생성 및 자동 등록 |
+    | ON | ON | AUTO_SUBMIT: 랜덤 선정 글 초안 생성 및 자동 등록 |
+    """
+    raw_comment = bool(data.get("comment_enabled", False))
+    raw_auto = bool(data.get("auto_comment_submit_enabled", False))
+    norm = normalize_auto_comment_config(data)
+    chance = float(norm.get("auto_comment_chance", 0.60))
+
+    if raw_auto:
+        mode = CommentWorkflowMode.AUTO_SUBMIT
+        eff_comment = True
+        eff_auto = True
+    elif raw_comment:
+        mode = CommentWorkflowMode.DRAFT_REVIEW
+        eff_comment = True
+        eff_auto = False
+    else:
+        mode = CommentWorkflowMode.NONE
+        eff_comment = False
+        eff_auto = False
+
+    return CommentWorkflowConfig(
+        mode=mode,
+        effective_comment_enabled=eff_comment,
+        effective_auto_submit_enabled=eff_auto,
+        chance=chance,
+        raw_comment_enabled=raw_comment,
+        raw_auto_comment_submit_enabled=raw_auto,
+    )
+
+
 def migrate_config_v1_to_v2(old_data: Dict[str, Any]) -> Dict[str, Any]:
     """기존 config 구조를 v2 schema로 안전하게 변환"""
     cfg = DEFAULT_CONFIG_V2.copy()
