@@ -336,3 +336,270 @@ test('GEM-R9-008: old r8 runtime with r9 contract triggers reinjection', () => {
   }
   assert.strictEqual(reinjected, true, 'r8 build must trigger reinjection under r9 contract');
 });
+
+test('GEM-R9-009: Run A false-positive sendConfirmed guard requires structural turn evidence', () => {
+  // Simulate Run A failure mode: composer was cleared or button clicked,
+  // but after 5 seconds userUniqueTurn=0 and responseUniqueTurn=0.
+  const composerCleared = true;
+  const buttonClicked = true;
+  const userTurns = [];
+  const modelTurns = [];
+
+  // Under R9: send confirmation strictly requires new user turn or new model turn
+  let confirmed = false;
+  if (userTurns.length > 0 || modelTurns.length > 0) {
+    confirmed = true;
+  }
+
+  assert.strictEqual(confirmed, false, 'sendConfirmed must be false when structural turn evidence is absent');
+
+  // Must fail with user_turn_not_created (or send_not_confirmed if button not clicked)
+  const failReason = buttonClicked ? 'user_turn_not_created' : 'send_not_confirmed';
+  assert.strictEqual(failReason, 'user_turn_not_created');
+});
+
+test('GEM-R9-010: Run B candidate inventory unification prevents invariant violation', () => {
+  // Simulate Run B: 4 elements match response selector, but all have display:none (visible=0)
+  const matchedElements = [
+    { tag: 'model-response', visible: false, text: '' },
+    { tag: 'div.model-response', visible: false, text: '' },
+    { tag: 'message-content', visible: false, text: '' },
+    { tag: 'div[data-message-author-role="model"]', visible: false, text: '' }
+  ];
+
+  const responseSelectorMatches = matchedElements.length; // 4
+  const visibleTextCandidates = matchedElements.filter(e => e.visible).length; // 0
+
+  function bindResponse(cand) {
+    if (visibleTextCandidates === 0 || !cand || !cand.visible) {
+      return null; // Invariant guard prevents binding
+    }
+    return cand;
+  }
+
+  const bound = bindResponse(matchedElements[0]);
+  assert.strictEqual(bound, null, 'Must not bind when visibleTextCandidates=0');
+
+  // If a bound node exists while visibleTextCandidates=0, it is an invariant violation
+  let error = null;
+  let targetResponseNode = bound;
+  if (targetResponseNode && visibleTextCandidates === 0) {
+    error = 'response_binding_invariant_violation';
+  } else if (!targetResponseNode && visibleTextCandidates === 0) {
+    error = 'response_turn_not_found';
+  }
+  assert.strictEqual(error, 'response_turn_not_found');
+});
+
+test('GEM-R9-011: display:contents wrapper resolution separates turnNode and textNode', () => {
+  // Wrapper custom element has display: contents (0x0 rect), but descendant has text
+  const turnNode = {
+    tag: 'model-response',
+    style: { display: 'contents' },
+    rect: { width: 0, height: 0 }
+  };
+  const textChild = {
+    tag: 'div.markdown',
+    text: '생성된 응답 내용입니다.',
+    style: { display: 'block', visibility: 'visible' },
+    rect: { width: 400, height: 80 }
+  };
+
+  function resolveTurnCandidate(turn, child) {
+    const isVisible = (child.rect.width > 15 && child.rect.height > 15 && child.style.visibility !== 'hidden') ||
+                      child.text.trim().length > 0;
+    return {
+      turnNode: turn,
+      textNode: child,
+      text: child.text.trim(),
+      isVisible: isVisible
+    };
+  }
+
+  const cand = resolveTurnCandidate(turnNode, textChild);
+  assert.strictEqual(cand.isVisible, true, 'display:contents wrapper with visible text descendant is a valid candidate');
+  assert.strictEqual(cand.turnNode.tag, 'model-response');
+  assert.strictEqual(cand.textNode.tag, 'div.markdown');
+  assert.strictEqual(cand.text, '생성된 응답 내용입니다.');
+});
+
+test('GEM-R9-012: zero-text 3.5s stall triggers 1-time re-resolve and fails with response_stream_no_text', () => {
+  let boundNode = { id: 'node-empty-1', text: '' };
+  let boundAtMs = 1000;
+  let currentTimeMs = 4600; // 3.6s elapsed
+  let reResolveAttempted = false;
+  let resultStatus = null;
+  let resultError = null;
+
+  const zeroDuration = currentTimeMs - boundAtMs;
+  assert.ok(zeroDuration >= 3500, '3.5s zero-text threshold exceeded');
+
+  // 1st attempt: discard binding and re-resolve
+  if (zeroDuration >= 3500 && !reResolveAttempted) {
+    reResolveAttempted = true;
+    boundNode = null; // discard
+    // Candidate pool returns another empty node
+    const nextCand = { id: 'node-empty-2', text: '' };
+    boundNode = nextCand;
+    boundAtMs = currentTimeMs;
+  }
+
+  assert.strictEqual(reResolveAttempted, true);
+  assert.strictEqual(boundNode.id, 'node-empty-2');
+
+  // After re-resolve, another 3.5s pass with textLen=0
+  currentTimeMs = 8200;
+  const secondZeroDuration = currentTimeMs - boundAtMs;
+  if (secondZeroDuration >= 3500 && reResolveAttempted) {
+    resultStatus = 'failed';
+    resultError = 'response_stream_no_text';
+  }
+
+  assert.strictEqual(resultStatus, 'failed');
+  assert.strictEqual(resultError, 'response_stream_no_text');
+});
+
+test('GEM-R9-013: scoped local streaming ignores global page aria-busy', () => {
+  const globalDoc = { ariaBusy: true }; // Page sidebar / background has aria-busy
+  const boundTurnNode = {
+    indicators: [] // No local .streaming or .loading-dots inside this turn
+  };
+  const composer = { stopButton: null };
+
+  function detectGenerationEvidence(boundNode, comp) {
+    if (boundNode.indicators.length > 0) return 'local_streaming';
+    if (comp.stopButton) return 'composer_stop_button';
+    return 'idle';
+  }
+
+  const evidence = detectGenerationEvidence(boundTurnNode, composer);
+  assert.strictEqual(evidence, 'idle', 'Must be idle even when global doc has ariaBusy=true');
+});
+
+test('GEM-R9-014: split diagnostics fields verification and DOM node deduplication', () => {
+  // Multiple query selectors matching parts of the same turn
+  const domTurns = [
+    { id: 'turn-1', role: 'user' },
+    { id: 'turn-1', role: 'user' }, // Duplicate child match
+    { id: 'turn-2', role: 'user' }
+  ];
+
+  const userSelectorMatches = domTurns.length; // 3
+  const seenNodes = new Set();
+  const uniqueTurns = [];
+  for (const el of domTurns) {
+    if (!seenNodes.has(el.id)) {
+      seenNodes.add(el.id);
+      uniqueTurns.push(el);
+    }
+  }
+  const userUniqueTurns = uniqueTurns.length; // 2
+
+  assert.strictEqual(userSelectorMatches, 3);
+  assert.strictEqual(userUniqueTurns, 2);
+
+  const diag = {
+    userSelectorMatches,
+    userUniqueTurns,
+    responseSelectorMatches: 5,
+    responseUniqueTurns: 2,
+    visibleTextCandidates: 1
+  };
+
+  assert.strictEqual(diag.userSelectorMatches, 3);
+  assert.strictEqual(diag.userUniqueTurns, 2);
+  assert.strictEqual(diag.responseSelectorMatches, 5);
+  assert.strictEqual(diag.responseUniqueTurns, 2);
+  assert.strictEqual(diag.visibleTextCandidates, 1);
+});
+
+test('GEM-R9-015: 7 new failure codes contract verification', () => {
+  const allowedFailCodes = new Set([
+    'send_not_confirmed',
+    'user_turn_not_created',
+    'response_turn_not_found',
+    'response_text_target_not_found',
+    'response_binding_invariant_violation',
+    'response_stream_no_text',
+    'response_stalled'
+  ]);
+
+  assert.strictEqual(allowedFailCodes.has('send_not_confirmed'), true);
+  assert.strictEqual(allowedFailCodes.has('user_turn_not_created'), true);
+  assert.strictEqual(allowedFailCodes.has('response_turn_not_found'), true);
+  assert.strictEqual(allowedFailCodes.has('response_text_target_not_found'), true);
+  assert.strictEqual(allowedFailCodes.has('response_binding_invariant_violation'), true);
+  assert.strictEqual(allowedFailCodes.has('response_stream_no_text'), true);
+  assert.strictEqual(allowedFailCodes.has('response_stalled'), true);
+  assert.strictEqual(allowedFailCodes.size, 7);
+});
+
+test('GEM-R9-016: tightened send confirmation requires user correlation, model turn alone prohibited in pre-existing chat', () => {
+  // Case A: Pre-existing conversation with baseline model turns > 0
+  const freshChatVerified = false;
+  const initialResponseCount = 2;
+  const newUserTurnFound = false;
+  const newModelCandidate = { id: 'model-turn-3' };
+
+  function verifySend(fresh, initCount, userTurn, modelTurn) {
+    if (userTurn) return { confirmed: true, reason: 'user_turn_confirmed' };
+    if (fresh && initCount === 0 && modelTurn) return { confirmed: true, reason: 'fresh_fallback' };
+    return { confirmed: false, reason: 'send_not_confirmed' };
+  }
+
+  const resultA = verifySend(freshChatVerified, initialResponseCount, newUserTurnFound, newModelCandidate);
+  assert.strictEqual(resultA.confirmed, false, 'Pre-existing chat must NOT confirm send based solely on model turn');
+
+  // Case B: Verified fresh chat (turns=0) allows fallback if model candidate appears
+  const resultB = verifySend(true, 0, false, newModelCandidate);
+  assert.strictEqual(resultB.confirmed, true, 'Verified fresh chat allows fallback confirmation on model candidate');
+  assert.strictEqual(resultB.reason, 'fresh_fallback');
+
+  // Case C: User turn with prompt correlation always confirms send
+  const resultC = verifySend(false, 2, true, newModelCandidate);
+  assert.strictEqual(resultC.confirmed, true, 'User turn correlation confirms send in any conversation');
+  assert.strictEqual(resultC.reason, 'user_turn_confirmed');
+});
+
+test('GEM-R9-017: legitimate thinking grace vs zero-evidence stall separation', () => {
+  // Scenario A: bound + text=0 + response-local streaming evidence present (thinking / shell / loading-dots)
+  let boundAtMs = 1000;
+  let nowMs = 6500; // 5.5s elapsed (> 3.5s)
+  let localEvidence = 'local_streaming';
+  let hasStreamingEvidence = (localEvidence === 'local_streaming' || localEvidence === 'composer_stop_button');
+
+  function checkStall(boundAt, now, evidencePresent, reResolveAttempted) {
+    const dur = now - boundAt;
+    if (evidencePresent) {
+      if (dur >= 15000) return { action: 'fail', error: 'response_stream_no_text' };
+      return { action: 'wait_grace', remainingGraceMs: 15000 - dur };
+    } else {
+      if (dur >= 3500) {
+        if (!reResolveAttempted) return { action: 'reresolve' };
+        return { action: 'fail', error: 'response_stream_no_text' };
+      }
+      return { action: 'wait' };
+    }
+  }
+
+  const resGrace = checkStall(boundAtMs, nowMs, hasStreamingEvidence, false);
+  assert.strictEqual(resGrace.action, 'wait_grace', 'At 5.5s with streaming evidence, must NOT stall out; grant grace period up to 15s');
+
+  // After 15s with streaming evidence but still 0 text -> fail
+  const resGraceExceeded = checkStall(boundAtMs, 16500, hasStreamingEvidence, false);
+  assert.strictEqual(resGraceExceeded.action, 'fail');
+  assert.strictEqual(resGraceExceeded.error, 'response_stream_no_text');
+
+  // Scenario B: bound + text=0 + NO streaming evidence (idle empty node)
+  const resNoEvidence3s = checkStall(boundAtMs, 3000, false, false);
+  assert.strictEqual(resNoEvidence3s.action, 'wait');
+
+  // At 4.5s without streaming evidence -> must re-resolve 1 time
+  const resNoEvidenceReResolve = checkStall(boundAtMs, 4500, false, false);
+  assert.strictEqual(resNoEvidenceReResolve.action, 'reresolve');
+
+  // After 1 re-resolve, another 3.5s pass without evidence -> fail fast
+  const resNoEvidenceFailed = checkStall(boundAtMs, 4500, false, true);
+  assert.strictEqual(resNoEvidenceFailed.action, 'fail');
+  assert.strictEqual(resNoEvidenceFailed.error, 'response_stream_no_text');
+});

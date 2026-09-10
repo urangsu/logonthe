@@ -100,15 +100,22 @@ class FeedController:
         raw_err = getattr(result.comment_result, "error", "")
         cmt_err = raw_err.lower() if isinstance(raw_err, str) else ""
 
+        # Gemini 통신/연결 실패 판정 (자료 부족인 context_insufficient는 통신 실패에서 분리/제외)
         is_gemini_failure = False
         status = getattr(result.comment_result, "status", None)
         if cmt_err and status in (CommentSubmitState.FAILED, CommentSubmitState.SKIPPED):
             is_gemini_failure = cmt_err.startswith("gemini_failed") or cmt_err in (
-                "failed", "timeout", "publish_rejected", "response_timeout", "extension_not_ready", "context_insufficient"
+                "failed", "timeout", "publish_rejected", "response_timeout", "extension_not_ready", "dom_unsupported", "runtime_busy"
             )
 
         if result.like_result.action_taken or result.like_result.state_after == LikeState.LIKED:
             self.like_success_count += 1
+
+        gemini_generation_success = bool(
+            result.comment_result.status == CommentSubmitState.SUBMITTED
+            or (result.comment_result.draft_text and not is_gemini_failure and cmt_err != "context_insufficient")
+        )
+
         if result.comment_result.status == CommentSubmitState.SUBMITTED:
             self.comment_submitted_count += 1
             self.consecutive_gemini_failures = 0
@@ -116,7 +123,8 @@ class FeedController:
             self.state_mgr.update(inc_submission_unknown=True)
         elif result.comment_result.status == CommentSubmitState.SKIPPED:
             self.skipped_count += 1
-            if not is_gemini_failure:
+            # 랜덤 제외, 댓글 비활성, 사용자 스킵, 자료 부족은 실패 카운트를 초기화하지 않고 보존
+            if gemini_generation_success:
                 self.consecutive_gemini_failures = 0
 
         if result.like_result.error or result.comment_result.status == CommentSubmitState.FAILED:
@@ -139,6 +147,8 @@ class FeedController:
         """현재 처리 중인 글을 건너뛰고 다음 글로 즉시 이동"""
         self.skip_event.set()
         self.pacing.interrupt()
+        if hasattr(self, "processor") and self.processor and getattr(self.processor, "gemini_extension_bridge", None):
+            self.processor.gemini_extension_bridge.cancel_command()
         if self.command_bridge:
             self.command_bridge.send_skip_post()
 
@@ -157,6 +167,8 @@ class FeedController:
     def stop(self):
         self.stop_event.set()
         self.pacing.interrupt()
+        if hasattr(self, "processor") and self.processor and getattr(self.processor, "gemini_extension_bridge", None):
+            self.processor.gemini_extension_bridge.cancel_command()
         if self.pause_event:
             self.pause_event.clear()
         if self.session:
@@ -283,8 +295,14 @@ class FeedController:
             log_cats = "n/a (neighbor mode)"
         log_topic_filter = str(self.config.get("topic_filter_enabled", True)) if is_discovery_source else "n/a (neighbor mode)"
 
+        from services.runtime_contract import get_runtime_versions_summary
+        ver_summary = get_runtime_versions_summary(cfg_dict)
+
         logger.log(
             f"[RUN_CONFIG]\n"
+            f"python_commit={ver_summary['python_commit']}\n"
+            f"extension_build={ver_summary['extension_build']}\n"
+            f"config_version={ver_summary['config_version']}\n"
             f"source={source_type.value}\n"
             f"categories={log_cats}\n"
             f"max_items={max_items}\n"
@@ -508,7 +526,11 @@ class FeedController:
                         self.history.record_result(skipped_result)
                         self._handle_post_result(skipped_result)
                         if self.state_mgr:
-                            self.state_mgr.update(inc_processed=True, inc_skip=True)
+                            if processor and post.key not in processor._processed_post_keys:
+                                processor._processed_post_keys.add(post.key)
+                                self.state_mgr.update(inc_processed=True, inc_skip=True)
+                            else:
+                                self.state_mgr.update(inc_skip=True)
                         continue
 
                     recent_comments = self.history.get_recent_submitted_comments(5)
@@ -600,19 +622,35 @@ class FeedController:
                         break
 
                     # 4. 다음 글로 넘어가기 전 Pacing 대기 및 Random Pause
-                    p_res = self.pacing.wait_next_post()
-                    if p_res.stopped or (self.stop_event and self.stop_event.is_set()):
-                        final_close_reason = "user_stop"
-                        break
-                    if p_res.skipped:
-                        logger.log("  ⏭️ [PACING] 사용자가 다음 글 진입 전 대기를 건너뛰었습니다.")
+                    is_user_skipped = (
+                        (self.skip_event and self.skip_event.is_set()) or
+                        (getattr(result.comment_result, "status", None) == CommentSubmitState.SKIPPED and
+                         getattr(result.comment_result, "error", "") in (
+                             "user_skipped", "user_skip", "user_skipped_during_gemini_generation",
+                             "user_skipped_during_open", "user_skipped_during_settle", "user_skipped_during_like"
+                         )) or
+                        getattr(result.like_result, "error", "") == "user_skipped"
+                    )
 
-                    p_pause = self.pacing.maybe_pause()
-                    if p_pause and (p_pause.stopped or (self.stop_event and self.stop_event.is_set())):
-                        final_close_reason = "user_stop"
-                        break
-                    if p_pause and p_pause.skipped:
-                        logger.log("  ⏭️ [PACING] 사용자가 휴식 대기를 건너뛰었습니다.")
+                    if is_user_skipped:
+                        logger.log("  ⏭️ [PACING] 사용자 스킵 요청 감지 -> 다음 글 진입 전 대기 및 휴식을 생략하고 즉시 이동합니다.")
+                        self.skip_event.clear()
+                    else:
+                        p_res = self.pacing.wait_next_post()
+                        if p_res.stopped or (self.stop_event and self.stop_event.is_set()):
+                            final_close_reason = "user_stop"
+                            break
+                        if p_res.skipped:
+                            logger.log("  ⏭️ [PACING] 사용자가 다음 글 진입 전 대기를 건너뛰었습니다.")
+                            self.skip_event.clear()
+                        else:
+                            p_pause = self.pacing.maybe_pause()
+                            if p_pause and (p_pause.stopped or (self.stop_event and self.stop_event.is_set())):
+                                final_close_reason = "user_stop"
+                                break
+                            if p_pause and p_pause.skipped:
+                                logger.log("  ⏭️ [PACING] 사용자가 휴식 대기를 건너뛰었습니다.")
+                                self.skip_event.clear()
 
             if self.stop_event.is_set():
                 self.state_mgr.update(new_state=FeedState.STOPPED, message="사용자에 의해 작업이 중지되었습니다.")

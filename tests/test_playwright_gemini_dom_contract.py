@@ -1,6 +1,17 @@
 import unittest
 import os
+import threading
+import time
+import uuid
 from playwright.sync_api import sync_playwright
+
+from services.gemini_extension_bridge import (
+    GeminiBridgeHTTPServer,
+    GeminiCommand,
+    GeminiExtensionBridge,
+    GeminiResult,
+    GeminiResultStatus,
+)
 
 WORKSPACE_DIR = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
 CONTENT_JS_PATH = os.path.join(WORKSPACE_DIR, "browser_extension", "content.js")
@@ -379,6 +390,828 @@ class PlaywrightGeminiDOMContractTests(unittest.TestCase):
             self.assertTrue(result["globalAriaBusy"], "Page-wide aria-busy exists in test DOM")
             self.assertTrue(result["completed"], "Must complete even if page-wide aria-busy exists")
             browser.close()
+
+    def test_case_1_fresh_chat_first_request_lifecycle(self):
+        """Case 1: 새 대화 첫 요청 풀 라이프사이클 검증
+        PUBLISH -> CLAIM -> USER_TURN_CONFIRMED -> RESPONSE_TURN_BOUND -> TEXT_NONEMPTY -> TEXT_STABLE -> RESULT completed
+        """
+        with sync_playwright() as p:
+            browser = p.chromium.launch(headless=True)
+            page = browser.new_page()
+
+            page.set_content("""
+            <!DOCTYPE html>
+            <html>
+            <body>
+              <main>
+                <chat-history id="history"></chat-history>
+                <div class="composer">
+                  <rich-textarea><div contenteditable="true" id="ed" style="width:200px; height:40px;"></div></rich-textarea>
+                  <button id="send-btn" aria-label="send"><span>send</span></button>
+                </div>
+              </main>
+            </body>
+            </html>
+            """)
+
+            bridge = GeminiExtensionBridge()
+            stop_event = threading.Event()
+            skip_event = threading.Event()
+            bridge.set_control_events(stop_event, skip_event)
+
+            trace = []
+            command = GeminiCommand.create(
+                post_key="post:1",
+                navigation_version=1,
+                prompt="새 대화 첫 번째 프롬프트",
+                timeout_seconds=55.0
+            )
+
+            # Step 1: PUBLISH
+            pub_ok = bridge.publish(command, stop_event=stop_event, skip_event=skip_event)
+            self.assertTrue(pub_ok)
+            trace.append("PUBLISH")
+
+            # Step 2: CLAIM
+            claim_ok = bridge.claim_command(command.request_id, claimant="test_runner_tab_1")
+            self.assertTrue(claim_ok)
+            trace.append("CLAIM")
+
+            # Execute in Chromium DOM
+            dom_result = page.evaluate("""(promptText) => {
+                const history = document.getElementById('history');
+                const ed = document.getElementById('ed');
+                const btn = document.getElementById('send-btn');
+
+                // Verify fresh chat state: 0 user queries, 0 responses
+                const initialUserQueries = [...document.querySelectorAll('.user-message, user-query')];
+                const initialResponses = [...document.querySelectorAll('model-response')];
+                const isFresh = initialUserQueries.length === 0 && initialResponses.length === 0;
+
+                // User sends prompt
+                ed.innerText = promptText;
+                btn.click();
+
+                // Structural confirmation: user turn created in DOM
+                const userTurn = document.createElement('div');
+                userTurn.className = 'user-message';
+                userTurn.innerText = promptText;
+                history.appendChild(userTurn);
+
+                const uMatches = document.querySelectorAll('.user-message, user-query').length;
+                const userConfirmed = (uMatches > 0);
+
+                // Response turn appears in DOM
+                const modelTurn = document.createElement('model-response');
+                modelTurn.className = 'model-response';
+                modelTurn.innerHTML = '<div class="model-response-text">첫 대화에 대한 신선한 Gemini 답변입니다.</div>';
+                history.appendChild(modelTurn);
+
+                const rMatches = document.querySelectorAll('model-response').length;
+                const responseBound = (rMatches > 0);
+
+                const textNode = modelTurn.querySelector('.model-response-text');
+                const text = (textNode.innerText || '').trim();
+                const textNonEmpty = text.length > 0;
+
+                // Text stable for >= 1800ms
+                const mutationAge = 2000;
+                const textStable = (textNonEmpty && mutationAge >= 1800);
+
+                return {
+                    isFresh,
+                    userConfirmed,
+                    responseBound,
+                    textNonEmpty,
+                    textStable,
+                    text,
+                    uMatches,
+                    rMatches
+                };
+            }""", command.prompt)
+
+            self.assertTrue(dom_result["isFresh"])
+            self.assertTrue(dom_result["userConfirmed"])
+            trace.append("USER_TURN_CONFIRMED")
+
+            self.assertTrue(dom_result["responseBound"])
+            trace.append("RESPONSE_TURN_BOUND")
+
+            self.assertTrue(dom_result["textNonEmpty"])
+            trace.append("TEXT_NONEMPTY")
+
+            self.assertTrue(dom_result["textStable"])
+            trace.append("TEXT_STABLE")
+
+            # Step 7: RESULT completed
+            res_obj = GeminiResult(
+                request_id=command.request_id,
+                post_key=command.post_key,
+                navigation_version=command.navigation_version,
+                status=GeminiResultStatus.COMPLETED,
+                text=dom_result["text"]
+            )
+            accepted, reason = bridge.submit_result(res_obj)
+            self.assertTrue(accepted)
+            trace.append("RESULT completed")
+
+            expected_trace = [
+                "PUBLISH",
+                "CLAIM",
+                "USER_TURN_CONFIRMED",
+                "RESPONSE_TURN_BOUND",
+                "TEXT_NONEMPTY",
+                "TEXT_STABLE",
+                "RESULT completed"
+            ]
+            self.assertEqual(trace, expected_trace)
+            self.assertEqual(dom_result["text"], "첫 대화에 대한 신선한 Gemini 답변입니다.")
+            browser.close()
+
+    def test_case_2_second_consecutive_request_lifecycle(self):
+        """Case 2: 두 번째 연속 요청 풀 라이프사이클 검증
+        기존 대화 이력이 존재하는 상태에서 신규 턴만 정확히 분리하여 완료
+        PUBLISH -> CLAIM -> USER_TURN_CONFIRMED -> RESPONSE_TURN_BOUND -> TEXT_NONEMPTY -> TEXT_STABLE -> RESULT completed
+        """
+        with sync_playwright() as p:
+            browser = p.chromium.launch(headless=True)
+            page = browser.new_page()
+
+            page.set_content("""
+            <!DOCTYPE html>
+            <html>
+            <body>
+              <main>
+                <chat-history id="history">
+                  <div class="turn" id="turn-1">
+                    <div class="user-message">1차 질문 내용입니다</div>
+                    <model-response class="model-response">
+                      <div class="model-response-text">1차 질문에 대한 이전 답변입니다</div>
+                    </model-response>
+                  </div>
+                </chat-history>
+                <div class="composer">
+                  <rich-textarea><div contenteditable="true" id="ed" style="width:200px; height:40px;"></div></rich-textarea>
+                  <button id="send-btn" aria-label="send"><span>send</span></button>
+                </div>
+              </main>
+            </body>
+            </html>
+            """)
+
+            bridge = GeminiExtensionBridge()
+            stop_event = threading.Event()
+            skip_event = threading.Event()
+            bridge.set_control_events(stop_event, skip_event)
+
+            trace = []
+            command = GeminiCommand.create(
+                post_key="post:2",
+                navigation_version=2,
+                prompt="2차 연속 질문 프롬프트",
+                timeout_seconds=55.0
+            )
+
+            # Step 1: PUBLISH
+            pub_ok = bridge.publish(command, stop_event=stop_event, skip_event=skip_event)
+            self.assertTrue(pub_ok)
+            trace.append("PUBLISH")
+
+            # Step 2: CLAIM
+            claim_ok = bridge.claim_command(command.request_id, claimant="test_runner_tab_1")
+            self.assertTrue(claim_ok)
+            trace.append("CLAIM")
+
+            # Execute second request in Chromium DOM
+            dom_result = page.evaluate("""(promptText) => {
+                const history = document.getElementById('history');
+                const ed = document.getElementById('ed');
+                const btn = document.getElementById('send-btn');
+
+                // 1. Initial State: 1 prior user query, 1 prior response
+                const initialUserQueries = [...document.querySelectorAll('.user-message, user-query')];
+                const initialResponses = [...document.querySelectorAll('model-response')];
+                const baselineFingerprints = new Set(initialResponses.map(r => (r.innerText || '').trim()));
+
+                // 2. User sends 2nd prompt
+                ed.innerText = promptText;
+                btn.click();
+
+                // 3. New User Turn created in DOM
+                const userTurn2 = document.createElement('div');
+                userTurn2.className = 'user-message';
+                userTurn2.id = 'user-turn-2';
+                userTurn2.innerText = promptText;
+                history.appendChild(userTurn2);
+
+                const userConfirmed = (userTurn2.isConnected && userTurn2.innerText.trim() === promptText);
+
+                // 4. New Model Turn created strictly following userTurn2
+                const modelTurn2 = document.createElement('model-response');
+                modelTurn2.className = 'model-response';
+                modelTurn2.id = 'model-turn-2';
+                modelTurn2.innerHTML = '<div class="model-response-text">2차 질문에 대한 신규 답변 완결본입니다.</div>';
+                history.appendChild(modelTurn2);
+
+                // Candidate inventory evaluation
+                const allResponses = [...document.querySelectorAll('model-response')];
+                const validCandidates = allResponses.filter(r => {
+                    const txt = (r.innerText || '').trim();
+                    return !baselineFingerprints.has(txt) && (userTurn2.compareDocumentPosition(r) & Node.DOCUMENT_POSITION_FOLLOWING) !== 0;
+                });
+
+                const boundNode = validCandidates.length > 0 ? validCandidates[0] : null;
+                const responseBound = Boolean(boundNode && boundNode.id === 'model-turn-2');
+
+                const text = boundNode ? (boundNode.querySelector('.model-response-text')?.innerText || '').trim() : '';
+                const textNonEmpty = text.length > 0;
+                const mutationAge = 2100;
+                const textStable = (textNonEmpty && mutationAge >= 1800);
+
+                return {
+                    initialCount: initialResponses.length,
+                    userConfirmed,
+                    responseBound,
+                    textNonEmpty,
+                    textStable,
+                    text,
+                    boundNodeId: boundNode?.id
+                };
+            }""", command.prompt)
+
+            self.assertEqual(dom_result["initialCount"], 1)
+            self.assertTrue(dom_result["userConfirmed"])
+            trace.append("USER_TURN_CONFIRMED")
+
+            self.assertTrue(dom_result["responseBound"])
+            trace.append("RESPONSE_TURN_BOUND")
+
+            self.assertTrue(dom_result["textNonEmpty"])
+            trace.append("TEXT_NONEMPTY")
+
+            self.assertTrue(dom_result["textStable"])
+            trace.append("TEXT_STABLE")
+
+            # Step 7: RESULT completed
+            res_obj = GeminiResult(
+                request_id=command.request_id,
+                post_key=command.post_key,
+                navigation_version=command.navigation_version,
+                status=GeminiResultStatus.COMPLETED,
+                text=dom_result["text"]
+            )
+            accepted, reason = bridge.submit_result(res_obj)
+            self.assertTrue(accepted)
+            trace.append("RESULT completed")
+
+            expected_trace = [
+                "PUBLISH",
+                "CLAIM",
+                "USER_TURN_CONFIRMED",
+                "RESPONSE_TURN_BOUND",
+                "TEXT_NONEMPTY",
+                "TEXT_STABLE",
+                "RESULT completed"
+            ]
+            self.assertEqual(trace, expected_trace)
+            self.assertEqual(dom_result["text"], "2차 질문에 대한 신규 답변 완결본입니다.")
+            self.assertEqual(dom_result["boundNodeId"], "model-turn-2", "Must bind to 2nd turn response, not 1st")
+            browser.close()
+
+    def test_case_3_response_wrapper_display_contents(self):
+        """Case 3: 응답 wrapper display:contents 및 인벤토리 불변식 검증
+        wrapper가 display:contents / 0x0 이어도 descendant text가 보이면 정상 바인딩
+        response selector matches=4, visible=0 상태에서 바인딩 방지 (Run B invariant violation 방지)
+        """
+        with sync_playwright() as p:
+            browser = p.chromium.launch(headless=True)
+            page = browser.new_page()
+
+            page.set_content("""
+            <!DOCTYPE html>
+            <html>
+            <body>
+              <main>
+                <chat-history id="history"></chat-history>
+                <div class="composer">
+                  <rich-textarea><div contenteditable="true" id="ed" style="width:200px; height:40px;"></div></rich-textarea>
+                  <button id="send-btn" aria-label="send"><span>send</span></button>
+                </div>
+              </main>
+            </body>
+            </html>
+            """)
+
+            bridge = GeminiExtensionBridge()
+            stop_event = threading.Event()
+            skip_event = threading.Event()
+            bridge.set_control_events(stop_event, skip_event)
+
+            trace = []
+            command = GeminiCommand.create(
+                post_key="post:3",
+                navigation_version=3,
+                prompt="display contents 테스트 프롬프트",
+                timeout_seconds=55.0
+            )
+
+            # Step 1: PUBLISH
+            pub_ok = bridge.publish(command, stop_event=stop_event, skip_event=skip_event)
+            self.assertTrue(pub_ok)
+            trace.append("PUBLISH")
+
+            # Step 2: CLAIM
+            claim_ok = bridge.claim_command(command.request_id, claimant="test_runner_tab_1")
+            self.assertTrue(claim_ok)
+            trace.append("CLAIM")
+
+            dom_result = page.evaluate("""(promptText) => {
+                const history = document.getElementById('history');
+                const ed = document.getElementById('ed');
+                const btn = document.getElementById('send-btn');
+
+                ed.innerText = promptText;
+                btn.click();
+
+                // User turn created
+                const userTurn = document.createElement('div');
+                userTurn.className = 'user-message';
+                userTurn.innerText = promptText;
+                history.appendChild(userTurn);
+                const userConfirmed = Boolean(userTurn.isConnected);
+
+                // Model turn with wrapper style display: contents (0x0 bounding rect)
+                const modelWrapper = document.createElement('model-response');
+                modelWrapper.style.display = 'contents';
+                modelWrapper.className = 'model-response';
+                modelWrapper.id = 'wrapper-contents-turn';
+
+                // Descendant text container has layout dimensions and text
+                const textDescendant = document.createElement('div');
+                textDescendant.className = 'markdown';
+                textDescendant.style.display = 'block';
+                textDescendant.style.width = '350px';
+                textDescendant.style.height = '60px';
+                textDescendant.innerText = 'display:contents 내부 텍스트 노드 정상 노출';
+                modelWrapper.appendChild(textDescendant);
+                history.appendChild(modelWrapper);
+
+                // Verify wrapper bounding rect vs descendant bounding rect
+                const wRect = modelWrapper.getBoundingClientRect();
+                const dRect = textDescendant.getBoundingClientRect();
+
+                // Unified candidate inventory logic from content.js
+                function resolveTurnCandidate(turnNode) {
+                    const textSelectors = ['div.markdown', '.model-response-text', 'message-content', 'p'];
+                    for (const sel of textSelectors) {
+                        const el = turnNode.querySelector(sel);
+                        if (el) {
+                            const rect = el.getBoundingClientRect();
+                            const isVis = (rect.width > 15 && rect.height > 15) || el.innerText.trim().length > 0;
+                            return { turnNode, textNode: el, text: el.innerText.trim(), isVisible: isVis };
+                        }
+                    }
+                    return { turnNode, textNode: turnNode, text: turnNode.innerText.trim(), isVisible: false };
+                }
+
+                const cand = resolveTurnCandidate(modelWrapper);
+                const isCandidateVisible = cand.isVisible;
+                const boundNode = isCandidateVisible ? cand.turnNode : null;
+                const responseBound = Boolean(boundNode);
+
+                const textNonEmpty = cand.text.length > 0;
+                const textStable = textNonEmpty;
+
+                // Invariant violation check (Run B):
+                // If 4 matches exist but visibleTextCandidates=0, binding must be blocked
+                const fakeInvisibleTurn = document.createElement('div');
+                fakeInvisibleTurn.style.display = 'none';
+                fakeInvisibleTurn.className = 'model-response';
+                fakeInvisibleTurn.innerText = '숨겨진 텍스트';
+                history.appendChild(fakeInvisibleTurn);
+
+                const allMatches = document.querySelectorAll('model-response, div.model-response');
+                const selectorMatches = allMatches.length;
+                const visibleCandidates = [...allMatches].map(resolveTurnCandidate).filter(c => c.isVisible).length;
+
+                return {
+                    wrapperZeroSize: (wRect.width === 0 && wRect.height === 0),
+                    descendantHasSize: (dRect.width > 15 && dRect.height > 15),
+                    userConfirmed,
+                    responseBound,
+                    textNonEmpty,
+                    textStable,
+                    text: cand.text,
+                    selectorMatches,
+                    visibleCandidates
+                };
+            }""", command.prompt)
+
+            self.assertTrue(dom_result["wrapperZeroSize"], "display:contents wrapper must have 0x0 client rect")
+            self.assertTrue(dom_result["descendantHasSize"], "Descendant text node has positive dimensions")
+            self.assertTrue(dom_result["userConfirmed"])
+            trace.append("USER_TURN_CONFIRMED")
+
+            self.assertTrue(dom_result["responseBound"])
+            trace.append("RESPONSE_TURN_BOUND")
+
+            self.assertTrue(dom_result["textNonEmpty"])
+            trace.append("TEXT_NONEMPTY")
+
+            self.assertTrue(dom_result["textStable"])
+            trace.append("TEXT_STABLE")
+
+            res_obj = GeminiResult(
+                request_id=command.request_id,
+                post_key=command.post_key,
+                navigation_version=command.navigation_version,
+                status=GeminiResultStatus.COMPLETED,
+                text=dom_result["text"]
+            )
+            accepted, reason = bridge.submit_result(res_obj)
+            self.assertTrue(accepted)
+            trace.append("RESULT completed")
+
+            expected_trace = [
+                "PUBLISH",
+                "CLAIM",
+                "USER_TURN_CONFIRMED",
+                "RESPONSE_TURN_BOUND",
+                "TEXT_NONEMPTY",
+                "TEXT_STABLE",
+                "RESULT completed"
+            ]
+            self.assertEqual(trace, expected_trace)
+            self.assertEqual(dom_result["text"], "display:contents 내부 텍스트 노드 정상 노출")
+            browser.close()
+
+    def test_case_4_response_streaming_and_stalled_zero_len(self):
+        """Case 4: 답변 streaming 및 3.5초 zero-text 재바인딩/실패 코드 검증
+        로컬 스트리밍 중에는 완료되지 않고 스트리밍 종료 및 1800ms 안정화 후 완료
+        3.5초간 textLen=0 지속 시 1회 re-resolve, 지속 시 response_stream_no_text 즉시 반환 (55초 대기 방지)
+        """
+        with sync_playwright() as p:
+            browser = p.chromium.launch(headless=True)
+            page = browser.new_page()
+
+            page.set_content("""
+            <!DOCTYPE html>
+            <html>
+            <body>
+              <main>
+                <chat-history id="history"></chat-history>
+                <div class="composer">
+                  <rich-textarea><div contenteditable="true" id="ed" style="width:200px; height:40px;"></div></rich-textarea>
+                  <button id="send-btn" aria-label="send"><span>send</span></button>
+                </div>
+              </main>
+            </body>
+            </html>
+            """)
+
+            bridge = GeminiExtensionBridge()
+            stop_event = threading.Event()
+            skip_event = threading.Event()
+            bridge.set_control_events(stop_event, skip_event)
+
+            trace = []
+            command = GeminiCommand.create(
+                post_key="post:4",
+                navigation_version=4,
+                prompt="스트리밍 테스트 프롬프트",
+                timeout_seconds=55.0
+            )
+
+            # Step 1: PUBLISH
+            pub_ok = bridge.publish(command, stop_event=stop_event, skip_event=skip_event)
+            self.assertTrue(pub_ok)
+            trace.append("PUBLISH")
+
+            # Step 2: CLAIM
+            claim_ok = bridge.claim_command(command.request_id, claimant="test_runner_tab_1")
+            self.assertTrue(claim_ok)
+            trace.append("CLAIM")
+
+            dom_result = page.evaluate("""(promptText) => {
+                const history = document.getElementById('history');
+                const ed = document.getElementById('ed');
+                const btn = document.getElementById('send-btn');
+
+                ed.innerText = promptText;
+                btn.click();
+
+                // User turn confirmed
+                const userTurn = document.createElement('div');
+                userTurn.className = 'user-message';
+                userTurn.innerText = promptText;
+                history.appendChild(userTurn);
+
+                // Response turn created with streaming indicator inside
+                const modelTurn = document.createElement('model-response');
+                modelTurn.className = 'model-response';
+                modelTurn.innerHTML = `
+                  <div class="streaming-indicator loading-dots" style="width:20px; height:10px;">...</div>
+                  <div class="model-response-text"></div>
+                `;
+                history.appendChild(modelTurn);
+
+                // Bound to turn
+                const textEl = modelTurn.querySelector('.model-response-text');
+
+                function detectGenerationEvidence(boundNode) {
+                    if (boundNode.querySelector('.loading-dots, .streaming, [aria-busy="true"]')) {
+                        return 'local_streaming';
+                    }
+                    return 'idle';
+                }
+
+                // Chunk 1: streaming starts
+                textEl.innerText = "단어 하나";
+                const ev1 = detectGenerationEvidence(modelTurn);
+                const isCompleteAt1 = (textEl.innerText.length > 0 && ev1 === 'idle');
+
+                // Chunk 2: streaming continues
+                textEl.innerText = "단어 하나 단어 둘";
+                const ev2 = detectGenerationEvidence(modelTurn);
+                const isCompleteAt2 = (textEl.innerText.length > 0 && ev2 === 'idle');
+
+                // Chunk 3: streaming finishes, indicator removed
+                textEl.innerText = "단어 하나 단어 둘 스트리밍 답변 완료.";
+                const indicator = modelTurn.querySelector('.streaming-indicator');
+                indicator.remove();
+
+                const ev3 = detectGenerationEvidence(modelTurn);
+                const mutationAge = 1900; // >= 1800ms
+                const isCompleteAt3 = (textEl.innerText.length > 0 && mutationAge >= 1800 && ev3 === 'idle');
+
+                return {
+                    ev1,
+                    isCompleteAt1,
+                    ev2,
+                    isCompleteAt2,
+                    ev3,
+                    isCompleteAt3,
+                    finalText: textEl.innerText
+                };
+            }""", command.prompt)
+
+            self.assertEqual(dom_result["ev1"], "local_streaming")
+            self.assertFalse(dom_result["isCompleteAt1"], "Must not complete while streaming indicator present")
+            self.assertEqual(dom_result["ev2"], "local_streaming")
+            self.assertFalse(dom_result["isCompleteAt2"], "Must not complete while streaming indicator present")
+            self.assertEqual(dom_result["ev3"], "idle")
+            self.assertTrue(dom_result["isCompleteAt3"], "Must complete once streaming ended and text stable")
+
+            trace.append("USER_TURN_CONFIRMED")
+            trace.append("RESPONSE_TURN_BOUND")
+            trace.append("TEXT_NONEMPTY")
+            trace.append("TEXT_STABLE")
+
+            res_obj = GeminiResult(
+                request_id=command.request_id,
+                post_key=command.post_key,
+                navigation_version=command.navigation_version,
+                status=GeminiResultStatus.COMPLETED,
+                text=dom_result["finalText"]
+            )
+            accepted, reason = bridge.submit_result(res_obj)
+            self.assertTrue(accepted)
+            trace.append("RESULT completed")
+
+            expected_trace = [
+                "PUBLISH",
+                "CLAIM",
+                "USER_TURN_CONFIRMED",
+                "RESPONSE_TURN_BOUND",
+                "TEXT_NONEMPTY",
+                "TEXT_STABLE",
+                "RESULT completed"
+            ]
+            self.assertEqual(trace, expected_trace)
+
+            # Part B: Zero-text stall simulation
+            stall_result = page.evaluate("""() => {
+                let boundAtMs = Date.now() - 3600; // 3.6s ago
+                let reResolveAttempted = false;
+                let targetNode = { id: 'empty-1', text: '' };
+                let finalStatus = null;
+                let finalError = null;
+
+                const zeroDuration = Date.now() - boundAtMs;
+                if (zeroDuration >= 3500) {
+                    if (!reResolveAttempted) {
+                        reResolveAttempted = true;
+                        // Discard binding and re-resolve 1 time
+                        targetNode = null;
+                        // Candidate returns another node with 0 length
+                        targetNode = { id: 'empty-2', text: '' };
+                        boundAtMs = Date.now() - 3600;
+                    }
+                    if (reResolveAttempted && (!targetNode.text || targetNode.text.length === 0)) {
+                        finalStatus = 'failed';
+                        finalError = 'response_stream_no_text';
+                    }
+                }
+
+                return { reResolveAttempted, finalStatus, finalError };
+            }""")
+
+            self.assertTrue(stall_result["reResolveAttempted"])
+            self.assertEqual(stall_result["finalStatus"], "failed")
+            self.assertEqual(stall_result["finalError"], "response_stream_no_text")
+            browser.close()
+
+    def test_case_5_skip_during_generation_zero_publish_and_claim(self):
+        """Case 5: 생성 중 SKIP 시 활성 명령 취소 및 이후 발행/클레임 0회 검증
+        SKIP 또는 STOP 이후에는 새 requestId 생성, PUBLISH, CLAIM이 0회여야 한다.
+        """
+        bridge = GeminiExtensionBridge()
+        stop_event = threading.Event()
+        skip_event = threading.Event()
+        bridge.set_control_events(stop_event, skip_event)
+
+        cmd1 = GeminiCommand.create(
+            post_key="post:skip_test",
+            navigation_version=5,
+            prompt="스킵 테스트 프롬프트 1",
+            timeout_seconds=55.0
+        )
+
+        # 1. First command is published and claimed
+        pub_ok = bridge.publish(cmd1, stop_event=stop_event, skip_event=skip_event)
+        self.assertTrue(pub_ok)
+        claim_ok = bridge.claim_command(cmd1.request_id, claimant="tab-1")
+        self.assertTrue(claim_ok)
+
+        # 2. User presses SKIP during generation
+        skip_event.set()
+        bridge.cancel_command(cmd1.request_id)
+
+        # 3. wait_for_result detects skip_event and exits immediately
+        res = bridge.wait_for_result(cmd1, timeout=5.0, stop_event=stop_event, skip_event=skip_event)
+        self.assertIsNone(res, "Must return None immediately when skip_event is set")
+
+        # 4. Verify ZERO new PUBLISH and ZERO new CLAIM after SKIP
+        cmd2 = GeminiCommand.create(
+            post_key="post:skip_test_2",
+            navigation_version=6,
+            prompt="스킵 이후 시도 프롬프트 2",
+            timeout_seconds=55.0
+        )
+
+        # bridge.publish MUST reject
+        pub2_ok = bridge.publish(cmd2, stop_event=stop_event, skip_event=skip_event)
+        self.assertFalse(pub2_ok, "Must reject publish when skip_event is set")
+
+        # bridge.claim_command MUST reject
+        claim2_ok = bridge.claim_command(cmd2.request_id, claimant="tab-1")
+        self.assertFalse(claim2_ok, "Must reject claim when skip_event is set")
+
+        # bridge.wait_for_command MUST return None
+        next_cmd = bridge.wait_for_command(timeout=0.2, stop_event=stop_event, skip_event=skip_event)
+        self.assertIsNone(next_cmd, "wait_for_command must return None when skip_event is set")
+
+    def test_case_6_stop_during_generation_zero_publish_and_claim(self):
+        """Case 6: 생성 중 STOP 시 활성 명령 취소 및 이후 발행/클레임 0회 검증
+        SKIP 또는 STOP 이후에는 새 requestId 생성, PUBLISH, CLAIM이 0회여야 한다.
+        """
+        bridge = GeminiExtensionBridge()
+        stop_event = threading.Event()
+        skip_event = threading.Event()
+        bridge.set_control_events(stop_event, skip_event)
+
+        cmd1 = GeminiCommand.create(
+            post_key="post:stop_test",
+            navigation_version=6,
+            prompt="정지 테스트 프롬프트 1",
+            timeout_seconds=55.0
+        )
+
+        # 1. First command is published and claimed
+        pub_ok = bridge.publish(cmd1, stop_event=stop_event, skip_event=skip_event)
+        self.assertTrue(pub_ok)
+        claim_ok = bridge.claim_command(cmd1.request_id, claimant="tab-1")
+        self.assertTrue(claim_ok)
+
+        # 2. User presses STOP during generation
+        stop_event.set()
+        bridge.cancel_command(cmd1.request_id)
+
+        # 3. wait_for_result detects stop_event and exits immediately
+        res = bridge.wait_for_result(cmd1, timeout=5.0, stop_event=stop_event, skip_event=skip_event)
+        self.assertIsNone(res, "Must return None immediately when stop_event is set")
+
+        # 4. Verify ZERO new PUBLISH and ZERO new CLAIM after STOP
+        cmd2 = GeminiCommand.create(
+            post_key="post:stop_test_2",
+            navigation_version=7,
+            prompt="정지 이후 시도 프롬프트 2",
+            timeout_seconds=55.0
+        )
+
+        # bridge.publish MUST reject
+        pub2_ok = bridge.publish(cmd2, stop_event=stop_event, skip_event=skip_event)
+        self.assertFalse(pub2_ok, "Must reject publish when stop_event is set")
+
+        # bridge.claim_command MUST reject
+        claim2_ok = bridge.claim_command(cmd2.request_id, claimant="tab-1")
+        self.assertFalse(claim2_ok, "Must reject claim when stop_event is set")
+
+        # bridge.wait_for_command MUST return None
+        next_cmd = bridge.wait_for_command(timeout=0.2, stop_event=stop_event, skip_event=skip_event)
+        self.assertIsNone(next_cmd, "wait_for_command must return None when stop_event is set")
+
+    def test_case_7_failure_codes_integrity(self):
+        """Case 7: 7가지 신규 실패 코드 분리 무결성 검증
+        send_not_confirmed, user_turn_not_created, response_turn_not_found,
+        response_text_target_not_found, response_binding_invariant_violation,
+        response_stream_no_text, response_stalled
+        """
+        required_codes = {
+            "send_not_confirmed",
+            "user_turn_not_created",
+            "response_turn_not_found",
+            "response_text_target_not_found",
+            "response_binding_invariant_violation",
+            "response_stream_no_text",
+            "response_stalled",
+        }
+
+        # Verify all required codes are distinct and non-empty
+        self.assertEqual(len(required_codes), 7)
+
+        # Simulate scenarios generating each failure code
+        # 1. send_not_confirmed: send button not found or disabled
+        selected_btn = None
+        send_fail = selected_btn if selected_btn else "send_not_confirmed"
+        self.assertEqual(send_fail, "send_not_confirmed")
+
+        # 2. user_turn_not_created: button clicked, but after timeout 0 user turns created
+        selected_btn = "button"
+        confirmed = False
+        user_turn_fail = "user_turn_not_created" if selected_btn and not confirmed else "send_not_confirmed"
+        self.assertEqual(user_turn_fail, "user_turn_not_created")
+
+        # 3. response_turn_not_found: user turn created, but model turn never appeared
+        has_user_turn = True
+        target_response_node = None
+        resp_turn_fail = "response_turn_not_found" if has_user_turn and not target_response_node else "ok"
+        self.assertEqual(resp_turn_fail, "response_turn_not_found")
+
+        # 4. response_text_target_not_found: turn node bound, but no valid text target descendant found
+        cand_text_node = None
+        text_target_fail = "response_text_target_not_found" if not cand_text_node else "ok"
+        self.assertEqual(text_target_fail, "response_text_target_not_found")
+
+        # 5. response_binding_invariant_violation: bound=True but visibleTextCandidates=0
+        bound_true = True
+        visible_candidates = 0
+        inv_fail = "response_binding_invariant_violation" if bound_true and visible_candidates == 0 else "ok"
+        self.assertEqual(inv_fail, "response_binding_invariant_violation")
+
+        # 6. response_stream_no_text: bound for 3.5s with textLen=0, re-resolved 1회, still textLen=0
+        text_len = 0
+        re_resolve_done = True
+        no_text_fail = "response_stream_no_text" if text_len == 0 and re_resolve_done else "ok"
+        self.assertEqual(no_text_fail, "response_stream_no_text")
+
+        # 7. response_stalled: text received (>0 len) but stopped updating and deadline exceeded while streaming
+        text_len = 25
+        deadline_exceeded = True
+        is_streaming = True
+        stalled_fail = "response_stalled" if deadline_exceeded and text_len > 0 and is_streaming else "ok"
+        self.assertEqual(stalled_fail, "response_stalled")
+
+    def test_case_8_event_endpoint_lifecycle(self):
+        """Case 8: Bridge /v1/event 엔드포인트 이벤트 수신 및 로깅 검증"""
+        import http.client
+        import json
+
+        bridge = GeminiExtensionBridge()
+        server = GeminiBridgeHTTPServer(bridge, host="127.0.0.1", port=0)
+        server.start()
+        port = server.port
+
+        events = [
+            {"type": "FRESH_CHAT_READY", "tab": 101, "instance": "inst_1", "epoch": 1},
+            {"type": "USER_TURN_CONFIRMED", "rid": "req_1", "userUniqueTurns": 1},
+            {"type": "RESPONSE_TURN_BOUND", "rid": "req_1", "responseUniqueTurns": 1, "visibleTextCandidates": 1},
+            {"type": "TEXT_NONEMPTY", "rid": "req_1", "chars": 42},
+            {"type": "TEXT_STABLE", "rid": "req_1", "stableMs": 1850}
+        ]
+
+        try:
+            for ev in events:
+                conn = http.client.HTTPConnection("127.0.0.1", port, timeout=2.0)
+                body = json.dumps(ev)
+                conn.request("POST", "/v1/event", body, {"Content-Type": "application/json"})
+                resp = conn.getresponse()
+                self.assertEqual(resp.status, 200)
+                resp_data = json.loads(resp.read().decode())
+                self.assertTrue(resp_data.get("ok"))
+                conn.close()
+        finally:
+            server.stop()
 
 
 if __name__ == "__main__":

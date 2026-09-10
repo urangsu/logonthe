@@ -584,8 +584,8 @@ class CommentDraftInspector:
     )
 
     INVENTED_CAUSALITY_PATTERNS: ClassVar[Tuple[re.Pattern[str], ...]] = (
-        re.compile(r"구워서\s+더\s+(?:통통|촉촉|쫀득|고소|맛있)"),
-        re.compile(r"조합이라\s+(?:꼬독|쫀득|바삭|고소)"),
+        re.compile(r"(?:구워서|튀겨서|삶아서|볶아서|쪄서|숙성해서|끓여서|훈제해서)\s*(?:더\s*)?(?:통통|촉촉|쫀득|쫄깃|부드럽|탱글|꼬독|고소|바삭|담백|맛있)"),
+        re.compile(r"(?:조합이라|조합이라서)\s*(?:더\s*)?(?:꼬독|쫀득|바삭|고소|촉촉|담백)"),
     )
 
     @classmethod
@@ -595,6 +595,7 @@ class CommentDraftInspector:
         recent_comments: Optional[List[str]] = None,
         preset: PresetLike = CommunityRhythmPreset.THOUGHTFUL,
         excerpt: Optional[str] = None,
+        source: Optional[str] = None,
     ) -> DraftInspectionResult:
         if not text or not isinstance(text, str):
             return DraftInspectionResult(
@@ -609,17 +610,20 @@ class CommentDraftInspector:
                 feedback="NEED_MORE_CONTEXT"
             )
 
+        # 사용자 직접 수정본(user_edit)은 AI 문체 제약(어미 중복, 과도한 부호, 사족 등) 면제
+        is_user_edit = source in ("user_edit", "user", "manual", "user_override")
+
         normalized = FinalQualityGate.normalize(raw)
         norm_excerpt = FinalQualityGate.normalize(excerpt) if excerpt else ""
 
         # 1단계: 현재 글/요청 적합성 및 최소 길이
-        if len(normalized) < 10:
+        if not is_user_edit and len(normalized) < 10:
             return DraftInspectionResult(
                 passed=False, stage=1, code="too_short",
                 feedback="댓글 길이가 너무 짧습니다. 본문의 구체적인 내용 하나를 언급하며 자연스럽게 작성해주세요."
             )
 
-        # 2단계: 사실성 검사 (거짓 방문/사용 경험, 본문에 없는 식감 추측, 가짜 인과관계)
+        # 2단계: 사실성 검사 (거짓 방문/사용 경험, 본문에 없는 식감 추측, 가짜 인과관계, 대상-속성 왜곡, 부정 왜곡)
         for phrase in FinalQualityGate.FAKE_EXPERIENCE_PHRASES:
             if phrase in normalized:
                 return DraftInspectionResult(
@@ -646,7 +650,7 @@ class CommentDraftInspector:
                         feedback=f"본문에 언급되지 않은 식감 추측 표현('{tex_word}')이 포함되어 있습니다. 본문에 없는 식감이나 맛을 추측하지 말고 본문의 실제 내용에만 반응해주세요."
                     )
 
-            # 2-2. 임의의 인과관계 왜곡 검사
+            # 2-2. 임의의 인과관계 왜곡 검사 (예: 구워서 더 촉촉)
             for pat in cls.INVENTED_CAUSALITY_PATTERNS:
                 c_match = pat.search(normalized)
                 if c_match and c_match.group() not in norm_excerpt:
@@ -655,6 +659,43 @@ class CommentDraftInspector:
                         matched=c_match.group(),
                         feedback=f"본문에 없는 인과관계 표현('{c_match.group()}')이 포함되어 있습니다. 두 특징을 원인과 결과로 연결하지 말고 본문의 구체적 사실에만 반응해주세요."
                     )
+
+            # 2-3. 반찬/부속 속성을 메인 메뉴 속성으로 왜곡 검사
+            side_dish_words = ("반찬", "밑반찬", "김치", "깍두기", "피클", "단무지", "파절이", "양파절임", "샐러드", "무생채", "겉절이")
+            side_attributes = ("아삭", "바삭", "매콤", "새콤", "정갈", "깔끔", "시원", "짭조름", "달콤")
+            for side_kw in side_dish_words:
+                if side_kw in norm_excerpt:
+                    for attr in side_attributes:
+                        if re.search(rf"(?:{side_kw})[^\.\n]{{0,25}}{attr}|{attr}[^\.\n]{{0,25}}(?:{side_kw})", norm_excerpt):
+                            if attr in normalized and side_kw not in normalized:
+                                main_transfer = re.search(rf"([가-힣]{{2,10}})(?:이|가|은|는|\s+).*{attr}|{attr}[가-힣\s]*\s+([가-힣]{{2,10}})", normalized)
+                                if main_transfer:
+                                    raw_noun = main_transfer.group(1) or main_transfer.group(2)
+                                    target_noun = re.sub(r"(?:이라니|라니|에서|에게|으로|로|이|가|은|는|을|를|도|의)$", "", raw_noun) if raw_noun else ""
+                                    if target_noun and target_noun not in side_dish_words and target_noun in norm_excerpt:
+                                        return DraftInspectionResult(
+                                            passed=False, stage=2, code="mismatched_attribute_target",
+                                            matched=f"{target_noun}+{attr}",
+                                            feedback=f"본문에서 반찬({side_kw})의 특징으로 언급된 '{attr}'을(를) 다른 메뉴('{target_noun}')의 속성으로 잘못 연결했습니다. 본문의 정확한 대상에 반응해주세요."
+                                        )
+
+            # 2-4. 본문의 부정을 긍정으로 왜곡 검사 (예: 바삭하지 않다 -> 바삭하다)
+            eval_attrs = ("바삭", "촉촉", "맵", "달콤", "부드럽", "신선", "짜", "기름지", "쫄깃", "뜨겁", "따뜻", "비리", "질기", "느끼")
+            for attr in eval_attrs:
+                neg_in_excerpt = re.search(rf"{attr}(?:하지\s*않|지\s*않|지\s*못|하진\s*않|진\s*않|은\s*아니|는\s*아니|지\s*않았|하지\s*않았)", norm_excerpt)
+                if neg_in_excerpt:
+                    aff_in_comment = re.search(rf"{attr}(?:하(?:고|며|여|서|면|네요|군요|ㅂ니다|요|아|어)|한\b|해|합)", normalized)
+                    neg_in_comment = re.search(rf"{attr}[가-힣\s]{{0,10}}(?:않|못|아니)", normalized)
+                    if aff_in_comment and not neg_in_comment:
+                        return DraftInspectionResult(
+                            passed=False, stage=2, code="negation_inversion",
+                            matched=f"{attr} (본문: 부정 -> 초안: 긍정)",
+                            feedback=f"본문에서 부정적으로 서술된 속성('{attr}')을 긍정으로 왜곡했습니다. 본문의 실제 서술을 있는 그대로 반영해주세요."
+                        )
+
+        # 사용자 직접 수정본은 AI 문체 제약(3, 4, 5단계) 면제
+        if is_user_edit:
+            return DraftInspectionResult(passed=True, stage=0, code="ok", feedback="", matched=None)
 
         # 3단계: 상투적인 요약·평가·중복 마무리
         for phrase in cls.EXPLANATORY_PHRASES:
@@ -665,12 +706,23 @@ class CommentDraftInspector:
                     feedback=f"글을 설명하거나 평가하는 문구('{phrase}')가 포함되어 있습니다. 설명조를 빼고 본문의 구체적인 디테일(메뉴, 비주얼, 사물 등)에 대한 짧은 반응 1문장으로 작성해주세요."
                 )
 
-        # 습관적 중복 마무리 ('좋겠어요' 자체를 일괄 금지하지 않고, 사족으로 덧붙여진 복문 형태일 때만 차단)
+        # 습관적 중복 마무리 ('좋겠어요'가 단문 반응일 때는 허용, 앞선 감탄에 사족으로 덧붙여진 경우만 차단)
         sentences = [s.strip() for s in re.split(r'[\n\.\?!~]+', normalized) if s.strip()]
         for tail in cls.REPETITIVE_TAILS:
             if tail in normalized:
-                tail_pos = normalized.find(tail)
-                is_appended = (len(sentences) >= 2) or (tail_pos > (len(normalized) * 0.45))
+                is_appended = False
+                if tail == "좋겠어요":
+                    if len(sentences) >= 2 and len(sentences[0]) >= 5:
+                        is_appended = True
+                    else:
+                        prior_excl = re.search(
+                            r"(?:[네구]요|[네구]염|대박|최고|예술|끝내주|완전|짱|미쳤|맛있(?:겠|어|네)|멋지|예쁘)[\s,~!]+.*좋겠어요",
+                            normalized
+                        )
+                        is_appended = bool(prior_excl)
+                else:
+                    is_appended = (len(sentences) >= 2) or (normalized.find(tail) > (len(normalized) * 0.3))
+
                 if is_appended:
                     return DraftInspectionResult(
                         passed=False, stage=3, code="repetitive_tail",
@@ -703,22 +755,44 @@ class CommentDraftInspector:
                         feedback="최근 댓글과 동일한 감상 묘사 문장 구조('... 진짜/특히 ... 보여요')가 반복되고 있습니다. 설명형 문장 대신 본문의 다른 구체적인 사실(주문, 크기, 대기, 비교 등)에 반응해주세요."
                     )
 
-            # 4-3. 동일한 어미/어구 3회 연속 반복 (최근 2개 모두 동일 어미일 때만 반려)
+            # 4-3. 동일한 어미/어구 반복 검사
+            # 앞 댓글들과 같은 어미가 나왔다고 해서 무조건 반려하지 않고, 내용과 문장 구조까지 유사한 복제만 반려
             ending_tokens = ("네요", "겠어요", "겠네요", "보여요", "보이네요", "좋네요", "같아요", "있어요", "합니다", "입니다", "습니다", "듭니다")
             cand_clean = re.sub(r'[^가-힣]', '', normalized)
             cand_ending = next((tok for tok in ending_tokens if cand_clean.endswith(tok)), (cand_clean[-2:] if len(cand_clean) >= 2 else ""))
             if cand_ending:
                 rep_count = 0
+                matching_recent = []
                 for rc in recent_comments[-3:]:
                     rc_clean = re.sub(r'[^가-힣]', '', rc.strip())
                     if rc_clean.endswith(cand_ending):
                         rep_count += 1
+                        matching_recent.append(rc.strip())
                 if rep_count >= 2:
-                    return DraftInspectionResult(
-                        passed=False, stage=4, code="repetition_detected",
-                        matched=cand_ending,
-                        feedback=f"최근 작성된 댓글과 동일한 어미/어구('{cand_ending}')가 반복되고 있습니다. 다른 자연스러운 어미나 새로운 시각의 반응을 선택해주세요."
-                    )
+                    is_clone = False
+                    for mr in matching_recent:
+                        # 1) 특정 감상/평가형 어구 동일 반복
+                        if cand_ending in ("좋네요", "보여요", "보이네요", "같아요", "맛있네요", "최고네요"):
+                            is_clone = True
+                            break
+                        # 2) 동일한 수식어 구조 복제
+                        if re.search(r"(?:진짜|너무|특히|더)\s*[가-힣]+", normalized) and re.search(r"(?:진짜|너무|특히|더)\s*[가-힣]+", mr):
+                            is_clone = True
+                            break
+                        # 3) 핵심 단어 2개 이상 공유
+                        from services.comments.entities import extract_entity_tokens
+                        cand_tokens = set(extract_entity_tokens(normalized))
+                        mr_tokens = set(extract_entity_tokens(mr))
+                        if len(cand_tokens & mr_tokens) >= 2:
+                            is_clone = True
+                            break
+
+                    if is_clone:
+                        return DraftInspectionResult(
+                            passed=False, stage=4, code="repetition_detected",
+                            matched=cand_ending,
+                            feedback=f"최근 작성된 댓글과 동일한 어미/어구('{cand_ending}')가 반복되고 있습니다. 다른 자연스러운 어미나 새로운 시각의 반응을 선택해주세요."
+                        )
 
         # 5단계: 실제 사용자 문체 이탈 (격식체/매크로 문구)
         formal_endings = FinalQualityGate.FORMAL_SUBSTRINGS + ("듭니다", "습니다", "있습니다", "없습니다", "드립니다")

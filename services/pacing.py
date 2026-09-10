@@ -74,6 +74,8 @@ class PacingService:
         """글 진입 후 공감 전, 공감 후 댓글 열기 전 등 짧은 UI 동작 사이 대기"""
         if not self.config.get("pacing_enabled", True):
             return PacingResult(PacingKind.ACTION, 0.0, WaitInterruptionReason.COMPLETED)
+        if self.skip_event and self.skip_event.is_set():
+            return PacingResult(PacingKind.ACTION, 0.0, WaitInterruptionReason.SKIPPED)
 
         low, high = self._range("action_delay_min", "action_delay_max", 1.0, 2.5)
         if high <= 0:
@@ -81,20 +83,19 @@ class PacingService:
 
         seconds = round(random.uniform(low, high), 2)
         reason = interruptible_wait(self.stop_event, seconds, pause_event=self.pause_event, skip_event=self.skip_event)
-        if reason == WaitInterruptionReason.SKIPPED:
-            self.skip_event.clear()
         return PacingResult(PacingKind.ACTION, seconds, reason)
 
     def _wait_named(self, kind: PacingKind, min_key: str, max_key: str, default_min: float, default_max: float) -> PacingResult:
         if not self.config.get("pacing_enabled", True):
             return PacingResult(kind, 0.0, WaitInterruptionReason.COMPLETED)
+        if self.skip_event and self.skip_event.is_set():
+            return PacingResult(kind, 0.0, WaitInterruptionReason.SKIPPED)
+
         low, high = self._range(min_key, max_key, default_min, default_max)
         if high <= 0:
             return PacingResult(kind, 0.0, WaitInterruptionReason.COMPLETED)
         seconds = round(random.uniform(low, high), 2)
         reason = interruptible_wait(self.stop_event, seconds, pause_event=self.pause_event, skip_event=self.skip_event)
-        if reason == WaitInterruptionReason.SKIPPED:
-            self.skip_event.clear()
         return PacingResult(kind, seconds, reason)
 
     def wait_page_settle(self) -> PacingResult:
@@ -110,6 +111,8 @@ class PacingService:
         """한 글 처리가 완료된 후 다음 글로 이동하기 전 대기"""
         if not self.config.get("pacing_enabled", True):
             return PacingResult(PacingKind.NEXT_POST, 0.0, WaitInterruptionReason.COMPLETED)
+        if self.skip_event and self.skip_event.is_set():
+            return PacingResult(PacingKind.NEXT_POST, 0.0, WaitInterruptionReason.SKIPPED)
 
         low, high = self._range("next_post_delay_min", "next_post_delay_max", 2.0, 5.0)
         if high <= 0:
@@ -130,6 +133,8 @@ class PacingService:
         """일정 확률로 발생하는 안전한 긴 휴지(Pause)"""
         if not self.config.get("pacing_enabled", True) or not self.config.get("random_pause_enabled", True):
             return None
+        if self.skip_event and self.skip_event.is_set():
+            return PacingResult(PacingKind.PAUSE, 0.0, WaitInterruptionReason.SKIPPED)
 
         chance = float(self.config.get("random_pause_chance", 0.10))
         chance = max(0.0, min(1.0, chance))

@@ -355,8 +355,8 @@ class TestHighReliabilityMatrix(unittest.TestCase):
 
         # Case 1: Editor text changed right before click
         def mock_eval_mutated(script, *args):
-            if "currentText" in script:
-                return {"isComposing": False, "isDirty": False, "currentText": "사용자가 몰래 고친 다른 내용"}
+            if "dirty" in script or "currentText" in script:
+                return {"isComposing": False, "dirty": True, "text": "사용자가 몰래 고친 다른 내용이네요~"}
             return None
 
         self.mock_page.evaluate.side_effect = mock_eval_mutated
@@ -364,17 +364,18 @@ class TestHighReliabilityMatrix(unittest.TestCase):
              patch("naver.interaction.MobileDOMResolver.get_comment_submit_context", return_value=submit_ctx):
             status = CommentInteractionService.submit_and_verify(
                 self.mock_page,
-                "원래 작성하려던 댓글 내용",
-                click=True
+                "원래 작성하려던 댓글 내용이 아주 유익하고 알차게 잘 작성되었네요~",
+                click=True,
+                is_auto_submit=True,
             )
-            # Must fail without clicking button!
-            self.assertEqual(status, CommentSubmitState.FAILED)
+            # Must disarm auto-submit and return REVIEW_REQUIRED without clicking button!
+            self.assertEqual(status, CommentSubmitState.REVIEW_REQUIRED)
             btn_mock.click.assert_not_called()
 
         # Case 2: IME composing right before click
         def mock_eval_composing(script, *args):
-            if "currentText" in script:
-                return {"isComposing": True, "isDirty": False, "currentText": "원래 작성하려던 댓글 내용"}
+            if "dirty" in script or "currentText" in script:
+                return {"isComposing": True, "dirty": False, "text": "원래 작성하려던 댓글 내용이 아주 유익하고 알차게 잘 작성되었네요~"}
             return None
 
         self.mock_page.evaluate.side_effect = mock_eval_composing
@@ -382,11 +383,41 @@ class TestHighReliabilityMatrix(unittest.TestCase):
              patch("naver.interaction.MobileDOMResolver.get_comment_submit_context", return_value=submit_ctx):
             status = CommentInteractionService.submit_and_verify(
                 self.mock_page,
-                "원래 작성하려던 댓글 내용",
-                click=True
+                "원래 작성하려던 댓글 내용이 아주 유익하고 알차게 잘 작성되었네요~",
+                click=True,
+                is_auto_submit=True,
             )
-            self.assertEqual(status, CommentSubmitState.FAILED)
+            self.assertEqual(status, CommentSubmitState.REVIEW_REQUIRED)
             btn_mock.click.assert_not_called()
+
+    def test_sub_06b_manual_user_enter_allows_dirty_and_submits(self):
+        """SUB-06B: 사용자가 수동으로 수정한 경우(dirty=True) 엔터/제출 시 정상적으로 등록 버튼을 클릭하고 제출 성공"""
+        btn_mock = MagicMock()
+        btn_mock.is_disabled.return_value = False
+        submit_ctx = {"button": btn_mock, "frame": self.mock_page}
+
+        eval_scripts = []
+        def mock_eval_manual(script, *args):
+            eval_scripts.append(script)
+            if "dirty" in script or "currentText" in script:
+                return {"isComposing": False, "dirty": True, "text": "사용자가 직접 수정한 아주 유익하고 정성스러운 댓글이네요~"}
+            return None
+
+        self.mock_page.evaluate.side_effect = mock_eval_manual
+        with patch("naver.interaction.MobileDOMResolver.get_comment_editor_context", return_value={"frame": self.mock_page}), \
+             patch("naver.interaction.MobileDOMResolver.get_comment_submit_context", return_value=submit_ctx), \
+             patch("naver.interaction.ServerCommentDuplicateGuard.capture_submission_baseline", return_value=None), \
+             patch("naver.interaction.ServerCommentDuplicateGuard.scan_page_for_my_comment",
+                   return_value=CommentPresenceResult(state=CommentPresenceState.PRESENT, confidence=LikeConfidence.HIGH)):
+            status = CommentInteractionService.submit_and_verify(
+                self.mock_page,
+                "사용자가 직접 수정한 아주 유익하고 정성스러운 댓글이네요~",
+                click=True,
+                is_auto_submit=False,
+            )
+            # Must succeed and click button!
+            self.assertEqual(status, CommentSubmitState.SUBMITTED)
+            self.assertEqual(btn_mock.click.call_count, 1)
 
     def test_sub_07_clipboard_command_post_key_mismatch_rejected(self):
         """SUB-07: 이전 글의 클립보드 명령 도착 시 post_key 불일치로 적용 거절"""

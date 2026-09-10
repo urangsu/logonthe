@@ -24,6 +24,35 @@ class CommentSubmitState(str, Enum):
     FAILED = "failed"
     UNKNOWN = "unknown"
     SUBMISSION_UNKNOWN = "submission_unknown"
+    REVIEW_REQUIRED = "review_required"
+    PRECLICK_BLOCKED = "preclick_blocked"
+
+
+class SubmitOrigin(str, Enum):
+    USER_ENTER = "user_enter"
+    NATIVE_CLICK = "native_click"
+    AUTO_TIMER = "auto_timer"
+
+
+@dataclass
+class CommentSubmitOutcome:
+    state: CommentSubmitState
+    reason: str = ""
+    click_dispatched: bool = False
+    retryable_same_post: bool = False
+
+    def __eq__(self, other):
+        if isinstance(other, CommentSubmitOutcome):
+            return self.state == other.state
+        if isinstance(other, (CommentSubmitState, str)):
+            return self.state == other
+        return super().__eq__(other)
+
+    def __str__(self):
+        return str(self.state.value if hasattr(self.state, "value") else self.state)
+
+    def __hash__(self):
+        return hash(self.state)
 
 
 class UserAction(str, Enum):

@@ -148,16 +148,22 @@ class HistoryStore:
                 self.save()
 
     def get_recent_submitted_comments(self, limit: int = 10) -> list[str]:
+        """
+        최근 실제 등록 확인(SUBMITTED)된 최종 댓글 텍스트 목록을 최신순(내림차순)으로 반환합니다.
+        - 사용자가 수정한 경우 최종 문장(submitted_text)을 우선 사용
+        - 등록 실패(FAILED), 건너뜀(SKIPPED), 결과 미확정(SUBMISSION_UNKNOWN) 초안은 엄격히 배제
+        - 정렬 순서: updated_at 내림차순 (최신 등록순)
+        """
         results = []
-        # Sort posts by updated_at descending
+        # Sort posts by updated_at / resolved_at descending (chronological descending)
         sorted_posts = sorted(
             self.posts.values(),
-            key=lambda x: x.get("updated_at", ""),
+            key=lambda x: str(x.get("updated_at") or x.get("comment", {}).get("resolved_at") or x.get("comment", {}).get("attempted_at") or ""),
             reverse=True
         )
         for p in sorted_posts:
             cmt = p.get("comment", {})
-            if cmt.get("status") == CommentSubmitState.SUBMITTED.value:
+            if cmt.get("status") == CommentSubmitState.SUBMITTED.value and not cmt.get("unconfirmed"):
                 text = cmt.get("submitted_text") or cmt.get("draft")
                 if text and text.strip():
                     results.append(text.strip())

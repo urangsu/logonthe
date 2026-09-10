@@ -1,5 +1,5 @@
 import uuid
-from typing import Optional, List, Union
+from typing import Optional, List, Union, Dict, Any
 from app.models import StylePlan
 from services.comments.community_rhythm import CommunityRhythmPreset, PresetLike
 
@@ -9,7 +9,10 @@ class AIPromptBuilder:
     실제 수집 자료 및 사용자 수정본 데이터 기반의 블로그 댓글 초안 프롬프트 빌더.
     - 인위적 20대 페르소나나 3분할 어미 강제를 제거하고,
     - 글을 읽다가 눈에 들어온 구체적인 디테일 하나에 짧게 반응하는 실제 사람의 말투를 반영.
+    - 정제된 개인화 학습 코퍼스(user_edit 우선) 및 버전화된 문체 프로필 동적 반영.
     """
+
+    PROMPT_VERSION = "2.1.0-personalized"
 
     REPRESENTATIVE_EXAMPLES = [
         '- "스프랑 밥 무한리필이라니 경양식 돈까스 먹을 때 최고네요~"',
@@ -34,6 +37,9 @@ class AIPromptBuilder:
         recent_comments: Optional[List[str]] = None,
         recent_repeats: Optional[str] = None,
         rewrite_feedback: Optional[str] = None,
+        corpus_examples: Optional[List[str]] = None,
+        style_profile: Optional[Any] = None,
+        corpus_stats: Optional[Dict[str, Any]] = None,
     ) -> str:
         title_s = title.strip() if title else "(제목 없음)"
         excerpt_s = excerpt.strip() if excerpt else ""
@@ -54,6 +60,14 @@ class AIPromptBuilder:
             period_rule,
         ]
 
+        if style_profile and getattr(style_profile, "total_samples", 0) > 0:
+            endings = getattr(style_profile, "top_endings", [])
+            endings_str = f", 선호 종결어미({', '.join(endings[:3])})" if endings else ""
+            style_notes.append(f"- 개인화 문체 기준(v{style_profile.version}): 평균 {int(style_profile.avg_length)}자 내외{endings_str}")
+            tendency = getattr(style_profile, "user_edit_tendency", [])
+            if tendency:
+                style_notes.append(f"- 사용자 수정 경향 반영: {', '.join(tendency)}")
+
         if style_plan:
             ending_hint = f" (어미 힌트: {style_plan.ending_family})" if getattr(style_plan, "ending_family", None) else ""
             reaction_hint = f" (반응 톤: {style_plan.reaction_type})" if getattr(style_plan, "reaction_type", None) else ""
@@ -61,8 +75,13 @@ class AIPromptBuilder:
 
         style_criteria = "\n".join(style_notes)
 
-        # 2. 대표 예시
-        examples_str = "\n".join(cls.REPRESENTATIVE_EXAMPLES)
+        # 2. 동적/대표 예시 (사용자 수정본 우선 반영)
+        examples_to_use = corpus_examples if (corpus_examples and len(corpus_examples) >= 2) else cls.REPRESENTATIVE_EXAMPLES
+        formatted_examples = []
+        for ex in examples_to_use:
+            cleaned_ex = ex.strip().lstrip("- ").strip('"\'')
+            formatted_examples.append(f'- "{cleaned_ex}"')
+        examples_str = "\n".join(formatted_examples)
 
         # 3. 최근 반복 억제 섹션
         recent_section = ""
@@ -120,6 +139,7 @@ class AIPromptBuilder:
 - 최근 댓글과 표현이 비슷하면 어미만 교체하지 말고, 본문 안에서 다른 반응 지점을 찾아. 적절한 다른 지점이 없으면 억지로 다양성을 만들지 마.
 
 [말투 참고 예시]
+(주의: 아래 예시는 말투와 호흡만 참고하는 자료입니다. 예시의 음식·장소·경험은 현재 글의 사실 근거로 사용하지 않는다.)
 {examples_str}
 
 {food_section}[사실 기준]

@@ -182,6 +182,7 @@ async function startHeartbeatLoop() {
 
 async function ensureFreshGeminiConversation(tabId) {
   if (typeof tabId !== 'number') return { ok: false, error: 'missing_tab_id' };
+  const contract = await getRuntimeContract();
 
   // 1. Check if the tab already has an empty fresh conversation
   for (let attempt = 0; attempt < 2; attempt++) {
@@ -197,8 +198,47 @@ async function ensureFreshGeminiConversation(tabId) {
     });
 
     if (checkRes && checkRes.fresh) {
-      console.log('[GEMINI][BACKGROUND] FRESH_CHAT_READY (verified empty)');
-      return { ok: true, reason: 'already_fresh' };
+      console.log('[GEMINI][BACKGROUND] FRESH_CHAT_READY (verified empty)', {
+        tabId,
+        contentInstanceId: checkRes.contentInstanceId,
+        conversationEpoch: checkRes.conversationEpoch
+      });
+      // Send verified fresh heartbeat to bridge
+      try {
+        await bridgeFetch('/v1/event', 'POST', {
+          type: 'FRESH_CHAT_READY',
+          tab: tabId,
+          instance: checkRes.contentInstanceId,
+          epoch: checkRes.conversationEpoch
+        }, 3000);
+      } catch (_) {}
+      try {
+        await bridgeFetch('/v1/heartbeat', 'POST', {
+          status: 'ready',
+          transportAlive: true,
+          runtimeAlive: true,
+          runtimeStatus: 'ready',
+          title: 'Google Gemini',
+          url: 'https://gemini.google.com/app',
+          extensionVersion: contract.extensionVersion,
+          contentBuild: contract.runtimeBuild,
+          buildId: contract.runtimeBuild,
+          protocolVersion: contract.protocolVersion,
+          bridgeSchemaVersion: contract.bridgeSchemaVersion,
+          consumerId: 'background-r9',
+          lastRuntimePingAt: Date.now(),
+          tabId: tabId,
+          contentInstanceId: checkRes.contentInstanceId,
+          conversationEpoch: checkRes.conversationEpoch
+        }, 5000);
+      } catch (_) {}
+      return {
+        ok: true,
+        reason: 'already_fresh',
+        tabId,
+        contentInstanceId: checkRes.contentInstanceId,
+        conversationEpoch: checkRes.conversationEpoch
+      };
     }
 
     if (attempt === 0) {
@@ -245,8 +285,47 @@ async function ensureFreshGeminiConversation(tabId) {
     });
 
     if (checkRes && checkRes.fresh) {
-      console.log('[GEMINI][BACKGROUND] FRESH_CHAT_READY (navigated and verified)');
-      return { ok: true, reason: 'navigated_fresh' };
+      console.log('[GEMINI][BACKGROUND] FRESH_CHAT_READY (navigated and verified)', {
+        tabId,
+        contentInstanceId: checkRes.contentInstanceId,
+        conversationEpoch: checkRes.conversationEpoch
+      });
+      // Send fresh heartbeat to Python bridge after fresh navigation
+      try {
+        await bridgeFetch('/v1/event', 'POST', {
+          type: 'FRESH_CHAT_READY',
+          tab: tabId,
+          instance: checkRes.contentInstanceId,
+          epoch: checkRes.conversationEpoch
+        }, 3000);
+      } catch (_) {}
+      try {
+        await bridgeFetch('/v1/heartbeat', 'POST', {
+          status: ping.status || 'ready',
+          transportAlive: true,
+          runtimeAlive: true,
+          runtimeStatus: ping.status,
+          title: ping.title || 'Google Gemini',
+          url: ping.url || 'https://gemini.google.com/app',
+          extensionVersion: contract.extensionVersion,
+          contentBuild: contract.runtimeBuild,
+          buildId: contract.runtimeBuild,
+          protocolVersion: contract.protocolVersion,
+          bridgeSchemaVersion: contract.bridgeSchemaVersion,
+          consumerId: 'background-r9',
+          lastRuntimePingAt: Date.now(),
+          tabId: tabId,
+          contentInstanceId: checkRes.contentInstanceId,
+          conversationEpoch: checkRes.conversationEpoch
+        }, 5000);
+      } catch (_) {}
+      return {
+        ok: true,
+        reason: 'navigated_fresh',
+        tabId,
+        contentInstanceId: checkRes.contentInstanceId,
+        conversationEpoch: checkRes.conversationEpoch
+      };
     }
   }
 
@@ -309,9 +388,13 @@ async function runCommandCycle() {
   // 3. Dispatch NFA_EXECUTE_COMMAND to Gemini Content Script (Two-Message Protocol)
   let execResult = null;
   const dispatchPromise = new Promise((resolve) => {
-    const deadlineMs = typeof command.deadlineAt === 'number' && command.deadlineAt > 1000000000
-      ? (command.deadlineAt * 1000 - Date.now())
-      : (typeof command.deadlineAt === 'number' ? (command.deadlineAt - Date.now() / 1000) * 1000 : 60000);
+    const deadlineMs = typeof command.deadlineAtMs === 'number' && command.deadlineAtMs > 0
+      ? (command.deadlineAtMs - Date.now())
+      : (typeof command.deadlineAt === 'number' && command.deadlineAt > 1e11
+          ? (command.deadlineAt - Date.now())
+          : (typeof command.deadlineAt === 'number' && command.deadlineAt > 0
+              ? (command.deadlineAt * 1000 - Date.now())
+              : 60000));
     const timeoutMs = Math.max(5000, deadlineMs);
 
     const timer = setTimeout(() => {
@@ -330,6 +413,10 @@ async function runCommandCycle() {
         navigationVersion: command.navigationVersion
       }
     });
+
+    command.tabId = freshCheck.tabId || activeRuntime.tabId;
+    command.contentInstanceId = freshCheck.contentInstanceId;
+    command.conversationEpoch = freshCheck.conversationEpoch;
 
     chrome.tabs.sendMessage(
       activeRuntime.tabId,
@@ -514,6 +601,14 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
   if (message?.type === 'NFA_WAIT_DIAG') {
     if (message.diag) {
       bridgeFetch('/v1/diag', 'POST', message.diag, 4000).catch(() => {});
+    }
+    sendResponse({ ok: true });
+    return true;
+  }
+
+  if (message?.type === 'NFA_EVENT') {
+    if (message.event) {
+      bridgeFetch('/v1/event', 'POST', message.event, 4000).catch(() => {});
     }
     sendResponse({ ok: true });
     return true;

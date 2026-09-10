@@ -31,14 +31,30 @@ class GeminiCommand:
     prompt: str
     created_at: float
     deadline_at: float
+    deadline_at_ms: Optional[int] = None
+    created_at_ms: Optional[int] = None
 
     @classmethod
-    def create(cls, post_key: str, navigation_version: int, prompt: str, request_id: Optional[str] = None, timeout_seconds: float = 60.0):
+    def create(cls, post_key: str, navigation_version: int, prompt: str, request_id: Optional[str] = None, timeout_seconds: float = 55.0):
         now = time.time()
-        timeout = max(10.0, float(timeout_seconds or 60.0))
-        return cls(request_id or uuid.uuid4().hex, post_key, navigation_version, prompt, now, now + timeout)
+        timeout = max(10.0, float(timeout_seconds or 55.0))
+        deadline = now + timeout
+        return cls(
+            request_id or uuid.uuid4().hex,
+            post_key,
+            navigation_version,
+            prompt,
+            now,
+            deadline,
+            deadline_at_ms=int(deadline * 1000),
+            created_at_ms=int(now * 1000),
+        )
 
     def to_json(self) -> Dict[str, object]:
+        now = self.created_at
+        deadline = self.deadline_at
+        d_ms = self.deadline_at_ms if self.deadline_at_ms is not None else (int(deadline) if deadline > 1e11 else int(deadline * 1000))
+        c_ms = self.created_at_ms if self.created_at_ms is not None else (int(now) if now > 1e11 else int(now * 1000))
         return {
             "requestId": self.request_id,
             "postKey": self.post_key,
@@ -46,6 +62,8 @@ class GeminiCommand:
             "prompt": self.prompt,
             "createdAt": self.created_at,
             "deadlineAt": self.deadline_at,
+            "deadlineAtMs": d_ms,
+            "createdAtMs": c_ms,
         }
 
 
@@ -146,6 +164,8 @@ class GeminiExtensionBridge:
         self._last_completed_request_id: Optional[str] = None
         self._last_completed_at: float = 0.0
         self._cancel_requests: set[str] = set()
+        self._stop_event: Optional[threading.Event] = None
+        self._skip_event: Optional[threading.Event] = None
         self._expected_extension_version = expected_extension_version or contract.extension_version
         self._expected_build_id = expected_build_id or contract.runtime_build
         self._protocol_version_expected = contract.protocol_version
@@ -249,6 +269,11 @@ class GeminiExtensionBridge:
                 self._condition.notify_all()
                 return True
             return False
+
+    def set_control_events(self, stop_event: Optional[threading.Event] = None, skip_event: Optional[threading.Event] = None) -> None:
+        with self._condition:
+            self._stop_event = stop_event
+            self._skip_event = skip_event
 
     def preflight(self) -> GeminiPreflight:
         with self._condition:
@@ -426,8 +451,21 @@ class GeminiExtensionBridge:
                 self._condition.wait(timeout=0.2)
         return self.preflight()
 
-    def publish(self, command: GeminiCommand) -> bool:
+    def publish(
+        self,
+        command: GeminiCommand,
+        stop_event: Optional[threading.Event] = None,
+        skip_event: Optional[threading.Event] = None,
+    ) -> bool:
         with self._condition:
+            s_evt = stop_event or self._stop_event
+            k_evt = skip_event or self._skip_event
+            if (s_evt and s_evt.is_set()) or (k_evt and k_evt.is_set()):
+                logger.log(f"[GEMINI][PUBLISH_REJECTED] Stop or skip event set before publish (rid={command.request_id})", "WARNING")
+                return False
+            if command.request_id in self._cancel_requests:
+                logger.log(f"[GEMINI][PUBLISH_REJECTED] Command was already cancelled (rid={command.request_id})", "WARNING")
+                return False
             if self._command is not None and self._command.deadline_at > time.time() and self._command_state in ("pending", "claimed"):
                 logger.log(f"[GEMINI][PUBLISH_REJECTED] Active command still running (rid={self._command.request_id})", "WARNING")
                 return False
@@ -456,23 +494,40 @@ class GeminiExtensionBridge:
                 return None
             return self._command if self._command_state == "pending" else None
 
-    def wait_for_command(self, timeout: float = 15.0, stop_event: Optional[threading.Event] = None) -> Optional[GeminiCommand]:
+    def wait_for_command(
+        self,
+        timeout: float = 15.0,
+        stop_event: Optional[threading.Event] = None,
+        skip_event: Optional[threading.Event] = None,
+    ) -> Optional[GeminiCommand]:
         deadline = time.monotonic() + max(0.1, timeout)
+        s_evt = stop_event or self._stop_event
+        k_evt = skip_event or self._skip_event
         with self._condition:
             while time.monotonic() < deadline:
-                if stop_event and stop_event.is_set():
+                if (s_evt and s_evt.is_set()) or (k_evt and k_evt.is_set()):
                     return None
                 cmd = self.current_command()
                 if cmd:
+                    if (s_evt and s_evt.is_set()) or (k_evt and k_evt.is_set()):
+                        return None
                     return cmd
                 remaining = deadline - time.monotonic()
                 if remaining <= 0:
                     break
                 self._condition.wait(timeout=min(remaining, 0.5))
+            if (s_evt and s_evt.is_set()) or (k_evt and k_evt.is_set()):
+                return None
             return self.current_command()
 
     def claim_command(self, request_id: str, claimant: str = "") -> bool:
         with self._condition:
+            if (self._stop_event and self._stop_event.is_set()) or (self._skip_event and self._skip_event.is_set()):
+                logger.log(f"[GEMINI][CLAIM_REJECTED] Stop or skip event set before claim (rid={request_id})", "WARNING")
+                return False
+            if request_id in self._cancel_requests:
+                logger.log(f"[GEMINI][CLAIM_REJECTED] Command was cancelled (rid={request_id})", "WARNING")
+                return False
             if not self._command or self._command_state != "pending":
                 return False
             if time.time() >= self._command.deadline_at:
@@ -540,19 +595,21 @@ class GeminiExtensionBridge:
         deadline = min(time.monotonic() + timeout, time.monotonic() + max(0.0, deadline_at - time.time()))
         with self._condition:
             while True:
+                s_evt = stop_event or self._stop_event
+                k_evt = skip_event or self._skip_event
+                if s_evt and s_evt.is_set():
+                    logger.log(f"[GEMINI][WAIT_RESULT] stop_event 감지 -> 명령 취소 전송 (rid={command.request_id})")
+                    self.cancel_command(command.request_id)
+                    return None
+                if k_evt and k_evt.is_set():
+                    logger.log(f"[GEMINI][WAIT_RESULT] skip_event 감지 -> 명령 취소 전송 (rid={command.request_id})")
+                    self.cancel_command(command.request_id)
+                    return None
                 result = self._results.get(command.request_id)
                 if result:
                     if self._active_request_id == command.request_id:
                         self._active_request_id = None
                     return result
-                if stop_event and stop_event.is_set():
-                    logger.log(f"[GEMINI][WAIT_RESULT] stop_event 감지 -> 명령 취소 전송 (rid={command.request_id})")
-                    self.cancel_command(command.request_id)
-                    return None
-                if skip_event and skip_event.is_set():
-                    logger.log(f"[GEMINI][WAIT_RESULT] skip_event 감지 -> 명령 취소 전송 (rid={command.request_id})")
-                    self.cancel_command(command.request_id)
-                    return None
                 remaining = deadline - time.monotonic()
                 if remaining <= 0:
                     return None
@@ -667,16 +724,44 @@ class GeminiBridgeHTTPServer:
                 if self.path == "/v1/result":
                     accepted, reason = bridge.submit_result(GeminiResult.from_json(payload))
                     return self._json(200, {"ok": True, "accepted": accepted, "reason": reason})
+                if self.path == "/v1/event":
+                    ev_type = str(payload.get("type", ""))
+                    if ev_type == "FRESH_CHAT_READY":
+                        logger.log(
+                            f"[GEMINI][FRESH_CHAT_READY] tab={payload.get('tab')} "
+                            f"instance={payload.get('instance')} epoch={payload.get('epoch')}"
+                        )
+                    elif ev_type == "USER_TURN_CONFIRMED":
+                        logger.log(
+                            f"[GEMINI][USER_TURN_CONFIRMED] rid={payload.get('rid')} "
+                            f"userUniqueTurns={payload.get('userUniqueTurns')}"
+                        )
+                    elif ev_type == "RESPONSE_TURN_BOUND":
+                        logger.log(
+                            f"[GEMINI][RESPONSE_TURN_BOUND] responseUniqueTurns={payload.get('responseUniqueTurns')} "
+                            f"visibleTextCandidates={payload.get('visibleTextCandidates')}"
+                        )
+                    elif ev_type == "TEXT_NONEMPTY":
+                        logger.log(
+                            f"[GEMINI][TEXT_NONEMPTY] chars={payload.get('chars')}"
+                        )
+                    elif ev_type == "TEXT_STABLE":
+                        logger.log(
+                            f"[GEMINI][TEXT_STABLE] stableMs={payload.get('stableMs')}"
+                        )
+                    return self._json(200, {"ok": True})
                 if self.path == "/v1/diag":
                     rid = str(payload.get("rid", ""))
                     elapsed = payload.get("elapsedMs", 0)
                     elapsed_s = f"{elapsed / 1000.0:.1f}s" if isinstance(elapsed, (int, float)) else str(elapsed)
                     fresh = payload.get("freshChatVerified", False)
                     confirmed = payload.get("sendConfirmed", False)
-                    u_count = payload.get("userQueryCount", 0)
-                    r_count = payload.get("responseSelectorCount", 0)
-                    v_count = payload.get("visibleResponseCount", 0)
-                    r_bound = payload.get("responseBound", False)
+                    u_matches = payload.get("userSelectorMatches", payload.get("userQueryCount", 0))
+                    u_turns = payload.get("userUniqueTurns", u_matches)
+                    r_matches = payload.get("responseSelectorMatches", payload.get("responseSelectorCount", 0))
+                    r_turns = payload.get("responseUniqueTurns", r_matches)
+                    v_cands = payload.get("visibleTextCandidates", payload.get("visibleResponseCount", 0))
+                    r_bound = payload.get("responseBound", payload.get("bound_response", False))
                     t_len = payload.get("responseTextLength", 0)
                     mut_age = payload.get("lastMutationAgeMs", 0)
                     mut_age_s = f"{mut_age / 1000.0:.1f}s" if isinstance(mut_age, (int, float)) else str(mut_age)
@@ -684,8 +769,10 @@ class GeminiBridgeHTTPServer:
                     build = payload.get("runtimeBuild", "")
                     logger.log(
                         f"[GEMINI][WAIT_DIAG] rid={rid} elapsed={elapsed_s} freshChatVerified={fresh} "
-                        f"sendConfirmed={confirmed} userQueries={u_count} responseCount={r_count}/{v_count} "
-                        f"bound={r_bound} textLen={t_len} lastMutationAge={mut_age_s} evidence={evidence} build={build}"
+                        f"sendConfirmed={confirmed} userSelectorMatches={u_matches} userUniqueTurns={u_turns} "
+                        f"responseSelectorMatches={r_matches} responseUniqueTurns={r_turns} "
+                        f"visibleTextCandidates={v_cands} bound={r_bound} textLen={t_len} "
+                        f"lastMutationAge={mut_age_s} evidence={evidence} build={build}"
                     )
                     return self._json(200, {"ok": True})
                 return self._json(404, {"error": "not_found"})

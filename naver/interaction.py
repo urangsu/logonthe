@@ -3,7 +3,17 @@ import uuid
 import threading
 from typing import Optional, Tuple
 from playwright.sync_api import Page, Locator
-from app.models import LikeState, LikeProcessResult, CommentSubmitState, CommentProcessResult, UserAction, WorkerCommandType, FeedPost
+from app.models import (
+    LikeState,
+    LikeProcessResult,
+    CommentSubmitState,
+    CommentProcessResult,
+    UserAction,
+    WorkerCommandType,
+    FeedPost,
+    SubmitOrigin,
+    CommentSubmitOutcome,
+)
 from app.errors import BrowserDisconnectedError
 from naver.resolver import MobileDOMResolver
 from naver.editor_adapter import CommentEditorAdapter
@@ -37,6 +47,7 @@ class CommentInteractionService:
         Document 레벨 캡처링 키보드 및 Delegated 마우스 등록/닫기 이벤트 리스너 설치
         (표준 CSS 매칭만 사용하여 브라우저 evaluate 내 SyntaxError 완전 방지)
         - 단일 제출 락 (window.tryAcquireSubmitLock)
+        - 제출 락 롤백 (window.releaseSubmitLock)
         - 한글 IME 조합 보호 (compositionstart, compositionend, isComposing)
         - 사용자 직접 편집(input, keydown) 시 자동 등록 해제 및 상태 전환
         """
@@ -46,7 +57,7 @@ class CommentInteractionService:
         frame = context["frame"] if context else page.main_frame
         frame.evaluate("""
             (postKey) => {
-                window.__NAVER_CURRENT_POST_KEY__ = postKey || '';
+                window.__NAVER_FEED_POST_KEY__ = postKey;
                 window.__NAVER_FEED_ACTION__ = null;
                 window.__NAVER_COMMENT_STATE__ = 'DRAFT_READY';
                 window.__NAVER_COMMENT_SUBMITTED_FLAG__ = false;
@@ -70,6 +81,16 @@ class CommentInteractionService:
                     window.__NAVER_SUBMIT_LOCK_ACQUIRED__ = source;
                     window.__NAVER_COMMENT_STATE__ = 'SUBMITTING';
                     return true;
+                };
+
+                // 제출 전 검증 실패 시 제출 락 롤백 (재시도 허용)
+                window.releaseSubmitLock = (source) => {
+                    if (!source || window.__NAVER_SUBMIT_LOCK_ACQUIRED__ === source) {
+                        window.__NAVER_SUBMIT_LOCK_ACQUIRED__ = null;
+                        window.__NAVER_COMMENT_STATE__ = window.__NAVER_COMMENT_USER_DIRTY__ ? 'USER_EDITING' : 'DRAFT_READY';
+                        return true;
+                    }
+                    return false;
                 };
 
                 if (window.__NAVER_FEED_KEY_HANDLER__) {
@@ -103,7 +124,7 @@ class CommentInteractionService:
 
                 // 1. 키보드 단축키 핸들러 (Enter=등록, Shift+Enter=줄바꿈, Esc=건너뛰기)
                 window.__NAVER_FEED_KEY_HANDLER__ = (e) => {
-                    const isComposing = e.isComposing || e.keyCode === 229 || window.__NAVER_IS_COMPOSING__ === true;
+                    const isComposing = (e.keyCode === 13 && !e.isComposing) ? false : (e.isComposing || e.keyCode === 229 || window.__NAVER_IS_COMPOSING__ === true);
                     const editor = e.target.closest ? (
                         e.target.closest('#naverComment__write_textarea') || 
                         e.target.closest('.u_cbox_text') ||
@@ -132,12 +153,20 @@ class CommentInteractionService:
                     }
 
                     if (e.key === 'Enter' && !e.shiftKey) {
-                        if (editor) {
+                        const targetEditor = editor || document.querySelector('#naverComment__write_textarea, div.u_cbox_text[contenteditable="true"], textarea.u_cbox_text');
+                        if (targetEditor) {
                             e.preventDefault();
                             e.stopPropagation();
                             if (window.tryAcquireSubmitLock && !window.tryAcquireSubmitLock('user_enter')) {
                                 return;
                             }
+                            try {
+                                if (document.activeElement && typeof document.activeElement.blur === 'function') {
+                                    document.activeElement.blur();
+                                }
+                            } catch (err) {}
+                            window.__NAVER_IS_COMPOSING__ = false;
+                            window.__NAVER_COMMENT_FINAL_TEXT__ = (targetEditor.innerText || targetEditor.value || '').trim();
                             window.__NAVER_FEED_ACTION__ = 'SUBMIT';
                             return;
                         }
@@ -228,66 +257,180 @@ class CommentInteractionService:
         return CommentEditorAdapter.set_text(page, text)
 
     @classmethod
-    def open_comment_layer(cls, page: Page, stop_event: Optional[threading.Event] = None) -> Tuple[bool, str]:
+    def open_comment_layer(
+        cls,
+        page: Page,
+        stop_event: Optional[threading.Event] = None,
+        skip_event: Optional[threading.Event] = None
+    ) -> Tuple[bool, str]:
         """
-        댓글 열기 버튼 클릭 후 최대 5초간 Polling하여 에디터/로그인/비활성 상태 판정
+        댓글 열기 버튼 탐색 및 클릭 후 최대 5초간 Polling하여
+        에디터 준비(ready) / 로그인 필요 / 비활성 / 타임아웃 상태 판정 (상태 머신)
         """
         ensure_page_alive(page)
 
-        open_btn = MobileDOMResolver.get_comment_button(page)
-        if open_btn and open_btn.count() > 0:
-            try:
-                if open_btn.is_visible():
-                    open_btn.scroll_into_view_if_needed(timeout=1500)
-                    open_btn.click(timeout=1500)
-            except Exception:
-                pass
+        if stop_event and stop_event.is_set():
+            return False, "stop_requested"
+        if skip_event and skip_event.is_set():
+            logger.log("  ⏭️ [COMMENT_LAYER] skip_event 감지: 댓글 레이어 준비를 중단합니다.")
+            return False, "user_skipped"
 
-        deadline = time.time() + 5.0
-        while time.time() < deadline:
+        # Step A: 에디터가 이미 열려 있는지 사전 검사 (OPEN-004)
+        editor_ctx = MobileDOMResolver.get_comment_editor_context(page)
+        if (editor_ctx and editor_ctx.get("editor") and editor_ctx["editor"].is_visible()) or CommentEditorAdapter.is_visible(page):
+            logger.log("  [COMMENT_LAYER][ALREADY_READY] 에디터가 이미 열려 있어 버튼 클릭 없이 READY")
+            return True, "ready"
+
+        # Step B: 댓글 오프너 후보 전수 인벤토리 수집
+        candidates = MobileDOMResolver.get_all_comment_opener_candidates(page)
+        selector_matches = len(candidates)
+        visible_matches = len([c for c in candidates if c.visible and c.enabled])
+
+        # Step C: visible 후보가 없으면 레이지 렌더 영역으로 deterministic 스크롤 후 재탐색 (Section 6)
+        if visible_matches == 0:
+            try:
+                page.evaluate("""() => {
+                    const el = document.querySelector('.u_likeit_list_module, .u_likeit, #postViewArea, .se-main-container, footer, article, div[class*="Interact__"]');
+                    if (el) {
+                        el.scrollIntoView({ behavior: 'instant', block: 'end' });
+                    } else {
+                        window.scrollTo(0, document.body.scrollHeight * 0.7);
+                    }
+                }""")
+            except Exception as sc_err:
+                logger.log(f"  [COMMENT_LAYER][SCROLL_WARN] {sc_err}", "WARNING")
+
+            interruptible_wait(stop_event, 0.3)
+            candidates = MobileDOMResolver.get_all_comment_opener_candidates(page)
+            selector_matches = len(candidates)
+            visible_matches = len([c for c in candidates if c.visible and c.enabled])
+
+        # 후보 판정: candidate 0 vs hidden-only
+        if selector_matches == 0:
+            logger.log(f"  ❌ [COMMENT_LAYER] candidate 0 -> comment_open_button_not_found (frameCount={len(page.frames) if hasattr(page, 'frames') else 1})", "WARNING")
+            return False, "comment_open_button_not_found"
+
+        if visible_matches == 0:
+            logger.log(f"  ❌ [COMMENT_LAYER] hidden only -> comment_open_button_hidden_only (matches={selector_matches})", "WARNING")
+            return False, "comment_open_button_hidden_only"
+
+        # Step D: 최적의 visible + enabled 후보 선정 및 로깅
+        visible_enabled = [c for c in candidates if c.visible and c.enabled]
+        with_box = [c for c in visible_enabled if c.bbox and c.bbox.get("width", 0) > 0 and c.bbox.get("height", 0) > 0]
+        selected = with_box[0] if with_box else visible_enabled[0]
+
+        frame_id = getattr(selected.frame, "name", "") or getattr(selected.frame, "url", "")
+        logger.log(
+            f"  [COMMENT_LAYER][CANDIDATES] frameCount={len(page.frames) if hasattr(page, 'frames') else 1} "
+            f"selectorMatches={selector_matches} visibleMatches={visible_matches} "
+            f"selectedSelector={selected.selector} selectedFrame={frame_id} "
+            f"selectedText={selected.text!r} selectedAria={selected.aria_label!r} bbox={selected.bbox}"
+        )
+
+        # Step E: 클릭 디스패치 및 DOM 교체 시 1회 재탐색 복구
+        logger.log(
+            f"  [COMMENT_LAYER][CLICK_ATTEMPT] selector={selected.selector} "
+            f"frame={frame_id} visible={selected.visible} enabled={selected.enabled}"
+        )
+        click_success = False
+        click_err_msg = ""
+        try:
+            selected.button.scroll_into_view_if_needed(timeout=1500)
+            selected.button.click(timeout=1500)
+            click_success = True
+        except Exception as click_err:
+            click_err_msg = str(click_err)
+            logger.log(
+                f"  ❌ [COMMENT_LAYER][CLICK_ERROR] type={type(click_err).__name__} message={click_err_msg}",
+                "WARNING"
+            )
+            # DOM replacement recovery: re-resolve 1 time (OPEN-005)
+            try:
+                re_cand = MobileDOMResolver.get_comment_open_context(page)
+                if re_cand and re_cand.visible and re_cand.enabled:
+                    logger.log("  [COMMENT_LAYER][RE_RESOLVE] DOM 교체 감지 -> 재탐색된 오프너 버튼 클릭 1회 재시도")
+                    re_cand.button.scroll_into_view_if_needed(timeout=1500)
+                    re_cand.button.click(timeout=1500)
+                    click_success = True
+            except Exception as re_err:
+                logger.log(f"  ❌ [COMMENT_LAYER][RE_CLICK_ERROR] {re_err}", "WARNING")
+
+        # Step F: 클릭 후 상태 폴링 (최대 5초)
+        started_at = time.monotonic()
+        deadline = started_at + 5.0
+        while time.monotonic() < deadline:
             if stop_event and stop_event.is_set():
                 return False, "stop_requested"
-
+            if skip_event and skip_event.is_set():
+                logger.log("  ⏭️ [COMMENT_LAYER] skip_event 감지: 댓글 레이어 준비를 중단합니다.")
+                return False, "user_skipped"
             ensure_page_alive(page)
 
-            # 1. 실제 화면에 보이는 로그인 요구 감지 (hidden template 오탐 방지)
-            login_box = page.locator(".u_cbox_write_box.u_cbox_type_logged_out, .u_cbox_guide").first
-            if login_box and login_box.count() > 0:
+            # 1. 로그인 요구 감지 (OPEN-007)
+            frames = MobileDOMResolver._safe_get_frames(page)
+            login_detected = False
+            disabled_detected = False
+            for f in frames:
                 try:
-                    if login_box.is_visible() and "로그인" in (login_box.inner_text() or ""):
-                        return False, "login_required"
+                    login_loc = f.locator(".u_cbox_write_box.u_cbox_type_logged_out, .u_cbox_guide:has-text('로그인'), a:has-text('로그인한 사용자만')").first
+                    if login_loc.count() > 0 and login_loc.is_visible():
+                        txt = login_loc.inner_text() or ""
+                        if "로그인" in txt:
+                            login_detected = True
+                            break
+                except Exception:
+                    pass
+                try:
+                    dis_loc = f.locator(".u_cbox_none, .u_cbox_notice_disabled, div:text-is('댓글을 작성할 수 없습니다')").first
+                    if dis_loc.count() > 0 and dis_loc.is_visible():
+                        disabled_detected = True
+                        break
                 except Exception:
                     pass
 
-            # 2. 명시적 비활성화 안내 감지
-            disabled_box = page.locator(".u_cbox_none, .u_cbox_notice_disabled, div:text-is('댓글을 작성할 수 없습니다')").first
-            if disabled_box and disabled_box.count() > 0:
-                try:
-                    if disabled_box.is_visible():
-                        return False, "comment_disabled"
-                except Exception:
-                    pass
+            if login_detected:
+                elapsed_ms = int((time.monotonic() - started_at) * 1000)
+                logger.log(f"  [COMMENT_LAYER][POST_CLICK] loginFound=true elapsedMs={elapsed_ms}")
+                return False, "comment_login_required"
 
-            # 3. 에디터 준비 완료 확인
+            if disabled_detected:
+                elapsed_ms = int((time.monotonic() - started_at) * 1000)
+                logger.log(f"  [COMMENT_LAYER][POST_CLICK] disabledFound=true elapsedMs={elapsed_ms}")
+                return False, "comment_disabled"
+
+            # 2. 에디터 준비 완료 확인 (OPEN-006)
             if CommentEditorAdapter.is_visible(page):
+                elapsed_ms = int((time.monotonic() - started_at) * 1000)
+                logger.log(
+                    f"  [COMMENT_LAYER][POST_CLICK] editorFound=true commentRootFound=true "
+                    f"commentListFound=true loginFound=false disabledFound=false elapsedMs={elapsed_ms}"
+                )
                 try:
                     page.evaluate("() => { const el = document.querySelector('.u_cbox_write_box, .u_cbox_area, .u_cbox'); if (el) el.scrollIntoView({ behavior: 'smooth', block: 'center' }); }")
                 except Exception:
                     pass
                 return True, "ready"
 
-            # 4. write_box 클릭 시도
-            write_box = MobileDOMResolver.get_comment_write_box(page)
-            if write_box and write_box.count() > 0:
+            # 3. 작성 상자 플레이스홀더 클릭 시도
+            for f in frames:
                 try:
-                    if write_box.is_visible():
+                    write_box = f.locator(".u_cbox_write_box, .u_cbox_guide, .u_cbox_inbox").first
+                    if write_box.count() > 0 and write_box.is_visible():
                         write_box.click(timeout=500)
+                        break
                 except Exception:
                     pass
 
             interruptible_wait(stop_event, 0.25)
 
-        return False, "comment_layer_timeout"
+        elapsed_ms = int((time.monotonic() - started_at) * 1000)
+        logger.log(
+            f"  [COMMENT_LAYER][POST_CLICK] editorFound=false commentRootFound=false "
+            f"commentListFound=false loginFound=false disabledFound=false elapsedMs={elapsed_ms}"
+        )
+        if not click_success:
+            return False, "comment_open_click_failed"
+        return False, "comment_open_clicked_editor_not_ready"
 
     @classmethod
     def prepare_comment_draft(
@@ -369,7 +512,7 @@ class CommentInteractionService:
         timeout_seconds: Optional[float] = None,
         state_mgr: Optional[object] = None,
     ) -> UserAction:
-        start_time = time.time()
+        start_time = time.monotonic()
         while True:
             # 1. 종료 이벤트
             if stop_event and stop_event.is_set():
@@ -404,11 +547,13 @@ class CommentInteractionService:
                 elif action_data == "SUBMIT_MANUAL":
                     return UserAction.NATIVE_SUBMIT
                 elif action_data in ("SKIP", "CLOSED"):
+                    if skip_event:
+                        skip_event.set()
                     return UserAction.SKIP
 
                 # P0-2: 사용자가 키 입력/수정을 시작하거나 조합 중인 경우 AUTO_SUBMIT 즉시 해제 (수동 검토 모드로 전환)
                 if is_dirty and timeout_seconds is not None:
-                    logger.log("  ✍️ [COMMENT] 사용자의 직접 댓글 수정/입력/조합 감지 -> 자동 등록 취소 (수동 확인 모드로 전환)")
+                    logger.log("  ✍️ [COMMENT][AUTO_SUBMIT_DISARMED] reason=user_edit")
                     timeout_seconds = None
                     if state_mgr and hasattr(state_mgr, "update"):
                         try:
@@ -434,6 +579,8 @@ class CommentInteractionService:
                         logger.log(f"  ⚠️ [COMMAND] 이전 글({cmd.post_key}) 명령이 현재 글({post_key})에 도착하여 무시합니다.", "WARNING")
                     elif cmd.kind in (WorkerCommandType.SKIP_POST, WorkerCommandType.GEMINI_SKIP_POST):
                         logger.log("  ⏭️ [USER] 다음 글로 바로 넘어가기 요청을 수신했습니다 (스킵).")
+                        if skip_event:
+                            skip_event.set()
                         return UserAction.SKIP
                     elif cmd.kind == WorkerCommandType.APPLY_CLIPBOARD_COMMENT:
                         from services.comments.community_rhythm import FinalQualityGate
@@ -442,14 +589,14 @@ class CommentInteractionService:
                             if CommentEditorAdapter.set_text(page, cmd.text):
                                 logger.log("  📋 [COMMENT] 클립보드 텍스트를 댓글 에디터에 적용했습니다.")
                                 if timeout_seconds is not None:
-                                    logger.log("  ✍️ [COMMENT] 클립보드 댓글 적용 -> 자동 등록 취소 (수동 확인 모드로 전환)")
+                                    logger.log("  ✍️ [COMMENT][AUTO_SUBMIT_DISARMED] reason=user_edit")
                                     timeout_seconds = None
                         else:
                             logger.log(f"  ⚠️ [COMMENT] 클립보드 텍스트가 품질 게이트를 통과하지 못해 적용을 거부했습니다: [{gate_res.code}] {gate_res.reason} (매칭: {gate_res.matched})", "WARNING")
 
             # 4. 마지막으로 timeout 검사 (모든 브라우저 액션 drain 후 단일 락 획득)
             if timeout_seconds is not None and timeout_seconds >= 0:
-                if (time.time() - start_time) >= timeout_seconds:
+                if (time.monotonic() - start_time) >= timeout_seconds:
                     # Timeout 만료 순간 마지막 1회 브라우저 액션 최종 drain
                     try:
                         if action_frame is None:
@@ -483,6 +630,8 @@ class CommentInteractionService:
                         elif final_act == "SUBMIT_MANUAL":
                             return UserAction.NATIVE_SUBMIT
                         elif final_act in ("SKIP", "CLOSED"):
+                            if skip_event:
+                                skip_event.set()
                             return UserAction.SKIP
                     except Exception as e:
                         logger.log(f"  ⚠️ [COMMENT] 최종 액션 확인 조회 실패로 자동 제출을 중단합니다: {e}", "WARNING")
@@ -497,7 +646,7 @@ class CommentInteractionService:
                     logger.log(f"  ⏱️ [COMMENT] 자동 등록 대기 시간({timeout_seconds:.1f}초) 만료 - 댓글을 자동 등록합니다.")
                     return UserAction.AUTO_SUBMIT
 
-            interruptible_wait(stop_event, 0.15)
+            interruptible_wait(stop_event, 0.15, skip_event=skip_event)
 
     @classmethod
     def read_final_text(cls, page: Page) -> str:
@@ -513,36 +662,61 @@ class CommentInteractionService:
         return CommentEditorAdapter.get_text(page)
 
     @classmethod
+    def release_submit_lock(cls, page: Page, source: str = "") -> bool:
+        """제출 전 사전 검증 실패 시 제출 락을 롤백하여 재시도를 허용"""
+        try:
+            context = MobileDOMResolver.get_comment_editor_context(page)
+            frame = context["frame"] if context else page.main_frame
+            return bool(frame.evaluate("(s) => window.releaseSubmitLock ? window.releaseSubmitLock(s) : false", source))
+        except Exception:
+            return False
+
+    @classmethod
     def submit_and_verify(
         cls,
         page: Page,
         final_text: str,
         stop_event: Optional[threading.Event] = None,
         preset: str = "community",
-        click: bool = True,
-    ) -> CommentSubmitState:
+        click: Optional[bool] = None,
+        is_auto_submit: Optional[bool] = None,
+        origin: Optional[SubmitOrigin] = None,
+    ) -> CommentSubmitOutcome:
         """
         댓글 등록 버튼 클릭 및 Fail-closed 검증 (에디터 클리어 및 서버 목록 내 댓글 등장 확인)
-        - 클릭 전 오류/비활성은 FAILED
-        - 클릭 후 서버 반영 지연/미확인은 SUBMISSION_UNKNOWN (중복 재등록 방지)
-        - 수동 등록(click=False) 시 버튼 소멸/비활성화 상태여도 서버 확인 지속
+        - SubmitOrigin: USER_ENTER (수동 엔터), NATIVE_CLICK (네이버 버튼 클릭), AUTO_TIMER (자동 등록)
+        - USER_ENTER: dirty 허용, exact readback 확인, 품질 게이트 후 Python 1회 클릭, 서버 검증
+        - NATIVE_CLICK: 네이버 기본 클릭 완료 상태, 추가 클릭 금지, 서버 검증만 수행
+        - AUTO_TIMER: dirty/isComposing 감지 시 REVIEW_REQUIRED 반환하여 같은 글 WAITING_USER 유지
         """
         ensure_page_alive(page)
 
+        if origin is None:
+            if is_auto_submit is True:
+                origin = SubmitOrigin.AUTO_TIMER
+            elif click is False:
+                origin = SubmitOrigin.NATIVE_CLICK
+            else:
+                origin = SubmitOrigin.USER_ENTER
+
         from services.comments.community_rhythm import FinalQualityGate
-        gate_res = FinalQualityGate.validate_final_text(final_text, preset=preset, source="user_submission")
+        sub_source = "user_edit" if origin == SubmitOrigin.USER_ENTER else "user_submission"
+        gate_res = FinalQualityGate.validate_final_text(final_text, preset=preset, source=sub_source)
         if not gate_res.valid:
             logger.log(f"  ❌ [COMMENT] 등록 직전 품질 게이트 실패로 제출을 중단합니다: [{gate_res.code}] {gate_res.reason} (매칭: {gate_res.matched})", "ERROR")
-            return CommentSubmitState.FAILED
+            retryable = (origin in (SubmitOrigin.USER_ENTER, SubmitOrigin.AUTO_TIMER))
+            state = CommentSubmitState.PRECLICK_BLOCKED if retryable else CommentSubmitState.FAILED
+            return CommentSubmitOutcome(state=state, reason=gate_res.code, click_dispatched=False, retryable_same_post=retryable)
 
         editor_context = MobileDOMResolver.get_comment_editor_context(page)
         comment_frame = editor_context.get("frame") if editor_context else page.main_frame
 
-        if click:
+        click_to_dispatch = (origin in (SubmitOrigin.USER_ENTER, SubmitOrigin.AUTO_TIMER))
+        if click_to_dispatch:
             submit_context = MobileDOMResolver.get_comment_submit_context(page, editor_context["frame"] if editor_context else None)
             if not submit_context:
                 logger.log("  ❌ [COMMENT] 등록 버튼을 찾지 못했습니다.", "ERROR")
-                return CommentSubmitState.FAILED
+                return CommentSubmitOutcome(state=CommentSubmitState.FAILED, reason="submit_button_not_found", click_dispatched=False, retryable_same_post=False)
             btn = submit_context["button"]
             comment_frame = submit_context.get("frame") or comment_frame
 
@@ -557,13 +731,30 @@ class CommentInteractionService:
                     })()
                 })""")
                 if isinstance(pre_check, dict):
-                    if pre_check.get("dirty") or pre_check.get("isComposing"):
-                        logger.log("  ❌ [COMMENT] 클릭 직전 사용자 편집/한글 조합 감지 -> 자동 등록 중단", "WARNING")
-                        return CommentSubmitState.FAILED
-                    cur_text = pre_check.get("text", "")
-                    if cur_text and cur_text != final_text.strip():
-                        logger.log(f"  ❌ [COMMENT] 클릭 직전 본문 변조 감지 ('{cur_text}' != '{final_text.strip()}') -> 제출 중단", "ERROR")
-                        return CommentSubmitState.FAILED
+                    if origin == SubmitOrigin.AUTO_TIMER:
+                        if pre_check.get("dirty") or pre_check.get("isComposing"):
+                            logger.log("  ⚠️ [COMMENT][AUTO_SUBMIT_DISARMED] reason=user_edit")
+                            return CommentSubmitOutcome(state=CommentSubmitState.REVIEW_REQUIRED, reason="user_edit", click_dispatched=False, retryable_same_post=True)
+                        cur_text = pre_check.get("text", "")
+                        if cur_text and cur_text != final_text.strip():
+                            logger.log(f"  ⚠️ [COMMENT][AUTO_SUBMIT_DISARMED] reason=text_mutation ('{cur_text}' != '{final_text.strip()}')")
+                            return CommentSubmitOutcome(state=CommentSubmitState.REVIEW_REQUIRED, reason="text_mutation", click_dispatched=False, retryable_same_post=True)
+                    elif origin == SubmitOrigin.USER_ENTER:
+                        if pre_check.get("isComposing"):
+                            logger.log("  ⚠️ [COMMENT][IME_COMPOSING] Enter는 한글 조합 확정으로 처리 / 등록 대기 유지", "INFO")
+                            return CommentSubmitOutcome(state=CommentSubmitState.PRECLICK_BLOCKED, reason="ime_composing", click_dispatched=False, retryable_same_post=True)
+                        cur_text = pre_check.get("text", "")
+                        if not cur_text and not final_text.strip():
+                            logger.log("  ❌ [COMMENT][MANUAL_SUBMIT_PRECHECK_FAILED] reason=empty_text retryable=true", "ERROR")
+                            return CommentSubmitOutcome(state=CommentSubmitState.PRECLICK_BLOCKED, reason="empty_text", click_dispatched=False, retryable_same_post=True)
+                        if cur_text and cur_text != final_text.strip():
+                            gate_res_cur = FinalQualityGate.validate_final_text(cur_text, preset=preset, source="user_edit")
+                            if not gate_res_cur.valid:
+                                logger.log(f"  ❌ [COMMENT][MANUAL_SUBMIT_PRECHECK_FAILED] reason={gate_res_cur.code} retryable=true", "WARNING")
+                                return CommentSubmitOutcome(state=CommentSubmitState.PRECLICK_BLOCKED, reason=gate_res_cur.code, click_dispatched=False, retryable_same_post=True)
+                            final_text = cur_text
+                        is_dirty = pre_check.get("dirty", False)
+                        logger.log(f"  📝 [COMMENT][MANUAL_SUBMIT_READY] edited={is_dirty} chars={len(final_text)}")
             except Exception as chk_err:
                 logger.log(f"  ⚠️ [COMMENT] 클릭 직전 에디터 검증 예외: {chk_err}", "WARNING")
 
@@ -572,8 +763,10 @@ class CommentInteractionService:
             permit_id = f"permit_{uuid.uuid4().hex}"
             try:
                 if btn.is_disabled():
+                    interruptible_wait(stop_event, 0.3)
+                if btn.is_disabled():
                     logger.log("  ❌ [COMMENT] 등록 버튼이 비활성 상태입니다.", "ERROR")
-                    return CommentSubmitState.FAILED
+                    return CommentSubmitOutcome(state=CommentSubmitState.PRECLICK_BLOCKED, reason="button_disabled", click_dispatched=False, retryable_same_post=True)
                 btn.scroll_into_view_if_needed(timeout=1000)
                 try:
                     comment_frame.evaluate("(p) => { window.__NAVER_SUBMIT_PERMIT__ = p; }", permit_id)
@@ -581,12 +774,12 @@ class CommentInteractionService:
                     pass
                 click_dispatched = True
                 btn.click(timeout=1000)
+                logger.log("  🚀 [COMMENT][CLICK_DISPATCHED] 등록 버튼 클릭 완료")
             except Exception as exc:
                 logger.log(f"  ❌ [COMMENT] 등록 버튼 클릭 실패: {exc} (click_dispatched={click_dispatched})", "ERROR")
-                # 클릭이 이미 디스패치된 후 예외가 발생한 경우, 서버에 도달했을 가능성이 있으므로 안전하게 SUBMISSION_UNKNOWN 반환
                 if click_dispatched:
-                    return CommentSubmitState.SUBMISSION_UNKNOWN
-                return CommentSubmitState.FAILED
+                    return CommentSubmitOutcome(state=CommentSubmitState.SUBMISSION_UNKNOWN, reason=str(exc), click_dispatched=True, retryable_same_post=False)
+                return CommentSubmitOutcome(state=CommentSubmitState.PRECLICK_BLOCKED, reason=str(exc), click_dispatched=False, retryable_same_post=True)
             finally:
                 try:
                     comment_frame.evaluate("() => { delete window.__NAVER_SUBMIT_PERMIT__; }")
@@ -609,7 +802,7 @@ class CommentInteractionService:
                 )
                 if presence.state == CommentPresenceState.PRESENT:
                     logger.log("  ✅ [COMMENT][SERVER_VERIFIED] 본인 댓글이 서버 목록에 확인되었습니다")
-                    return CommentSubmitState.SUBMITTED
+                    return CommentSubmitOutcome(state=CommentSubmitState.SUBMITTED, reason="server_verified", click_dispatched=click_to_dispatch, retryable_same_post=False)
                 if presence.state == CommentPresenceState.UNKNOWN:
                     unknown_seen = True
                     logger.log(
@@ -621,7 +814,7 @@ class CommentInteractionService:
                 "  ⚠️ [COMMENT] " + ("server_verification_unavailable" if unknown_seen else "server_comment_not_found") + ": 클릭 후 서버 목록에 본인 댓글이 즉시 확인되지 않아 SUBMISSION_UNKNOWN 처리합니다 (재등록 방지)",
                 "WARNING",
             )
-            return CommentSubmitState.SUBMISSION_UNKNOWN
+            return CommentSubmitOutcome(state=CommentSubmitState.SUBMISSION_UNKNOWN, reason="server_unconfirmed", click_dispatched=click_to_dispatch, retryable_same_post=False)
         except Exception as e:
             logger.log(f"  ⚠️ [COMMENT] 등록 검증 중 예외 발생 (클릭 이후이므로 SUBMISSION_UNKNOWN 처리): {e}", "WARNING")
-            return CommentSubmitState.SUBMISSION_UNKNOWN
+            return CommentSubmitOutcome(state=CommentSubmitState.SUBMISSION_UNKNOWN, reason=str(e), click_dispatched=click_to_dispatch, retryable_same_post=False)

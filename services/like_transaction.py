@@ -220,6 +220,7 @@ class LikeTransactionService:
 
         actual_reaction_click_performed = False
         summary_click_performed = False
+        click_dispatched = False
 
         try:
             like_opt = MobileDOMResolver.get_reaction_like_option(page)
@@ -233,8 +234,18 @@ class LikeTransactionService:
             # --- [Path A]: 실제 공감 옵션이 이미 화면에 보이는 경우 ---
             if is_opt_visible:
                 logger.log("  🤍 [LIKE] 공감 옵션이 노출되어 있어 직접 클릭합니다 (Path A).")
-                like_opt.click(timeout=2000)
-                actual_reaction_click_performed = True
+                try:
+                    click_dispatched = True
+                    like_opt.click(timeout=2000)
+                    actual_reaction_click_performed = True
+                except Exception as click_err:
+                    logger.log(f"  ⚠️ [LIKE][CLICK_TIMEOUT] Path A err={click_err} click_dispatched={click_dispatched}", "WARNING")
+                    post_click_rx = cls.resolve_reaction_state(page)
+                    logger.log(f"  [LIKE][POST_CLICK_STATE] after_type={post_click_rx.reaction_type.value} conf={post_click_rx.confidence.value} reacted={post_click_rx.reacted} dom_replaced=True")
+                    if post_click_rx.reacted and post_click_rx.reaction_type == ReactionType.LIKE:
+                        logger.log("  ✅ [LIKE] 클릭 타임아웃 이후 실제 LIKED 상태로 확인 완료 (DOM Replaced / Late Confirmed)!")
+                        return LikeProcessResult(state_before=LikeState.NOT_LIKED, action_taken=True, state_after=LikeState.LIKED)
+                    raise
 
             # --- [Path B]: 옵션이 숨겨져 있는 경우 ---
             else:
@@ -243,8 +254,18 @@ class LikeTransactionService:
                     logger.log("  ⚠️ [LIKE] 공감 요약 버튼을 찾지 못했습니다.", "WARNING")
                     return LikeProcessResult(state_before=LikeState.NOT_LIKED, action_taken=False, state_after=LikeState.UNKNOWN, error="summary_button_not_found")
 
-                summary_btn.click(timeout=2000)
-                summary_click_performed = True
+                try:
+                    click_dispatched = True
+                    summary_btn.click(timeout=2000)
+                    summary_click_performed = True
+                except Exception as sum_err:
+                    logger.log(f"  ⚠️ [LIKE][CLICK_TIMEOUT] Summary err={sum_err} click_dispatched={click_dispatched}", "WARNING")
+                    after_summary = cls.resolve_reaction_state(page)
+                    logger.log(f"  [LIKE][POST_CLICK_STATE] after_summary={after_summary.reaction_type.value} reacted={after_summary.reacted} dom_replaced=True")
+                    if after_summary.reacted and after_summary.reaction_type == ReactionType.LIKE:
+                        return LikeProcessResult(state_before=LikeState.NOT_LIKED, action_taken=True, state_after=LikeState.LIKED)
+                    raise
+
                 interruptible_wait(stop_event, 0.4)
 
                 # 3-1. Summary 클릭 자체가 이미 공감을 활성화했는지 즉시 재검증 (Summary Direct Activation)
@@ -258,10 +279,16 @@ class LikeTransactionService:
                 try:
                     like_opt.wait_for(state="visible", timeout=3000)
                     logger.log("  🤍 [LIKE] 리액션 레이어 오픈 확인 -> 공감(data-type='like') 옵션 클릭.")
+                    click_dispatched = True
                     like_opt.click(timeout=1500)
                     actual_reaction_click_performed = True
-                except Exception:
-                    logger.log("  ⚠️ [LIKE] 공감 옵션 레이어 노출 타임아웃 (서킷 브레이커는 유지합니다).", "WARNING")
+                except Exception as opt_err:
+                    post_click_rx = cls.resolve_reaction_state(page)
+                    logger.log(f"  [LIKE][POST_CLICK_STATE] after_type={post_click_rx.reaction_type.value} reacted={post_click_rx.reacted} dom_replaced=True")
+                    if post_click_rx.reacted and post_click_rx.reaction_type == ReactionType.LIKE:
+                        logger.log("  ✅ [LIKE] 레이어 공감 클릭 타임아웃 후 실제 LIKED 상태 확인 완료!")
+                        return LikeProcessResult(state_before=LikeState.NOT_LIKED, action_taken=True, state_after=LikeState.LIKED)
+                    logger.log(f"  ⚠️ [LIKE] 공감 옵션 레이어 상호작용 실패 ({opt_err}) (서킷 브레이커는 유지합니다).", "WARNING")
                     return LikeProcessResult(state_before=LikeState.NOT_LIKED, action_taken=False, state_after=LikeState.UNKNOWN, error="reaction_option_not_visible")
 
             # 4. POSTCONDITION 검증 (최대 2.5초간 Polling)
@@ -277,7 +304,7 @@ class LikeTransactionService:
                 interruptible_wait(stop_event, 0.2)
 
             if post_rx.reacted and post_rx.reaction_type == ReactionType.LIKE:
-                logger.log("  ✅ [LIKE] 공감 트랜잭션 성공: 실제 공감 옵션 활성화(LIKED) 확인 완료!")
+                logger.log(f"  ✅ [LIKE] 공감 트랜잭션 성공: 실제 공감 옵션 활성화(LIKED) 확인 완료! (like_state_after=LIKED, click_dispatched={click_dispatched})")
                 return LikeProcessResult(state_before=LikeState.NOT_LIKED, action_taken=True, state_after=LikeState.LIKED)
             else:
                 logger.log(f"  ❌ [LIKE] 공감 옵션 클릭 후 상태 전이 실패(after_type={post_rx.reaction_type.value}, conf={post_rx.confidence.value})", "ERROR")
@@ -286,7 +313,16 @@ class LikeTransactionService:
                 return LikeProcessResult(state_before=LikeState.NOT_LIKED, action_taken=True, state_after=LikeState.NOT_LIKED, error="postcondition_failed")
 
         except Exception as e:
-            logger.log(f"  ❌ [LIKE] 공감 클릭 트랜잭션 예외: {e}", "ERROR")
-            if actual_reaction_click_performed:
+            logger.log(f"  ❌ [LIKE] 공감 클릭 트랜잭션 예외: {e} (click_dispatched={click_dispatched})", "ERROR")
+            # 예외 발생 후에도 실제 LIKED 상태인지 최종 재검증 (Section 11)
+            try:
+                post_rx_after = cls.resolve_reaction_state(page)
+                logger.log(f"  [LIKE][POST_CLICK_STATE] after_type={post_rx_after.reaction_type.value} conf={post_rx_after.confidence.value} reacted={post_rx_after.reacted}")
+                if post_rx_after.reacted and post_rx_after.reaction_type == ReactionType.LIKE:
+                    logger.log("  ✅ [LIKE] 예외 발생 후 실제 LIKED 상태 확인 완료 (Recovery)!")
+                    return LikeProcessResult(state_before=LikeState.NOT_LIKED, action_taken=True, state_after=LikeState.LIKED)
+            except Exception:
+                pass
+            if actual_reaction_click_performed or click_dispatched:
                 LikeCircuitBreaker.trip(f"click_exception: {e}")
-            return LikeProcessResult(state_before=LikeState.NOT_LIKED, action_taken=actual_reaction_click_performed, state_after=LikeState.UNKNOWN, error=str(e))
+            return LikeProcessResult(state_before=LikeState.NOT_LIKED, action_taken=(actual_reaction_click_performed or click_dispatched), state_after=LikeState.UNKNOWN, error=str(e))

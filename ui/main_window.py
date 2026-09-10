@@ -98,7 +98,13 @@ class MainWindow(ctk.CTk):
         self.command_bridge = ClipboardCommandBridge()
         self.stop_event = threading.Event()
         self.pause_event = threading.Event()
+        self.skip_event = threading.Event()
         self.worker_thread: Optional[threading.Thread] = None
+
+        from services.runtime_contract import get_runtime_versions_summary
+        cfg_dict = self.config_service.config.data if hasattr(self.config_service, "config") else {}
+        self.runtime_versions = get_runtime_versions_summary(cfg_dict)
+        self.title(f"네이버 피드 어시스턴트 [Git: {self.runtime_versions['python_commit']} | Ext: {self.runtime_versions['extension_build']} | Cfg: v{self.runtime_versions['config_version']}]")
 
         self._build_ui()
         self.protocol("WM_DELETE_WINDOW", self._on_close)
@@ -123,11 +129,19 @@ class MainWindow(ctk.CTk):
 
         subtitle_lbl = ctk.CTkLabel(
             header,
-            text="Human-in-the-loop 피드 순회 · 인기 가드 · 20대 커뮤니티 리듬 댓글 · Enter 승인",
+            text="Human-in-the-loop 피드 순회 · 인기 가드 · 커뮤니티 리듬 댓글 · Enter 승인",
             font=ctk.CTkFont(size=11),
             text_color="#81C784"
         )
         subtitle_lbl.pack(side="left", padx=4, pady=3)
+
+        version_lbl = ctk.CTkLabel(
+            header,
+            text=f"Git: {self.runtime_versions['python_commit']} · Ext: {self.runtime_versions['extension_build']} · Cfg: v{self.runtime_versions['config_version']}",
+            font=ctk.CTkFont(size=11, weight="bold"),
+            text_color="#90CAF9"
+        )
+        version_lbl.pack(side="right", padx=8, pady=3)
 
         # 2. Main Tabview (피드 작업 vs 세부 옵션 분리)
         self.tabview = ctk.CTkTabview(self, height=270)
@@ -215,24 +229,46 @@ class MainWindow(ctk.CTk):
         ctk.CTkCheckBox(opt_frame, text="공감(하트)", font=ctk.CTkFont(size=11), variable=self.like_enabled_var).pack(side="left", padx=4)
 
         self.comment_enabled_var = ctk.BooleanVar(value=self.config_service.get("comment_enabled", True))
-        ctk.CTkCheckBox(opt_frame, text="댓글 초안", font=ctk.CTkFont(size=11), variable=self.comment_enabled_var).pack(side="left", padx=4)
+        self.auto_comment_submit_var = ctk.BooleanVar(value=self.config_service.get("auto_comment_submit_enabled", False))
+
+        # 댓글 모드 명확화: 사용 안 함 / 초안 검토 / 자동 등록
+        init_mode = "사용 안 함"
+        if self.comment_enabled_var.get():
+            init_mode = "자동 등록" if self.auto_comment_submit_var.get() else "초안 검토"
+        self.comment_mode_var = ctk.StringVar(value=init_mode)
+
+        def _on_comment_mode_change(mode: str):
+            if mode == "사용 안 함":
+                self.comment_enabled_var.set(False)
+                self.auto_comment_submit_var.set(False)
+            elif mode == "초안 검토":
+                self.comment_enabled_var.set(True)
+                self.auto_comment_submit_var.set(False)
+            elif mode == "자동 등록":
+                self.comment_enabled_var.set(True)
+                self.auto_comment_submit_var.set(True)
+
+        ctk.CTkLabel(opt_frame, text="댓글 모드:", font=ctk.CTkFont(size=11, weight="bold")).pack(side="left", padx=(6, 2))
+        self.comment_mode_seg = ctk.CTkSegmentedButton(
+            opt_frame,
+            values=["사용 안 함", "초안 검토", "자동 등록"],
+            variable=self.comment_mode_var,
+            command=_on_comment_mode_change,
+            font=ctk.CTkFont(size=11),
+            height=24,
+        )
+        self.comment_mode_seg.pack(side="left", padx=2)
 
         self.secret_comment_var = ctk.BooleanVar(value=self.config_service.get("secret_comment", False))
         ctk.CTkCheckBox(opt_frame, text="비밀댓글", font=ctk.CTkFont(size=11), variable=self.secret_comment_var).pack(side="left", padx=4)
 
-        def _on_auto_comment_toggle():
-            if self.auto_comment_submit_var.get():
-                self.comment_enabled_var.set(True)
-
-        self.auto_comment_submit_var = ctk.BooleanVar(value=self.config_service.get("auto_comment_submit_enabled", False))
-        ctk.CTkCheckBox(opt_frame, text="랜덤 자동 등록", font=ctk.CTkFont(size=11), variable=self.auto_comment_submit_var, command=_on_auto_comment_toggle).pack(side="left", padx=4)
-
-        ctk.CTkLabel(opt_frame, text="작성 확률:", font=ctk.CTkFont(size=11)).pack(side="left", padx=(4, 1))
+        ctk.CTkLabel(opt_frame, text="표본 확률:", font=ctk.CTkFont(size=11)).pack(side="left", padx=(4, 1))
         self.auto_comment_chance_entry = ctk.CTkEntry(opt_frame, width=36, height=22, font=ctk.CTkFont(size=11))
         self.auto_comment_chance_entry.pack(side="left", padx=1)
         self.auto_comment_chance_entry.insert(0, str(int(float(self.config_service.get("auto_comment_chance", 0.60)) * 100)))
         add_mac_clipboard_support(self.auto_comment_chance_entry, self)
-        ctk.CTkLabel(opt_frame, text="%", font=ctk.CTkFont(size=11)).pack(side="left", padx=(1, 6))
+        ctk.CTkLabel(opt_frame, text="%", font=ctk.CTkFont(size=11)).pack(side="left", padx=(1, 2))
+        ctk.CTkLabel(opt_frame, text="(선택 확률, 등록 보장 아님)", font=ctk.CTkFont(size=10), text_color="#94A3B8").pack(side="left", padx=(0, 6))
 
         ctk.CTkCheckBox(
             opt_frame, text="댓글 실패 시 자동 스킵", font=ctk.CTkFont(size=11, weight="bold"),
@@ -467,6 +503,42 @@ class MainWindow(ctk.CTk):
         add_range(p_detail, "공감→댓글:", "post_like_min_entry", "post_like_max_entry", "post_like_delay_min", "post_like_delay_max", 2.0, 5.0)
         add_range(p_detail, "자동 등록 대기:", "auto_comment_delay_min_entry", "auto_comment_delay_max_entry", "auto_comment_delay_min", "auto_comment_delay_max", 3.0, 6.0)
 
+        # 4. 개인화 학습 코퍼스 및 문체 기준
+        learning_frame = ctk.CTkFrame(tab_settings, border_width=1, border_color="#334155")
+        learning_frame.pack(fill="x", padx=4, pady=2)
+
+        l_head = ctk.CTkFrame(learning_frame, fg_color="transparent")
+        l_head.pack(fill="x", padx=6, pady=(2, 1))
+        ctk.CTkLabel(l_head, text="📚 개인화 학습 및 문체 기준 연동", font=ctk.CTkFont(weight="bold", size=11), text_color="#38BDF8").pack(side="left")
+
+        l_desc = ctk.CTkFrame(learning_frame, fg_color="transparent")
+        l_desc.pack(fill="x", padx=6, pady=(1, 2))
+        ctk.CTkLabel(
+            l_desc,
+            text="• 수정본 저장: 사용자가 초안을 직접 수정한 댓글을 영구 코퍼스에 기록 (auto_submit 자동 등록은 배제)\n"
+                 "• 문체 기준 갱신: 정제된 코퍼스로부터 평균 길이, 선호 종결어미, 수정 경향(단축/수식어 절제) 산출\n"
+                 "• 이번 생성에 참고: 현재 글의 카테고리/앵커와 일치하는 검증된 예시 2~3개를 동적으로 프롬프트에 제공",
+            font=ctk.CTkFont(size=10),
+            justify="left",
+            text_color="#94A3B8"
+        ).pack(side="left", padx=2)
+
+        l_stats = ctk.CTkFrame(learning_frame, fg_color="transparent")
+        l_stats.pack(fill="x", padx=6, pady=(1, 2))
+        self.learning_stats_lbl = ctk.CTkLabel(
+            l_stats,
+            text=self._get_learning_stats_text(),
+            font=ctk.CTkFont(size=11, weight="bold"),
+            text_color="#34D399"
+        )
+        self.learning_stats_lbl.pack(side="left", padx=2)
+
+        ctk.CTkButton(
+            l_stats, text="🔄 문체 기준 및 통계 새로고침", width=140, height=20,
+            font=ctk.CTkFont(size=10), fg_color="#334155", hover_color="#475569",
+            command=self._refresh_learning_stats
+        ).pack(side="right", padx=2)
+
         # ==================== [탭 3: 💬 내 글 답글 도우미] ====================
         replies_split = ctk.CTkFrame(tab_replies, fg_color="transparent")
         replies_split.pack(fill="both", expand=True, padx=4, pady=2)
@@ -659,8 +731,33 @@ class MainWindow(ctk.CTk):
             self.discovery_frame.pack_forget()
             self.direct_url_frame.pack_forget()
 
+    def _get_learning_stats_text(self) -> str:
+        try:
+            from services.user_learning_service import UserLearningService
+            _, stats, profile = UserLearningService.get_learning_context()
+            return f"코퍼스 현황: 전체 {stats['total_raw']}개 | 정제 {stats['cleaned']}개 | 사용자 수정본 {stats['user_edits']}개 | 프로필: {profile.version} (평균 {int(profile.avg_length)}자)"
+        except Exception:
+            return "코퍼스 현황: 로드 대기 중"
+
+    def _refresh_learning_stats(self):
+        if hasattr(self, "learning_stats_lbl"):
+            self.learning_stats_lbl.configure(text=self._get_learning_stats_text())
+        logger.log("  📚 [LEARNING] 개인화 문체 기준 및 코퍼스 통계를 새로고침했습니다.")
+
     def _update_ui_state(self, state: BotRuntimeState):
-        self.status_msg_lbl.configure(text=f"상태: {state.message}")
+        gemini_failed_pause = state.current_state == FeedState.PAUSED and (
+            "Gemini 실패" in (state.message or "") or getattr(state, "pause_reason", "") == "gemini_circuit_breaker"
+        )
+
+        if gemini_failed_pause:
+            self.status_msg_lbl.configure(
+                text="🚨 서킷 브레이커 작동: Gemini 3회 연속 실패 (확장 또는 브라우저 확인 필요)\n"
+                     "▶ 재개 방법: 브라우저 확인 후 아래 [재시도] 또는 [로컬초안] 버튼을 클릭하세요.",
+                text_color="#F87171"
+            )
+        else:
+            self.status_msg_lbl.configure(text=f"상태: {state.message}", text_color="#E2E8F0")
+
         unknown_text = f" | ⚠️ 미확정: {state.submission_unknown_count}" if state.submission_unknown_count > 0 else ""
         sampled_text = f"선정 {state.sampled_in_count}·등록 {state.comments_count}" if state.sampled_in_count > 0 else f"{state.comments_count}"
         self.badge_lbl.configure(
@@ -676,9 +773,6 @@ class MainWindow(ctk.CTk):
         else:
             self.ai_post_excerpt_lbl.configure(text="본문 요약: -")
 
-        gemini_failed_pause = state.current_state == FeedState.PAUSED and (
-            "Gemini 실패" in (state.message or "") or getattr(state, "pause_reason", "") == "gemini_circuit_breaker"
-        )
         button_state = "normal" if gemini_failed_pause else "disabled"
         for button_name in ("btn_gemini_retry", "btn_gemini_local", "btn_gemini_skip"):
             button = getattr(self, button_name, None)
@@ -692,7 +786,7 @@ class MainWindow(ctk.CTk):
         self.command_bridge.send_gemini_use_local_once()
 
     def _skip_gemini_post(self):
-        self.command_bridge.send_gemini_skip_post()
+        self._skip_to_next_post()
 
     def _copy_ai_prompt(self):
         prompt = self.state_mgr.get_snapshot().current_ai_prompt
@@ -1020,6 +1114,7 @@ class MainWindow(ctk.CTk):
         self.btn_stop.configure(state="normal")
         self.stop_event.clear()
         self.pause_event.clear()
+        self.skip_event.clear()
         self.command_bridge.clear()
 
         controller = FeedController(
@@ -1030,6 +1125,7 @@ class MainWindow(ctk.CTk):
             command_bridge=self.command_bridge,
             pause_event=self.pause_event,
             gemini_extension_bridge=self.gemini_extension_bridge,
+            skip_event=self.skip_event,
         )
         self.current_controller = controller
 
@@ -1061,6 +1157,7 @@ class MainWindow(ctk.CTk):
         if not self.worker_thread or not self.worker_thread.is_alive():
             return
         logger.log("⏭️ [USER] 다음 글로 바로 넘어가기 버튼 클릭됨 (현재 글 스킵)")
+        self.skip_event.set()
         if hasattr(self, "current_controller") and self.current_controller:
             self.current_controller.request_skip_current_post()
         else:

@@ -9,8 +9,19 @@
   }
 
   const INSTANCE_ID = Math.random().toString(36).slice(2, 10);
+  let conversationEpoch = 1;
   let isStopped = false;
   const eventCleanups = [];
+
+  const USER_QUERY_SELECTORS = [
+    '.user-message',
+    'user-query',
+    '[data-test-id="user-query"]',
+    '.query-text',
+    '.user-query-container',
+    'div[data-message-author-role="user"]',
+    '.user-query-content'
+  ].join(', ');
 
   const EDITOR_SELECTORS = [
     'rich-textarea div[contenteditable="true"]',
@@ -58,11 +69,17 @@
     if (!activeExecution) return false;
     if (!reqId || activeExecution.requestId === reqId) {
       activeExecution.cancelled = true;
+      try { activeExecution.observer?.disconnect(); } catch (_) {}
+      if (activeExecution.timer) {
+        clearInterval(activeExecution.timer);
+        activeExecution.timer = null;
+      }
       if (typeof activeExecution.finish === 'function') {
         activeExecution.finish({ status: 'failed', text: '', error: reason });
       } else if (typeof activeExecution.resolve === 'function') {
         activeExecution.resolve({ status: 'failed', text: '', error: reason });
       }
+      activeExecution = null;
       return true;
     }
     return false;
@@ -125,8 +142,28 @@
 
   function visible(element) {
     if (!element || !element.isConnected) return false;
+    const style = window.getComputedStyle(element);
+    if (style.visibility === 'hidden' || style.display === 'none') return false;
     const rect = element.getBoundingClientRect();
-    return rect.width > 15 && rect.height > 15 && getComputedStyle(element).visibility !== 'hidden' && getComputedStyle(element).display !== 'none';
+    if (rect.width > 15 && rect.height > 15) return true;
+    // Check if element has display: contents or custom elements whose children are visible
+    if (style.display === 'contents' || (rect.width === 0 && rect.height === 0)) {
+      const childWithText = element.querySelector('p, div, span, .markdown, .model-response-text');
+      if (childWithText) {
+        const cStyle = window.getComputedStyle(childWithText);
+        if (cStyle.visibility !== 'hidden' && cStyle.display !== 'none') {
+          const cRect = childWithText.getBoundingClientRect();
+          if (cRect.width > 15 && cRect.height > 15) return true;
+        }
+      }
+      try {
+        const range = document.createRange();
+        range.selectNodeContents(element);
+        const rRect = range.getBoundingClientRect();
+        if (rRect.width > 15 && rRect.height > 15) return true;
+      } catch (_) {}
+    }
+    return false;
   }
 
   function findComposer(input) {
@@ -243,7 +280,7 @@
     if (/accounts\.google\.com/.test(location.href) || /로그인/.test(body) && !editor()) return 'auth_required';
 
     if (activeExecution) {
-      if (Date.now() > activeExecution.deadlineAt) {
+      if (Date.now() > activeExecution.deadlineAtMs) {
         cancelExecution(activeExecution.requestId, 'command_deadline_exceeded');
       } else {
         return 'busy';
@@ -297,14 +334,14 @@
 
   async function waitForStableReadback(getTargetFn, expectedText, maxWaitMs = 1500) {
     const expectedCanonical = canonicalPromptText(expectedText);
-    const deadline = Date.now() + maxWaitMs;
-    let matchStartTime = null;
+    const deadlineAtMs = Date.now() + maxWaitMs;
+    let matchStartTimeMs = null;
     let lastMatchedSurface = null;
     let lastActualRaw = '';
     let lastActualCanonical = '';
     let resolvedTarget = null;
 
-    while (Date.now() < deadline) {
+    while (Date.now() < deadlineAtMs) {
       if (isStopped || activeExecution?.cancelled) return { ok: false, reason: 'cancelled' };
 
       let currentTarget = getTargetFn();
@@ -333,9 +370,9 @@
       }
 
       if (matchedThisTick) {
-        if (!matchStartTime) {
-          matchStartTime = Date.now();
-        } else if (Date.now() - matchStartTime >= 200) {
+        if (!matchStartTimeMs) {
+          matchStartTimeMs = Date.now();
+        } else if (Date.now() - matchStartTimeMs >= 200) {
           return {
             ok: true,
             target: resolvedTarget,
@@ -345,7 +382,7 @@
           };
         }
       } else {
-        matchStartTime = null;
+        matchStartTimeMs = null;
       }
 
       await new Promise(r => setTimeout(r, 100));
@@ -361,10 +398,105 @@
     };
   }
 
+  function getUserTurnContainer(el) {
+    if (!el || !el.isConnected) return null;
+    return el.closest(USER_QUERY_SELECTORS) || el;
+  }
+
+  function getTurnContainer(el) {
+    if (!el || !el.isConnected) return null;
+    return el.closest('model-response, div[data-message-author-role="model"], div.model-response, [data-test-id="model-response"]') || el;
+  }
+
+  function resolveTurnCandidate(turnNode) {
+    if (!turnNode || !turnNode.isConnected) return null;
+
+    const textSelectors = [
+      'message-content',
+      'div.markdown',
+      'div.model-response-text',
+      '.response-body-inner',
+      '.response-container-content',
+      'p'
+    ];
+    let resolvedTextNode = null;
+    let resolvedText = '';
+    let isCandidateVisible = false;
+
+    for (const sel of textSelectors) {
+      const list = turnNode.querySelectorAll(sel);
+      for (const el of list) {
+        if (!el || !el.isConnected) continue;
+        const st = window.getComputedStyle(el);
+        if (st.visibility === 'hidden' || st.display === 'none') continue;
+
+        const txt = (el.innerText || el.textContent || '').trim();
+        const rect = el.getBoundingClientRect();
+        let hasVisibleDimensions = (rect.width > 5 && rect.height > 5);
+        if (!hasVisibleDimensions) {
+          try {
+            const range = document.createRange();
+            range.selectNodeContents(el);
+            const r = range.getBoundingClientRect();
+            if (r.width > 5 && r.height > 5) hasVisibleDimensions = true;
+          } catch (_) {}
+        }
+
+        if (hasVisibleDimensions || txt.length > 0) {
+          resolvedTextNode = el;
+          resolvedText = txt;
+          isCandidateVisible = hasVisibleDimensions || (txt.length > 0 && st.visibility !== 'hidden');
+          break;
+        }
+      }
+      if (resolvedTextNode) break;
+    }
+
+    if (!resolvedTextNode) {
+      resolvedTextNode = turnNode;
+      resolvedText = (turnNode.innerText || turnNode.textContent || '').trim();
+      const tStyle = window.getComputedStyle(turnNode);
+      if (tStyle.visibility !== 'hidden' && tStyle.display !== 'none') {
+        const rect = turnNode.getBoundingClientRect();
+        if (rect.width > 5 && rect.height > 5) {
+          isCandidateVisible = true;
+        } else {
+          try {
+            const range = document.createRange();
+            range.selectNodeContents(turnNode);
+            const r = range.getBoundingClientRect();
+            if (r.width > 5 && r.height > 5) isCandidateVisible = true;
+          } catch (_) {}
+        }
+      }
+    }
+
+    // Even if wrapper is display:contents or 0x0, if it has streaming/loading indicators or non-empty text, it's visible
+    if (!isCandidateVisible) {
+      const indicator = turnNode.querySelector('.loading-dots, .streaming, [aria-busy="true"], mat-progress-bar, [data-is-generating="true"]');
+      if (indicator) {
+        const indStyle = window.getComputedStyle(indicator);
+        if (indStyle.visibility !== 'hidden' && indStyle.display !== 'none') {
+          isCandidateVisible = true;
+        }
+      }
+    }
+
+    return {
+      turnNode,
+      textNode: resolvedTextNode,
+      text: resolvedText,
+      isVisible: isCandidateVisible
+    };
+  }
+
   function extractResponseText(node) {
     if (!node) return '';
-    const contentEl = node.querySelector('message-content, div.markdown, div.model-response-text, .response-body-inner') || node;
-    return (contentEl.innerText || contentEl.textContent || '').trim();
+    const cand = resolveTurnCandidate(node);
+    if (cand && cand.textNode) {
+      return (cand.textNode.innerText || cand.textNode.textContent || '').trim();
+    }
+    return (node.innerText || node.textContent || '').trim();
   }
 
   function extractUserQueryText(node) {
@@ -373,30 +505,102 @@
     return (queryEl.innerText || queryEl.textContent || '').trim();
   }
 
+  function getCandidateInventory(initialResponseSet = new Set(), baselineResponseFingerprints = new Set(), currentUserTurn = null) {
+    const allMatches = [...document.querySelectorAll(RESPONSE_SELECTORS)];
+    const responseSelectorMatches = allMatches.length;
+
+    // Deduplicate turn containers by DOM node identity
+    const uniqueTurnNodes = [];
+    const seenTurnSet = new Set();
+    for (const el of allMatches) {
+      const turnContainer = getTurnContainer(el);
+      if (turnContainer && !seenTurnSet.has(turnContainer)) {
+        seenTurnSet.add(turnContainer);
+        uniqueTurnNodes.push(turnContainer);
+      }
+    }
+    const responseUniqueTurns = uniqueTurnNodes.length;
+
+    const inventory = [];
+    for (const turnNode of uniqueTurnNodes) {
+      const cand = resolveTurnCandidate(turnNode);
+      if (!cand) continue;
+
+      const isConn = Boolean(turnNode.isConnected);
+      const isVis = cand.isVisible;
+      const textCanonical = canonicalPromptText(cand.text);
+
+      let excludeReason = null;
+      if (!isConn) excludeReason = 'disconnected';
+      else if (!isVis) excludeReason = 'not_visible';
+      else if (initialResponseSet.has(turnNode)) excludeReason = 'initial_baseline_node';
+      else if (textCanonical && baselineResponseFingerprints.has(textCanonical)) excludeReason = 'baseline_text_match';
+      else if (currentUserTurn && (currentUserTurn.compareDocumentPosition(turnNode) & Node.DOCUMENT_POSITION_FOLLOWING) === 0) excludeReason = 'precedes_user_turn';
+
+      cand.excludeReason = excludeReason;
+      cand.isCandidate = !excludeReason;
+      inventory.push(cand);
+    }
+
+    const validCandidates = inventory.filter(c => c.isCandidate);
+    const visibleTextCandidates = validCandidates.length;
+
+    return {
+      responseSelectorMatches,
+      responseUniqueTurns,
+      visibleTextCandidates,
+      inventory,
+      validCandidates
+    };
+  }
+
+  function getUserInventory() {
+    const allMatches = [...document.querySelectorAll(USER_QUERY_SELECTORS)];
+    const userSelectorMatches = allMatches.length;
+    const uniqueUserNodes = [];
+    const seenUserSet = new Set();
+    for (const el of allMatches) {
+      const container = getUserTurnContainer(el);
+      if (container && !seenUserSet.has(container)) {
+        seenUserSet.add(container);
+        uniqueUserNodes.push(container);
+      }
+    }
+    const userUniqueTurns = uniqueUserNodes.length;
+    const visibleUserNodes = uniqueUserNodes.filter(visible);
+    return {
+      userSelectorMatches,
+      userUniqueTurns,
+      visibleUserNodes,
+      allMatches
+    };
+  }
+
   function responseNodes() {
-    return [...document.querySelectorAll(RESPONSE_SELECTORS)].filter(visible);
+    const inv = getCandidateInventory();
+    return inv.inventory.filter(c => c.isVisible).map(c => c.turnNode);
   }
 
   function userQueryNodes() {
-    return [...document.querySelectorAll('.user-message, user-query, [data-test-id="user-query"], .query-text, .user-query-container, div[data-message-author-role="user"], .user-query-content')].filter(visible);
+    return getUserInventory().visibleUserNodes;
   }
 
-  function generationActive() {
-    const busySelector = '[aria-busy="true"], [data-is-generating="true"], .loading-dots, .streaming, [aria-label*="중지"], [aria-label*="Stop"], [aria-label*="생성 중지"]';
-    return Boolean(document.querySelector(busySelector));
-  }
-
-  function detectGenerationEvidence(node) {
-    if (!node) return 'none';
-    if (node.querySelector('.loading-dots, .streaming, [aria-busy="true"]')) return 'local_streaming';
-    if (findComposer(editor())?.querySelector('[aria-label*="중지"], [aria-label*="Stop"]')) return 'composer_stop_button';
-    if (document.querySelector('[aria-busy="true"]')) return 'page_aria_busy';
+  function detectGenerationEvidence(boundNode) {
+    if (!boundNode) return 'none';
+    // Strictly scoped to indicator inside currently bound turn OR composer generation control (never global document)
+    if (boundNode.querySelector('.loading-dots, .streaming, [aria-busy="true"], mat-progress-bar, [data-is-generating="true"]')) {
+      return 'local_streaming';
+    }
+    const comp = findComposer(editor());
+    if (comp?.querySelector('[aria-label*="중지"], [aria-label*="Stop"], [aria-label*="생성 중지"]')) {
+      return 'composer_stop_button';
+    }
     return 'idle';
   }
 
   async function waitForSendReady(input, timeoutMs = 2500) {
-    const deadline = Date.now() + timeoutMs;
-    while (Date.now() < deadline) {
+    const deadlineAtMs = Date.now() + timeoutMs;
+    while (Date.now() < deadlineAtMs) {
       if (isStopped || activeExecution?.cancelled) return null;
       const ctrl = findSendControl(input);
       if (ctrl && ctrl.button && !ctrl.button.disabled && ctrl.button.getAttribute('aria-disabled') !== 'true') {
@@ -439,9 +643,27 @@
       initialUserQueries.map(q => canonicalPromptText(extractUserQueryText(q))).filter(Boolean)
     );
 
+    function emitEvent(type, payload = {}) {
+      try {
+        chrome.runtime.sendMessage({
+          type: 'NFA_EVENT',
+          event: { type, rid: command.requestId, ...payload }
+        });
+      } catch (_) {}
+    }
+
     const freshChatVerified = (initialResponseList.length === 0 && initialUserQueries.length === 0);
     if (freshChatVerified) {
-      console.log('[GEMINI][FRESH_CHAT_READY]', true);
+      console.log('[GEMINI][FRESH_CHAT_READY]', JSON.stringify({
+        tab: command.tabId || null,
+        instance: INSTANCE_ID,
+        epoch: conversationEpoch
+      }));
+      emitEvent('FRESH_CHAT_READY', {
+        tab: command.tabId || null,
+        instance: INSTANCE_ID,
+        epoch: conversationEpoch
+      });
     }
 
     let target = editor();
@@ -520,25 +742,57 @@
     // Response and User Turn Tracking Variables
     let currentUserTurn = null;
     let targetResponseNode = null;
+    let boundAtMs = 0;
+    let reResolveAttempted = false;
+    let textNonEmptyLogged = false;
+    let textStableLogged = false;
 
     function bindResponseNode(node, evidence) {
-      if (!node || targetResponseNode) return targetResponseNode;
+      if (!node) return null;
+      if (targetResponseNode && targetResponseNode.isConnected && targetResponseNode === node) {
+        return targetResponseNode;
+      }
+
+      // Unified inventory invariant verification
+      const inv = getCandidateInventory(initialResponseSet, baselineResponseFingerprints, currentUserTurn);
+      const cand = inv.inventory.find(c => c.turnNode === node);
+      if (!cand || !cand.isVisible || inv.visibleTextCandidates === 0) {
+        console.error('[GEMINI][INVARIANT_VIOLATION] Attempted to bind node when visibleTextCandidates=0 or node not visible', {
+          nodeTag: node.tagName,
+          visibleTextCandidates: inv.visibleTextCandidates,
+          responseSelectorMatches: inv.responseSelectorMatches,
+          excludeReason: cand?.excludeReason || 'not_in_inventory'
+        });
+        return null;
+      }
+
       targetResponseNode = node;
-      console.log('[GEMINI][RESPONSE_BOUND]', JSON.stringify({
+      boundAtMs = Date.now();
+      reResolveAttempted = false;
+      const rInv = getCandidateInventory(initialResponseSet, baselineResponseFingerprints, currentUserTurn);
+      console.log('[GEMINI][RESPONSE_TURN_BOUND]', JSON.stringify({
         rid: command.requestId,
         evidence: evidence,
+        responseUniqueTurns: rInv.responseUniqueTurns,
+        visibleTextCandidates: rInv.visibleTextCandidates,
         hasUserTurnAnchor: Boolean(currentUserTurn),
         nodeTag: node.tagName
       }));
+      emitEvent('RESPONSE_TURN_BOUND', {
+        responseUniqueTurns: rInv.responseUniqueTurns,
+        visibleTextCandidates: rInv.visibleTextCandidates,
+        evidence: evidence
+      });
       return targetResponseNode;
     }
 
     function findNewUserQuery() {
-      const currentQueries = userQueryNodes();
+      const userInv = getUserInventory();
+      const currentQueries = userInv.visibleUserNodes;
       const exactPromptMatch = currentQueries.find(q => {
         const qText = canonicalPromptText(extractUserQueryText(q));
         return qText === expectedCanonical && !initialUserQuerySet.has(q);
-      }) || currentQueries.find(q => canonicalPromptText(extractUserQueryText(q)) === expectedCanonical);
+      }) || currentQueries.find(q => canonicalPromptText(extractUserQueryText(q)) === expectedCanonical && !initialUserQuerySet.has(q));
       if (exactPromptMatch) return exactPromptMatch;
 
       const novelQuery = currentQueries.find(q => {
@@ -548,21 +802,20 @@
       });
       if (novelQuery) return novelQuery;
 
-      if (currentQueries.length > initialUserQueries.length) {
-        return currentQueries[currentQueries.length - 1];
+      for (const q of currentQueries) {
+        if (!initialUserQuerySet.has(q)) return q;
       }
 
       return null;
     }
 
     function findTurnResponseCandidate() {
-      const currentResponses = responseNodes();
+      const inv = getCandidateInventory(initialResponseSet, baselineResponseFingerprints, currentUserTurn);
+      const valid = inv.validCandidates;
 
       if (freshChatVerified) {
-        // In a verified fresh chat, baseline response count was 0.
-        // Once send is confirmed, any visible response node with text or latest visible node is authoritative!
-        if (currentResponses.length > 0) {
-          return currentResponses[currentResponses.length - 1];
+        if (valid.length > 0) {
+          return valid[valid.length - 1].turnNode;
         }
         return null;
       }
@@ -577,81 +830,125 @@
 
       // Strategy 1: Find first response strictly following currentUserTurn in document order
       if (currentUserTurn && currentUserTurn.isConnected) {
-        for (const resp of currentResponses) {
-          if (!resp || !resp.isConnected) continue;
-          if (initialResponseSet.has(resp)) continue;
-
-          const isFollowing = (currentUserTurn.compareDocumentPosition(resp) & Node.DOCUMENT_POSITION_FOLLOWING) !== 0;
-          if (!isFollowing) continue;
-
-          const textCanonical = canonicalPromptText(extractResponseText(resp));
-          if (textCanonical && baselineResponseFingerprints.has(textCanonical)) continue;
-
-          return resp;
+        for (const cand of valid) {
+          if ((currentUserTurn.compareDocumentPosition(cand.turnNode) & Node.DOCUMENT_POSITION_FOLLOWING) !== 0) {
+            return cand.turnNode;
+          }
         }
       }
 
-      // Strategy 2: If user turn not yet bound, search from the latest novel response in reverse order
-      for (let i = currentResponses.length - 1; i >= 0; i--) {
-        const resp = currentResponses[i];
-        if (!resp || !resp.isConnected) continue;
-        if (initialResponseSet.has(resp)) continue;
-
-        const textCanonical = canonicalPromptText(extractResponseText(resp));
-        if (textCanonical && baselineResponseFingerprints.has(textCanonical)) continue;
-
-        return resp;
+      // Strategy 2: If user turn not yet bound or no following candidate, adopt latest valid candidate
+      if (valid.length > 0) {
+        return valid[valid.length - 1].turnNode;
       }
 
       return null;
     }
 
-    // Verify send confirmation for up to 12 seconds
+    // Verify send confirmation structurally (up to 12s, then 1 retry up to 8s)
     let confirmed = false;
+    let userTurnConfirmedLogged = false;
     const checkDeadline = Date.now() + 12000;
 
     while (Date.now() < checkDeadline) {
       if (isStopped || execState.cancelled) return { status: 'failed', text: '', error: 'cancelled' };
 
-      const candidate = findTurnResponseCandidate();
-      if (candidate) {
+      // 1st Priority: New user turn with prompt correlation confirmed
+      const newQuery = findNewUserQuery();
+      if (newQuery) {
+        currentUserTurn = newQuery;
         confirmed = true;
-        bindResponseNode(candidate, 'send_phase');
+        if (!userTurnConfirmedLogged) {
+          userTurnConfirmedLogged = true;
+          const uInv = getUserInventory();
+          console.log('[GEMINI][USER_TURN_CONFIRMED]', JSON.stringify({
+            rid: command.requestId,
+            userUniqueTurns: uInv.userUniqueTurns
+          }));
+          emitEvent('USER_TURN_CONFIRMED', {
+            userUniqueTurns: uInv.userUniqueTurns
+          });
+        }
+        const candidate = findTurnResponseCandidate();
+        if (candidate) {
+          bindResponseNode(candidate, 'send_phase_user_correlated');
+          break;
+        }
+      }
+
+      // 2nd Priority (fallback): STRICTLY ONLY when freshChatVerified is true AND baseline model turns = 0
+      if (!confirmed && freshChatVerified && initialResponseSet.size === 0) {
+        const candidate = findTurnResponseCandidate();
+        if (candidate) {
+          confirmed = true;
+          bindResponseNode(candidate, 'send_phase_fresh_fallback');
+          break;
+        }
+      }
+
+      if (confirmed && currentUserTurn) {
         break;
       }
-      if (currentUserTurn || (userQueryNodes().length > initialUserQueries.length) || generationActive()) {
-        confirmed = true;
-        break;
-      }
+
       await new Promise(r => setTimeout(r, 150));
     }
 
-    // 2nd Send Attempt if not confirmed after 12s (wait another 8s)
+    // 2nd Send Attempt if not structurally confirmed after 12s
     if (!confirmed) {
       if (!target || !target.isConnected) target = editor();
       const retryCtrl = findSendControl(target);
+      let retryDispatched = false;
       if (retryCtrl?.button && !retryCtrl.button.disabled && retryCtrl.button.getAttribute('aria-disabled') !== 'true') {
         selectedBtn = retryCtrl.button;
         retryCtrl.button.click();
+        retryDispatched = true;
       }
       if (target && target.isConnected) {
         target.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', code: 'Enter', keyCode: 13, which: 13, bubbles: true }));
+        retryDispatched = true;
       }
 
       const retryDeadline = Date.now() + 8000;
       while (Date.now() < retryDeadline) {
         if (isStopped || execState.cancelled) return { status: 'failed', text: '', error: 'cancelled' };
 
-        const candidate = findTurnResponseCandidate();
-        if (candidate) {
+        // 1st Priority: New user turn with prompt correlation confirmed
+        const newQuery = findNewUserQuery();
+        if (newQuery) {
+          currentUserTurn = newQuery;
           confirmed = true;
-          bindResponseNode(candidate, 'send_phase_retry');
+          if (!userTurnConfirmedLogged) {
+            userTurnConfirmedLogged = true;
+            const uInv = getUserInventory();
+            console.log('[GEMINI][USER_TURN_CONFIRMED]', JSON.stringify({
+              rid: command.requestId,
+              userUniqueTurns: uInv.userUniqueTurns
+            }));
+            emitEvent('USER_TURN_CONFIRMED', {
+              userUniqueTurns: uInv.userUniqueTurns
+            });
+          }
+          const candidate = findTurnResponseCandidate();
+          if (candidate) {
+            bindResponseNode(candidate, 'send_phase_retry_user_correlated');
+            break;
+          }
+        }
+
+        // 2nd Priority (fallback): STRICTLY ONLY when freshChatVerified is true AND baseline model turns = 0
+        if (!confirmed && freshChatVerified && initialResponseSet.size === 0) {
+          const candidate = findTurnResponseCandidate();
+          if (candidate) {
+            confirmed = true;
+            bindResponseNode(candidate, 'send_phase_retry_fresh_fallback');
+            break;
+          }
+        }
+
+        if (confirmed && currentUserTurn) {
           break;
         }
-        if (currentUserTurn || (userQueryNodes().length > initialUserQueries.length) || generationActive()) {
-          confirmed = true;
-          break;
-        }
+
         await new Promise(r => setTimeout(r, 150));
       }
     }
@@ -664,50 +961,57 @@
     });
 
     if (!confirmed) {
-      return { status: 'failed', text: '', error: 'send_not_confirmed' };
+      const failReason = selectedBtn ? 'user_turn_not_created' : 'send_not_confirmed';
+      return { status: 'failed', text: '', error: failReason };
     }
 
-    const deadline = (execState.deadlineAt && execState.deadlineAt > 1000000000)
-      ? execState.deadlineAt * 1000
-      : (execState.deadlineAt || (Date.now() + 60000));
-    let lastMutationAt = Date.now();
+    const deadlineAtMs = execState.deadlineAtMs;
+    let lastMutationAtMs = Date.now();
     let previous = '';
 
     function checkResponseRecovery() {
-      if (freshChatVerified && (Date.now() - execState.startedAt >= 5000) && confirmed && !targetResponseNode) {
-        const visibleResponses = responseNodes().filter(n => extractResponseText(n).length > 0);
-        if (visibleResponses.length > 0) {
-          const candidate = visibleResponses[visibleResponses.length - 1];
+      if (freshChatVerified && (Date.now() - execState.startedAtMs >= 5000) && confirmed && !targetResponseNode) {
+        const candidate = findTurnResponseCandidate();
+        if (candidate) {
           bindResponseNode(candidate, 'fresh_chat_latest_visible');
-          console.log('[GEMINI][RESPONSE_RECOVERY_BIND]', JSON.stringify({
-            rid: command.requestId,
-            responseCount: visibleResponses.length,
-            textLength: extractResponseText(candidate).length,
-            reason: 'fresh_chat_latest_visible'
-          }));
           return candidate;
         }
       }
       return null;
     }
 
-    let lastDiagReportAt = 0;
+    let lastDiagReportAtMs = 0;
     function reportWaitDiag(reason = 'periodic') {
-      const now = Date.now();
-      if (reason === 'periodic' && now - lastDiagReportAt < 4800) return;
-      lastDiagReportAt = now;
+      const nowMs = Date.now();
+      if (reason === 'periodic' && nowMs - lastDiagReportAtMs < 4800) return;
+      lastDiagReportAtMs = nowMs;
       const curText = targetResponseNode ? extractResponseText(targetResponseNode) : '';
+      const candDiag = getCandidateInventory(initialResponseSet, baselineResponseFingerprints, currentUserTurn);
+      const userDiag = getUserInventory();
+
+      if (targetResponseNode && candDiag.visibleTextCandidates === 0) {
+        console.error('[GEMINI][INVARIANT_VIOLATION] targetResponseNode bound but visibleTextCandidates=0');
+      }
+      if (confirmed && userDiag.userUniqueTurns === 0 && candDiag.responseUniqueTurns === 0) {
+        console.error('[GEMINI][INVARIANT_VIOLATION] sendConfirmed=true but userUniqueTurns=0 and responseUniqueTurns=0');
+      }
+
       const diag = {
         rid: command.requestId,
-        elapsedMs: now - execState.startedAt,
+        elapsedMs: nowMs - execState.startedAtMs,
         freshChatVerified: Boolean(freshChatVerified),
+        tabId: command.tabId || null,
+        contentInstanceId: INSTANCE_ID,
+        conversationEpoch: conversationEpoch,
         sendConfirmed: Boolean(confirmed),
-        userQueryCount: userQueryNodes().length,
-        responseSelectorCount: document.querySelectorAll(RESPONSE_SELECTORS).length,
-        visibleResponseCount: responseNodes().length,
+        userSelectorMatches: userDiag.userSelectorMatches,
+        userUniqueTurns: userDiag.userUniqueTurns,
+        responseSelectorMatches: candDiag.responseSelectorMatches,
+        responseUniqueTurns: candDiag.responseUniqueTurns,
+        visibleTextCandidates: candDiag.visibleTextCandidates,
         responseBound: Boolean(targetResponseNode),
         responseTextLength: curText.length,
-        lastMutationAgeMs: targetResponseNode ? (now - lastMutationAt) : 0,
+        lastMutationAgeMs: targetResponseNode ? (nowMs - lastMutationAtMs) : 0,
         generationEvidence: detectGenerationEvidence(targetResponseNode),
         runtimeBuild: runtimeContract.runtimeBuild
       };
@@ -722,7 +1026,11 @@
 
       const cleanupObserver = () => {
         try { observer.disconnect(); } catch (_) {}
-        if (checkTimer) clearInterval(checkTimer);
+        if (checkTimer) {
+          clearInterval(checkTimer);
+        }
+        if (execState.observer === observer) execState.observer = null;
+        if (execState.timer === checkTimer) execState.timer = null;
       };
 
       const finish = (res) => {
@@ -738,12 +1046,24 @@
       const checkOutput = () => {
         if (isStopped) return finish({ status: 'failed', text: '', error: 'runtime_stopped' });
         if (execState.cancelled) return finish({ status: 'failed', text: '', error: 'cancelled' });
-        if (Date.now() > deadline) {
+        const nowMs = Date.now();
+        if (nowMs > deadlineAtMs) {
           reportWaitDiag('timeout');
-          return finish({ status: 'timeout', text: '', error: 'command_deadline_exceeded' });
+          const hasText = targetResponseNode && extractResponseText(targetResponseNode).length > 0;
+          const timeoutErr = hasText ? 'response_stalled' : (targetResponseNode ? 'response_stream_no_text' : 'response_turn_not_found');
+          return finish({ status: 'timeout', text: '', error: timeoutErr });
         }
 
         reportWaitDiag('periodic');
+
+        // Check invariant: response selector matches > 0, visible = 0, but bound = true!
+        if (targetResponseNode) {
+          const inv = getCandidateInventory(initialResponseSet, baselineResponseFingerprints, currentUserTurn);
+          if (inv.visibleTextCandidates === 0) {
+            console.error('[GEMINI][INVARIANT_VIOLATION] bound=true but visibleTextCandidates=0');
+            return finish({ status: 'failed', text: '', error: 'response_binding_invariant_violation' });
+          }
+        }
 
         if (!targetResponseNode || !targetResponseNode.isConnected) {
           const candidate = findTurnResponseCandidate() || checkResponseRecovery();
@@ -755,7 +1075,42 @@
         if (!targetResponseNode) return;
 
         const current = extractResponseText(targetResponseNode);
-        if (!current) return;
+
+        // Zero-length handling: differentiate empty-node misbinding vs legitimate thinking grace
+        if (!current || current.length === 0) {
+          if (!boundAtMs) boundAtMs = Date.now();
+          const zeroLenDuration = Date.now() - boundAtMs;
+          const localEvidence = detectGenerationEvidence(targetResponseNode);
+          const hasStreamingEvidence = (localEvidence === 'local_streaming' || localEvidence === 'composer_stop_button');
+
+          if (hasStreamingEvidence) {
+            // Legitimate thinking/streaming grace: allow up to 15,000ms for first token
+            if (zeroLenDuration >= 15000) {
+              return finish({ status: 'failed', text: '', error: 'response_stream_no_text' });
+            }
+          } else {
+            // No streaming evidence: empty/dead node misbinding after 3,500ms -> discard & re-resolve 1 time
+            if (zeroLenDuration >= 3500) {
+              if (!reResolveAttempted) {
+                reResolveAttempted = true;
+                console.warn('[GEMINI][RE_RESOLVE] responseBound textLen=0 without streaming evidence for 3.5s -> discarding binding and re-resolving 1회');
+                targetResponseNode = null;
+                boundAtMs = 0;
+                const reCandidate = findTurnResponseCandidate();
+                if (reCandidate) {
+                  bindResponseNode(reCandidate, 're_resolve_after_stalled_zero_len');
+                } else {
+                  return finish({ status: 'failed', text: '', error: 'response_text_target_not_found' });
+                }
+                return;
+              } else {
+                // 1회 re-resolve 후에도 여전히 textLen=0 and no streaming evidence
+                return finish({ status: 'failed', text: '', error: 'response_stream_no_text' });
+              }
+            }
+          }
+          return;
+        }
 
         // CRITICAL GUARD: Never accept text identical to any baseline response
         const currentCanonical = canonicalPromptText(current);
@@ -764,20 +1119,56 @@
           return;
         }
 
+        // Text is non-empty!
+        if (!textNonEmptyLogged) {
+          textNonEmptyLogged = true;
+          console.log('[GEMINI][TEXT_NONEMPTY]', JSON.stringify({
+            rid: command.requestId,
+            chars: current.length
+          }));
+          emitEvent('TEXT_NONEMPTY', {
+            chars: current.length
+          });
+        }
+
         if (current !== previous) {
           previous = current;
-          lastMutationAt = Date.now();
-        } else if (current.length > 0) {
-          const mutationAge = Date.now() - lastMutationAt;
-          const localStreaming = Boolean(targetResponseNode.querySelector('.loading-dots, .streaming, [aria-busy="true"]'));
-          const composerStop = Boolean(findComposer(editor())?.querySelector('[aria-label*="중지"], [aria-label*="Stop"]'));
+          lastMutationAtMs = Date.now();
+        } else {
+          const mutationAge = Date.now() - lastMutationAtMs;
+          const localEvidence = detectGenerationEvidence(targetResponseNode);
+          const isGenerating = (localEvidence === 'local_streaming' || localEvidence === 'composer_stop_button');
 
           // Authoritative completion: text is stable for >= 1800ms and no local streaming / composer stop button
-          if (mutationAge >= 1800 && !localStreaming && !composerStop) {
+          if (mutationAge >= 1800 && !isGenerating) {
+            if (!textStableLogged) {
+              textStableLogged = true;
+              console.log('[GEMINI][TEXT_STABLE]', JSON.stringify({
+                rid: command.requestId,
+                chars: current.length,
+                stableMs: mutationAge
+              }));
+              emitEvent('TEXT_STABLE', {
+                chars: current.length,
+                stableMs: mutationAge
+              });
+            }
             return finish({ status: 'completed', text: current, error: '' });
           }
-          // Fallback completion: text has been stable for >= 2500ms regardless of any external indicators
+          // Fallback completion: text has been stable for >= 2500ms regardless of external indicators
           if (mutationAge >= 2500) {
+            if (!textStableLogged) {
+              textStableLogged = true;
+              console.log('[GEMINI][TEXT_STABLE]', JSON.stringify({
+                rid: command.requestId,
+                chars: current.length,
+                stableMs: mutationAge
+              }));
+              emitEvent('TEXT_STABLE', {
+                chars: current.length,
+                stableMs: mutationAge
+              });
+            }
             return finish({ status: 'completed', text: current, error: '' });
           }
         }
@@ -798,7 +1189,7 @@
   async function execute(command) {
     if (isStopped) return { status: 'failed', text: '', error: 'runtime_stopped' };
     if (activeExecution) {
-      if (Date.now() > activeExecution.deadlineAt) {
+      if (Date.now() > activeExecution.deadlineAtMs) {
         cancelExecution(activeExecution.requestId, 'command_deadline_exceeded');
       } else {
         return { status: 'busy', text: '', error: 'runtime_busy' };
@@ -806,14 +1197,20 @@
     }
 
     const currentReqId = command?.requestId || Math.random().toString(36).slice(2, 10);
-    const deadlineMs = (typeof command?.deadlineAt === 'number' && command.deadlineAt > 1000000000)
-      ? command.deadlineAt * 1000
-      : (Date.now() + 70000);
+    // Standardize external time to milliseconds once upon receiving, never reconvert inside
+    let deadlineAtMs;
+    if (typeof command?.deadlineAtMs === 'number' && command.deadlineAtMs > 0) {
+      deadlineAtMs = command.deadlineAtMs;
+    } else if (typeof command?.deadlineAt === 'number' && command.deadlineAt > 0) {
+      deadlineAtMs = command.deadlineAt < 1e11 ? Math.round(command.deadlineAt * 1000) : Math.round(command.deadlineAt);
+    } else {
+      deadlineAtMs = Date.now() + 55000;
+    }
 
     const execState = {
       requestId: currentReqId,
-      startedAt: Date.now(),
-      deadlineAt: deadlineMs,
+      startedAtMs: Date.now(),
+      deadlineAtMs: deadlineAtMs,
       cancelled: false,
       observer: null,
       timer: null,
@@ -827,7 +1224,10 @@
     } finally {
       if (activeExecution?.requestId === currentReqId) {
         try { activeExecution.observer?.disconnect(); } catch (_) {}
-        if (activeExecution.timer) clearInterval(activeExecution.timer);
+        if (activeExecution.timer) {
+          clearInterval(activeExecution.timer);
+          activeExecution.timer = null;
+        }
         activeExecution = null;
       }
     }
@@ -848,8 +1248,10 @@
         url: location.href,
         title: document.title,
         busyRequestId: activeExecution?.requestId || null,
-        busySince: activeExecution?.startedAt || null,
-        busyDeadlineAt: activeExecution?.deadlineAt || null
+        busySince: activeExecution?.startedAtMs || null,
+        busyDeadlineAt: activeExecution?.deadlineAtMs || null,
+        busySinceMs: activeExecution?.startedAtMs || null,
+        busyDeadlineAtMs: activeExecution?.deadlineAtMs || null
       });
       return true;
     }
@@ -861,21 +1263,32 @@
     }
 
     if (message.type === 'NFA_CHECK_FRESH_CHAT') {
-      const userQueries = userQueryNodes();
-      const responses = responseNodes();
+      const userDiag = getUserInventory();
+      const candDiag = getCandidateInventory();
       const ed = editor();
-      const isFresh = userQueries.length === 0 && responses.length === 0 && Boolean(ed);
+      const isFresh = userDiag.visibleUserNodes.length === 0 && candDiag.visibleTextCandidates === 0 && Boolean(ed);
       sendResponse({
         ok: true,
         fresh: isFresh,
-        userQueryCount: userQueries.length,
-        responseCount: responses.length,
+        contentInstanceId: INSTANCE_ID,
+        conversationEpoch: conversationEpoch,
+        userQueryCount: userDiag.visibleUserNodes.length,
+        userSelectorMatches: userDiag.userSelectorMatches,
+        userUniqueTurns: userDiag.userUniqueTurns,
+        selector_matches: candDiag.responseSelectorMatches,
+        visible_candidates: candDiag.visibleTextCandidates,
+        responseSelectorMatches: candDiag.responseSelectorMatches,
+        responseUniqueTurns: candDiag.responseUniqueTurns,
+        visibleTextCandidates: candDiag.visibleTextCandidates,
+        bound_response: Boolean(activeExecution && activeExecution.targetResponseNode),
+        responseCount: candDiag.visibleTextCandidates,
         composerAvailable: Boolean(ed)
       });
       return true;
     }
 
     if (message.type === 'NFA_RESET_FRESH_CHAT') {
+      conversationEpoch++;
       const newChatSelectors = [
         'a[href="/app"]',
         'button[aria-label*="새 대화"]',
@@ -892,7 +1305,7 @@
           break;
         }
       }
-      sendResponse({ ok: true, clicked });
+      sendResponse({ ok: true, clicked, conversationEpoch, contentInstanceId: INSTANCE_ID });
       return true;
     }
 
