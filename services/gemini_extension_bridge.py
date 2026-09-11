@@ -548,6 +548,8 @@ class GeminiExtensionBridge:
     def submit_result(self, result: GeminiResult) -> tuple[bool, str]:
         with self._condition:
             command = self._command
+            if result.request_id in self._cancel_requests:
+                return False, "request_cancelled"
             if not command:
                 cached_res = self._results.get(result.request_id)
                 if cached_res and cached_res.post_key == result.post_key:

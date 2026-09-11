@@ -314,6 +314,8 @@ class PostProcessor:
         self._context_retry_done = False
         self._food_retry_done = False
         self._draft_rewrite_done = False
+        self._contamination_retry_done = False
+        self._food_anchor_retry_done = False
         # TargetPostGuard: 대상 글 일치 여부 확인 (Fail-Open 원천 차단)
         TargetPostGuard.verify(detail_page, post)
 
@@ -599,6 +601,7 @@ class PostProcessor:
                     draft_source_label = ""
                     detected_category = "UNKNOWN"
                     local_res = None
+                    food_anchor_fail_closed = False
 
                     # [Tier 1] Gemini 자동 댓글 생성
                     gemini_answer = None
@@ -750,9 +753,48 @@ class PostProcessor:
                                             extension_result.text,
                                             expected_request_id=request_id,
                                         )
-                                        if gemini_answer:
-                                            from services.comments.community_rhythm import FinalQualityGate, CommentDraftInspector
+                                        from services.comments.community_rhythm import (
+                                            ResponseContaminationGate,
+                                            FinalQualityGate,
+                                            CommentDraftInspector,
+                                        )
 
+                                        # P0-3: Response Contamination Gate
+                                        contam_check = ResponseContaminationGate.validate(extension_result.text or "")
+                                        if not contam_check.is_contaminated and gemini_answer:
+                                            contam_check = ResponseContaminationGate.validate(gemini_answer)
+
+                                        if contam_check.is_contaminated:
+                                            logger.log(
+                                                f"❌ [GEMINI/EXTENSION] UI 상태/생각 오염 텍스트 감지: "
+                                                f"[{contam_check.code}] pattern={contam_check.matched_pattern!r} reason={contam_check.reason}",
+                                                "ERROR",
+                                            )
+                                            if not getattr(self, "_contamination_retry_done", False) and gen_ctx.attempt_count < gen_ctx.max_attempts:
+                                                self._contamination_retry_done = True
+                                                logger.log("⚠️ [GEMINI/EXTENSION] UI 오염으로 인해 1회 재생성을 시도합니다.", "WARNING")
+                                                if (self.stop_event and self.stop_event.is_set()) or (self.skip_event and self.skip_event.is_set()):
+                                                    if self.stop_event and self.stop_event.is_set():
+                                                        raise StopRequestedException("User stopped before Gemini retry")
+                                                    result.comment_result = CommentProcessResult(status=CommentSubmitState.SKIPPED, error="user_skipped")
+                                                    if self.state_mgr:
+                                                        self.state_mgr.update(new_state=FeedState.SKIPPING, inc_skip=True)
+                                                    return result
+                                                request_id = uuid.uuid4().hex
+                                                ai_prompt = gen_ctx.build_prompt(request_id=request_id)
+                                                gemini_answer = None
+                                                continue
+                                            else:
+                                                logger.log("❌ [GEMINI/EXTENSION] UI 오염 재생성 후에도 오염 지속 -> fail-closed 스킵 처리", "ERROR")
+                                                result.comment_result = CommentProcessResult(
+                                                    status=CommentSubmitState.SKIPPED if self.config.get("skip_on_comment_failure", True) else CommentSubmitState.FAILED,
+                                                    error="response_ui_contamination",
+                                                )
+                                                if self.state_mgr:
+                                                    self.state_mgr.update(new_state=FeedState.SKIPPING, inc_skip=True)
+                                                return result
+
+                                        if gemini_answer:
                                             # Step 0: 5단계 초안 검사 (사람 말투, 사실성 검사, 중복 마무리, 설명조 등)
                                             inspection = CommentDraftInspector.inspect(
                                                 gemini_answer,
@@ -832,6 +874,34 @@ class PostProcessor:
 
                                                     if content_focus != "GENERAL":
                                                         logger.log(f"[FOOD_COMMENT] focus={content_focus} selected_anchor={selected_anchor}")
+
+                                                    # P0-4: Food/Cafe anchor fail-closed check
+                                                    is_food_or_cafe = content_focus in ("FOOD_RESTAURANT", "FOOD_PRODUCT", "CAFE")
+                                                    if is_food_or_cafe and gen_ctx.verified_anchors and selected_anchor == "none":
+                                                        if not getattr(self, "_food_anchor_retry_done", False) and gen_ctx.attempt_count < gen_ctx.max_attempts:
+                                                            self._food_anchor_retry_done = True
+                                                            logger.log("⚠️ [FOOD_COMMENT] 맛집/카페 글에 검증 앵커가 누락되어 1회 재생성을 시도합니다 (anchor_missing)", "WARNING")
+                                                            if (self.stop_event and self.stop_event.is_set()) or (self.skip_event and self.skip_event.is_set()):
+                                                                if self.stop_event and self.stop_event.is_set():
+                                                                    raise StopRequestedException("User stopped before Gemini retry")
+                                                                result.comment_result = CommentProcessResult(status=CommentSubmitState.SKIPPED, error="user_skipped")
+                                                                if self.state_mgr:
+                                                                    self.state_mgr.update(new_state=FeedState.SKIPPING, inc_skip=True)
+                                                                return result
+                                                            request_id = uuid.uuid4().hex
+                                                            anchors_hint = ", ".join(gen_ctx.verified_anchors[:3])
+                                                            ai_prompt = gen_ctx.build_prompt(
+                                                                rewrite_feedback=f"본문에 언급된 핵심 메뉴/음식({anchors_hint}) 중 하나를 자연스럽게 포함해 주세요.",
+                                                                request_id=request_id,
+                                                            )
+                                                            gemini_answer = None
+                                                            continue
+                                                        else:
+                                                            food_anchor_fail_closed = True
+                                                            logger.log(
+                                                                "⚠️ [FOOD_COMMENT] 앵커 누락 재시도 후에도 selected_anchor=none -> fail-closed (자동등록 해제)",
+                                                                "WARNING",
+                                                            )
 
                                                     # Check if food anchors were available but Gemini only commented on secondary place anchors
                                                     if (
@@ -987,6 +1057,18 @@ class PostProcessor:
                         return result
 
                     # 에디터 주입 전 Gate 재검증
+                    from services.comments.community_rhythm import ResponseContaminationGate
+                    contam_pre_gate = ResponseContaminationGate.validate(draft_text)
+                    if contam_pre_gate.is_contaminated:
+                        logger.log(f"  ❌ [COMMENT] 에디터 주입 전 UI 오염 차단: [{contam_pre_gate.code}] {contam_pre_gate.reason}", "ERROR")
+                        result.comment_result = CommentProcessResult(status=CommentSubmitState.FAILED, error=contam_pre_gate.code)
+                        if self.config.get("skip_on_comment_failure", True):
+                            logger.log("  ⏭️ [COMMENT] UI 오염 초안 주입 차단 -> 다음 글로 건너뜁니다.")
+                            result.comment_result.status = CommentSubmitState.SKIPPED
+                            if self.state_mgr:
+                                self.state_mgr.update(new_state=FeedState.SKIPPING, inc_skip=True)
+                        return result
+
                     pre_inject_gate = FinalQualityGate.validate_final_text(draft_text, preset=preset, source="editor_injection")
                     if not pre_inject_gate.valid:
                         logger.log(f"  ❌ [COMMENT] 에디터 주입 전 품질 게이트 실패: [{pre_inject_gate.code}] {pre_inject_gate.reason}", "ERROR")
@@ -1020,7 +1102,6 @@ class PostProcessor:
                                     logger.log("  🔒 [COMMENT] 비밀댓글 설정 완료")
                                 except Exception:
                                     pass
-
                         CommentInteractionService.install_keyboard_listener(detail_page, post_key=post.key)
                         CommentEditorAdapter.focus(detail_page)
 
@@ -1028,11 +1109,15 @@ class PostProcessor:
 
                         auto_submit_timeout = None
                         if self.auto_comment_submit_enabled:
-                            auto_submit_timeout = random.uniform(
-                                min(self.auto_comment_delay_min, self.auto_comment_delay_max),
-                                max(self.auto_comment_delay_min, self.auto_comment_delay_max)
-                            )
-                            msg = f"댓글 자동 등록 대기 중 ({draft_source_label} 입력됨 / {auto_submit_timeout:.1f}초 후 자동 등록 / Esc=건너뛰기)"
+                            if food_anchor_fail_closed:
+                                logger.log("  ✍️ [COMMENT][AUTO_SUBMIT_DISARMED] reason=food_anchor_missing_fail_closed (verified anchors exist but selected_anchor=none)", "WARNING")
+                                msg = f"댓글 확인 대기 중 ({draft_source_label} 입력됨 / 음식 앵커 미확인으로 자동 등록 해제 / Enter=등록 / Esc=건너뛰기)"
+                            else:
+                                auto_submit_timeout = random.uniform(
+                                    min(self.auto_comment_delay_min, self.auto_comment_delay_max),
+                                    max(self.auto_comment_delay_min, self.auto_comment_delay_max)
+                                )
+                                msg = f"댓글 자동 등록 대기 중 ({draft_source_label} 입력됨 / {auto_submit_timeout:.1f}초 후 자동 등록 / Esc=건너뛰기)"
                         else:
                             msg = f"댓글 확인 대기 중 ({draft_source_label} 입력됨 / 수정 후 Enter=등록 / Esc=건너뛰기)"
 
@@ -1086,6 +1171,17 @@ class PostProcessor:
                                 )
 
                                 # 등록 직전 최종 read-back 텍스트 Gate 검증 (사용자 직접 수정본은 AI 문체 강제 면제)
+                                from services.comments.community_rhythm import ResponseContaminationGate
+                                contam_sub_gate = ResponseContaminationGate.validate(submitted_cand)
+                                if contam_sub_gate.is_contaminated:
+                                    logger.log(f"  ❌ [COMMENT] 등록 직전 댓글 UI 오염 통과 실패: [{contam_sub_gate.code}] {contam_sub_gate.reason} - 등록 보류", "WARNING")
+                                    CommentInteractionService.release_submit_lock(detail_page, source=origin.value)
+                                    auto_submit_timeout = None
+                                    msg = f"댓글 UI 오염({contam_sub_gate.code}) / 수정 후 Enter=등록 / Esc=건너뛰기"
+                                    if self.state_mgr:
+                                        self.state_mgr.update(new_state=FeedState.WAITING_USER, message=msg)
+                                    continue
+
                                 final_gate = FinalQualityGate.validate_final_text(submitted_cand, preset=preset, source=sub_source)
                                 if not final_gate.valid:
                                     logger.log(f"  ❌ [COMMENT] 등록 직전 댓글 품질 게이트 통과 실패: [{final_gate.code}] {final_gate.reason} (매칭: {final_gate.matched}) - 등록 보류", "WARNING")

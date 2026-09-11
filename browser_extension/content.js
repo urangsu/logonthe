@@ -41,7 +41,7 @@
   ].join(', ');
   let runtimeContract = {
     extensionVersion: '13.2.3',
-    runtimeBuild: '13.2.3-r9',
+    runtimeBuild: '13.2.3-r10',
     protocolVersion: 3,
     bridgeSchemaVersion: 2
   };
@@ -64,11 +64,22 @@
 
   // Active execution state machine with lifecycle resolve / finish support
   let activeExecution = null;
+  const cancelledRequestIds = new Set();
 
   function cancelExecution(reqId, reason = 'cancelled') {
+    if (reqId) {
+      cancelledRequestIds.add(reqId);
+      if (cancelledRequestIds.size > 100) {
+        const oldest = cancelledRequestIds.values().next().value;
+        cancelledRequestIds.delete(oldest);
+      }
+    }
     if (!activeExecution) return false;
     if (!reqId || activeExecution.requestId === reqId) {
       activeExecution.cancelled = true;
+      if (activeExecution.requestId) {
+        cancelledRequestIds.add(activeExecution.requestId);
+      }
       try { activeExecution.observer?.disconnect(); } catch (_) {}
       if (activeExecution.timer) {
         clearInterval(activeExecution.timer);
@@ -408,84 +419,182 @@
     return el.closest('model-response, div[data-message-author-role="model"], div.model-response, [data-test-id="model-response"]') || el;
   }
 
+  const EXCLUDED_STATUS_SELECTORS = [
+    'button',
+    '[role="button"]',
+    '[role="status"]',
+    '[role="progressbar"]',
+    '[aria-live]',
+    '.thinking',
+    '.thought-container',
+    '.thinking-container',
+    '.status-container',
+    '.status-indicator',
+    'header',
+    '.response-header',
+    '.model-response-header',
+    '.toolbar',
+    '.actions',
+    '.response-actions',
+    'mat-progress-bar',
+    '[data-test-id*="status"]',
+    '[data-test-id*="thought"]',
+    '[data-test-id*="thinking"]',
+    '[data-test-id*="header"]',
+    '.loading-dots',
+    '.streaming'
+  ].join(', ');
+
+  const CONTAMINATION_PATTERNS = [
+    /Initiating the Analysis/i,
+    /Gemini의\s*응답/i,
+    /Gemini\s*response/i,
+    /Thinking\.\.\./i,
+    /Analyzing\.\.\./i,
+    /생각\s*중/i,
+    /분석\s*중/i,
+    /Show\s*thinking/i,
+    /Hide\s*thinking/i,
+    /생각\s*과정/i,
+    /View\s*other\s*drafts/i,
+    /다른\s*답안\s*보기/i
+  ];
+
+  function isExcludedNode(el) {
+    if (!el || typeof el.matches !== 'function') return false;
+    try {
+      if (el.matches(EXCLUDED_STATUS_SELECTORS)) return true;
+      if (typeof el.closest === 'function' && el.closest(EXCLUDED_STATUS_SELECTORS)) return true;
+    } catch (_) {}
+    return false;
+  }
+
+  function extractCleanText(node) {
+    if (!node || !node.isConnected) return '';
+    if (node.nodeType === 1 && isExcludedNode(node)) {
+      return '';
+    }
+
+    let text = '';
+    if (typeof document !== 'undefined' && typeof document.createTreeWalker === 'function' && typeof NodeFilter !== 'undefined') {
+      const walker = document.createTreeWalker(
+        node,
+        NodeFilter.SHOW_ELEMENT | NodeFilter.SHOW_TEXT,
+        {
+          acceptNode(n) {
+            if (n.nodeType === 1) {
+              if (isExcludedNode(n)) {
+                return NodeFilter.FILTER_REJECT;
+              }
+              return NodeFilter.FILTER_SKIP;
+            }
+            if (n.nodeType === 3) {
+              if (n.parentElement && isExcludedNode(n.parentElement)) {
+                return NodeFilter.FILTER_REJECT;
+              }
+              return NodeFilter.FILTER_ACCEPT;
+            }
+            return NodeFilter.FILTER_SKIP;
+          }
+        }
+      );
+
+      let curr;
+      while ((curr = walker.nextNode())) {
+        text += curr.textContent || '';
+      }
+    } else {
+      try {
+        if (typeof node.cloneNode === 'function') {
+          const clone = node.cloneNode(true);
+          const excludedElements = clone.querySelectorAll ? clone.querySelectorAll(EXCLUDED_STATUS_SELECTORS) : [];
+          for (const el of excludedElements) {
+            el.remove();
+          }
+          text = clone.innerText || clone.textContent || '';
+        } else {
+          text = node.innerText || node.textContent || '';
+        }
+      } catch (_) {
+        text = node.innerText || node.textContent || '';
+      }
+    }
+
+    const cleaned = text.trim();
+    if (!cleaned) return '';
+
+    for (const pat of CONTAMINATION_PATTERNS) {
+      if (pat.test(cleaned)) {
+        const stripped = cleaned.replace(pat, '').trim();
+        if (stripped.length === 0 || stripped.length < 10) {
+          return '';
+        }
+      }
+    }
+
+    return cleaned;
+  }
+
   function resolveTurnCandidate(turnNode) {
     if (!turnNode || !turnNode.isConnected) return null;
 
-    const textSelectors = [
+    const bodySelectors = [
       'message-content',
       'div.markdown',
       'div.model-response-text',
       '.response-body-inner',
-      '.response-container-content',
-      'p'
+      '.response-container-content'
     ];
-    let resolvedTextNode = null;
-    let resolvedText = '';
-    let isCandidateVisible = false;
 
-    for (const sel of textSelectors) {
-      const list = turnNode.querySelectorAll(sel);
-      for (const el of list) {
+    let answerBodyNode = null;
+    for (const sel of bodySelectors) {
+      const candidates = turnNode.querySelectorAll(sel);
+      for (const el of candidates) {
         if (!el || !el.isConnected) continue;
+        if (isExcludedNode(el)) continue;
         const st = window.getComputedStyle(el);
         if (st.visibility === 'hidden' || st.display === 'none') continue;
-
-        const txt = (el.innerText || el.textContent || '').trim();
-        const rect = el.getBoundingClientRect();
-        let hasVisibleDimensions = (rect.width > 5 && rect.height > 5);
-        if (!hasVisibleDimensions) {
-          try {
-            const range = document.createRange();
-            range.selectNodeContents(el);
-            const r = range.getBoundingClientRect();
-            if (r.width > 5 && r.height > 5) hasVisibleDimensions = true;
-          } catch (_) {}
-        }
-
-        if (hasVisibleDimensions || txt.length > 0) {
-          resolvedTextNode = el;
-          resolvedText = txt;
-          isCandidateVisible = hasVisibleDimensions || (txt.length > 0 && st.visibility !== 'hidden');
-          break;
-        }
+        answerBodyNode = el;
+        break;
       }
-      if (resolvedTextNode) break;
+      if (answerBodyNode) break;
     }
 
-    if (!resolvedTextNode) {
-      resolvedTextNode = turnNode;
-      resolvedText = (turnNode.innerText || turnNode.textContent || '').trim();
-      const tStyle = window.getComputedStyle(turnNode);
-      if (tStyle.visibility !== 'hidden' && tStyle.display !== 'none') {
-        const rect = turnNode.getBoundingClientRect();
-        if (rect.width > 5 && rect.height > 5) {
-          isCandidateVisible = true;
-        } else {
-          try {
-            const range = document.createRange();
-            range.selectNodeContents(turnNode);
-            const r = range.getBoundingClientRect();
-            if (r.width > 5 && r.height > 5) isCandidateVisible = true;
-          } catch (_) {}
-        }
+    const statusNodes = [...turnNode.querySelectorAll(EXCLUDED_STATUS_SELECTORS)];
+    const streamingNode = turnNode.querySelector('.loading-dots, .streaming, [aria-busy="true"], mat-progress-bar, [data-is-generating="true"]');
+
+    const targetTextNode = answerBodyNode || turnNode;
+    const cleanText = extractCleanText(targetTextNode);
+
+    let isCandidateVisible = false;
+    const tStyle = window.getComputedStyle(turnNode);
+    if (tStyle.visibility !== 'hidden' && tStyle.display !== 'none') {
+      const rect = turnNode.getBoundingClientRect();
+      if (rect.width > 5 && rect.height > 5) {
+        isCandidateVisible = true;
+      } else {
+        try {
+          const range = document.createRange();
+          range.selectNodeContents(turnNode);
+          const r = range.getBoundingClientRect();
+          if (r.width > 5 && r.height > 5) isCandidateVisible = true;
+        } catch (_) {}
       }
     }
 
-    // Even if wrapper is display:contents or 0x0, if it has streaming/loading indicators or non-empty text, it's visible
     if (!isCandidateVisible) {
-      const indicator = turnNode.querySelector('.loading-dots, .streaming, [aria-busy="true"], mat-progress-bar, [data-is-generating="true"]');
-      if (indicator) {
-        const indStyle = window.getComputedStyle(indicator);
-        if (indStyle.visibility !== 'hidden' && indStyle.display !== 'none') {
-          isCandidateVisible = true;
-        }
+      if (streamingNode || answerBodyNode || cleanText.length > 0) {
+        isCandidateVisible = true;
       }
     }
 
     return {
       turnNode,
-      textNode: resolvedTextNode,
-      text: resolvedText,
+      answerBodyNode,
+      statusNodes,
+      streamingNode,
+      textNode: answerBodyNode || turnNode,
+      text: cleanText,
       isVisible: isCandidateVisible
     };
   }
@@ -493,10 +602,10 @@
   function extractResponseText(node) {
     if (!node) return '';
     const cand = resolveTurnCandidate(node);
-    if (cand && cand.textNode) {
-      return (cand.textNode.innerText || cand.textNode.textContent || '').trim();
+    if (cand) {
+      return cand.text || '';
     }
-    return (node.innerText || node.textContent || '').trim();
+    return extractCleanText(node);
   }
 
   function extractUserQueryText(node) {
@@ -630,7 +739,10 @@
   }
 
   async function executeCore(command, execState) {
-    if (isStopped || execState.cancelled) return { status: 'failed', text: '', error: 'cancelled' };
+    function isExecutionCancelled() {
+      return isStopped || execState.cancelled || cancelledRequestIds.has(command.requestId);
+    }
+    if (isExecutionCancelled()) return { status: 'failed', text: '', error: 'cancelled' };
 
     const initialResponseList = responseNodes();
     const initialResponseSet = new Set(initialResponseList);
@@ -644,6 +756,7 @@
     );
 
     function emitEvent(type, payload = {}) {
+      if (isExecutionCancelled()) return;
       try {
         chrome.runtime.sendMessage({
           type: 'NFA_EVENT',
@@ -982,6 +1095,7 @@
 
     let lastDiagReportAtMs = 0;
     function reportWaitDiag(reason = 'periodic') {
+      if (isExecutionCancelled()) return;
       const nowMs = Date.now();
       if (reason === 'periodic' && nowMs - lastDiagReportAtMs < 4800) return;
       lastDiagReportAtMs = nowMs;
@@ -1021,13 +1135,18 @@
       } catch (_) {}
     }
 
+    if (isExecutionCancelled()) {
+      return { status: 'failed', text: '', error: 'cancelled' };
+    }
+
     return new Promise((resolve) => {
       let resolved = false;
 
       const cleanupObserver = () => {
-        try { observer.disconnect(); } catch (_) {}
+        try { observer?.disconnect(); } catch (_) {}
         if (checkTimer) {
           clearInterval(checkTimer);
+          checkTimer = null;
         }
         if (execState.observer === observer) execState.observer = null;
         if (execState.timer === checkTimer) execState.timer = null;
@@ -1037,15 +1156,23 @@
         if (resolved) return;
         resolved = true;
         cleanupObserver();
+        if (isExecutionCancelled()) {
+          resolve({ status: 'failed', text: '', error: 'cancelled' });
+          return;
+        }
         resolve(res);
       };
 
       execState.finish = finish;
       execState.resolve = resolve;
 
+      if (isExecutionCancelled()) {
+        return finish({ status: 'failed', text: '', error: 'cancelled' });
+      }
+
       const checkOutput = () => {
         if (isStopped) return finish({ status: 'failed', text: '', error: 'runtime_stopped' });
-        if (execState.cancelled) return finish({ status: 'failed', text: '', error: 'cancelled' });
+        if (isExecutionCancelled()) return finish({ status: 'failed', text: '', error: 'cancelled' });
         const nowMs = Date.now();
         if (nowMs > deadlineAtMs) {
           reportWaitDiag('timeout');
@@ -1188,6 +1315,10 @@
 
   async function execute(command) {
     if (isStopped) return { status: 'failed', text: '', error: 'runtime_stopped' };
+    const currentReqId = command?.requestId || Math.random().toString(36).slice(2, 10);
+    if (cancelledRequestIds.has(currentReqId)) {
+      return { status: 'failed', text: '', error: 'cancelled' };
+    }
     if (activeExecution) {
       if (Date.now() > activeExecution.deadlineAtMs) {
         cancelExecution(activeExecution.requestId, 'command_deadline_exceeded');
@@ -1196,7 +1327,6 @@
       }
     }
 
-    const currentReqId = command?.requestId || Math.random().toString(36).slice(2, 10);
     // Standardize external time to milliseconds once upon receiving, never reconvert inside
     let deadlineAtMs;
     if (typeof command?.deadlineAtMs === 'number' && command.deadlineAtMs > 0) {
@@ -1366,6 +1496,9 @@
       build: runtimeContract.runtimeBuild,
       instanceId: INSTANCE_ID,
       busyRequestId: activeExecution?.requestId || null
-    })
+    }),
+    resolveTurnCandidate,
+    extractCleanText,
+    extractResponseText
   };
 })();

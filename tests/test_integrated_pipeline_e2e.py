@@ -305,9 +305,9 @@ class TestIntegratedPipelineE2E(unittest.TestCase):
         mock_bridge.publish.return_value = True
 
         # 1차 응답: 사족 중복 마무리 ('가봐야겠어요') -> 반려 대상
-        bad_draft = "수제 패티 비쥬얼 진짜 예술이네요 다음에 꼭 한번 가봐야겠어요"
+        bad_draft = "수제버거 패티 비쥬얼 진짜 예술이네요 다음에 꼭 한번 가봐야겠어요"
         # 2차 응답: 피드백 반영 깔끔한 단문 반응
-        good_draft = "수제 패티 두께가 2cm라니 육즙이 장난 아니겠네요~"
+        good_draft = "수제버거 패티 두께가 2cm라니 육즙이 장난 아니겠네요~"
 
         res1 = GeminiResult(request_id="r1", post_key=post.key, navigation_version=1, status=GeminiResultStatus.COMPLETED, text=bad_draft)
         res2 = GeminiResult(request_id="r2", post_key=post.key, navigation_version=1, status=GeminiResultStatus.COMPLETED, text=good_draft)
@@ -381,7 +381,7 @@ class TestIntegratedPipelineE2E(unittest.TestCase):
                 post_key=cmd.post_key,
                 navigation_version=cmd.navigation_version,
                 status=GeminiResultStatus.COMPLETED,
-                text=f"수제 패티랑 소스 조합이 정말 좋아 보이네요~ ({cmd.post_key})",
+                text=f"경양식 돈까스 소스 조합이 정말 좋아 보이네요~ ({cmd.post_key})",
                 error="",
             )
         mock_bridge.wait_for_result.side_effect = bridge_wait

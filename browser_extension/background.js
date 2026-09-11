@@ -146,6 +146,7 @@ async function startHeartbeatLoop() {
           const busyReqId = activeRuntime.ping.busyRequestId;
           if (pythonActiveReqId === null || (typeof pythonActiveReqId === 'string' && pythonActiveReqId !== busyReqId)) {
             try {
+              trackCancelledRequestId(busyReqId);
               chrome.tabs.sendMessage(activeRuntime.tabId, {
                 type: 'NFA_CANCEL_COMMAND',
                 requestId: busyReqId
@@ -167,7 +168,7 @@ async function startHeartbeatLoop() {
         buildId: contract.runtimeBuild,
         protocolVersion: contract.protocolVersion,
         bridgeSchemaVersion: contract.bridgeSchemaVersion,
-        consumerId: 'background-r9',
+        consumerId: 'background-r10',
         lastRuntimePingAt: now,
         busyRequestId: activeRuntime?.ping.busyRequestId || null,
         busySince: activeRuntime?.ping.busySince || null,
@@ -225,7 +226,7 @@ async function ensureFreshGeminiConversation(tabId) {
           buildId: contract.runtimeBuild,
           protocolVersion: contract.protocolVersion,
           bridgeSchemaVersion: contract.bridgeSchemaVersion,
-          consumerId: 'background-r9',
+          consumerId: 'background-r10',
           lastRuntimePingAt: Date.now(),
           tabId: tabId,
           contentInstanceId: checkRes.contentInstanceId,
@@ -333,6 +334,16 @@ async function ensureFreshGeminiConversation(tabId) {
 }
 
 const inFlightCommandResolvers = new Map();
+const cancelledRequestIds = new Set();
+
+function trackCancelledRequestId(rid) {
+  if (!rid) return;
+  cancelledRequestIds.add(rid);
+  if (cancelledRequestIds.size > 100) {
+    const oldest = cancelledRequestIds.values().next().value;
+    cancelledRequestIds.delete(oldest);
+  }
+}
 
 async function runCommandCycle() {
   const contract = await getRuntimeContract();
@@ -400,6 +411,13 @@ async function runCommandCycle() {
     const timer = setTimeout(() => {
       if (inFlightCommandResolvers.has(command.requestId)) {
         inFlightCommandResolvers.delete(command.requestId);
+        trackCancelledRequestId(command.requestId);
+        try {
+          chrome.tabs.sendMessage(activeRuntime.tabId, {
+            type: 'NFA_CANCEL_COMMAND',
+            requestId: command.requestId
+          }, () => {});
+        } catch (_) {}
         resolve({ status: 'timeout', text: '', error: 'command_deadline_exceeded' });
       }
     }, timeoutMs);
@@ -482,7 +500,7 @@ async function runCommandCycle() {
       buildId: contract.runtimeBuild,
       protocolVersion: contract.protocolVersion,
       bridgeSchemaVersion: contract.bridgeSchemaVersion,
-      consumerId: 'background-r8',
+      consumerId: 'background-r10',
       lastRuntimePingAt: now,
       busyRequestId: postExecRuntime?.ping.busyRequestId || null,
       busySince: postExecRuntime?.ping.busySince || null,
@@ -575,6 +593,11 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
   }
 
   if (message?.type === 'NFA_EXECUTION_RESULT' || message?.type === 'NFA_COMMAND_RESULT') {
+    if (cancelledRequestIds.has(message.requestId)) {
+      console.log('[GEMINI][BACKGROUND] Dropping late execution result for cancelled rid:', message.requestId);
+      sendResponse({ ok: false, error: 'cancelled' });
+      return true;
+    }
     const inFlight = inFlightCommandResolvers.get(message.requestId);
     if (inFlight) {
       if (inFlight.timer) clearTimeout(inFlight.timer);
@@ -599,6 +622,10 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
   }
 
   if (message?.type === 'NFA_WAIT_DIAG') {
+    if (message.diag?.rid && cancelledRequestIds.has(message.diag.rid)) {
+      sendResponse({ ok: false, error: 'cancelled' });
+      return true;
+    }
     if (message.diag) {
       bridgeFetch('/v1/diag', 'POST', message.diag, 4000).catch(() => {});
     }
@@ -607,6 +634,10 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
   }
 
   if (message?.type === 'NFA_EVENT') {
+    if (message.event?.rid && cancelledRequestIds.has(message.event.rid)) {
+      sendResponse({ ok: false, error: 'cancelled' });
+      return true;
+    }
     if (message.event) {
       bridgeFetch('/v1/event', 'POST', message.event, 4000).catch(() => {});
     }

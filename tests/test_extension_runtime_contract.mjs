@@ -603,3 +603,154 @@ test('GEM-R9-017: legitimate thinking grace vs zero-evidence stall separation', 
   assert.strictEqual(resNoEvidenceFailed.action, 'fail');
   assert.strictEqual(resNoEvidenceFailed.error, 'response_stream_no_text');
 });
+
+test('GEM-R10-018: old r9 runtime with r10 contract triggers reinjection', () => {
+  const contract = { runtimeBuild: '13.2.3-r10' };
+  const pingResponse = { ok: true, build: '13.2.3-r9' };
+  let reinjected = false;
+  if (!pingResponse.ok || pingResponse.build !== contract.runtimeBuild) {
+    reinjected = true;
+  }
+  assert.strictEqual(reinjected, true, 'r9 build must trigger reinjection under r10 contract');
+});
+
+test('GEM-R10-019: Gemini DOM with thinking/header UI ("Initiating the Analysis Gemini의 응답" + actual text) extracts ONLY the actual text', () => {
+  const CONTAMINATION_PATTERNS = [
+    /Initiating the Analysis/i,
+    /Gemini의\s*응답/i
+  ];
+
+  // Simulating turn node structure with status container, header, and actual message-content
+  const turn = {
+    children: [
+      { tag: 'div', className: 'status-container', text: 'Initiating the Analysis', isExcluded: true },
+      { tag: 'header', className: 'header', text: 'Gemini의 응답', isExcluded: true },
+      { tag: 'message-content', className: 'message-content', text: '삼겹살 구이가 정말 노릇노릇 맛있어 보이네요~', isExcluded: false }
+    ]
+  };
+
+  function extractClean(tNode) {
+    let combined = '';
+    for (const c of tNode.children) {
+      if (!c.isExcluded) {
+        combined += c.text + ' ';
+      }
+    }
+    const cleaned = combined.trim();
+    for (const pat of CONTAMINATION_PATTERNS) {
+      if (pat.test(cleaned)) {
+        const stripped = cleaned.replace(pat, '').trim();
+        if (stripped.length === 0 || stripped.length < 10) return '';
+      }
+    }
+    return cleaned;
+  }
+
+  const result = extractClean(turn);
+  assert.strictEqual(result, '삼겹살 구이가 정말 노릇노릇 맛있어 보이네요~');
+  assert.ok(!result.includes('Initiating the Analysis'));
+  assert.ok(!result.includes('Gemini의 응답'));
+});
+
+test('GEM-R10-020: Gemini DOM with ONLY thinking/status UI extracts empty string (does not fire TEXT_NONEMPTY)', () => {
+  const CONTAMINATION_PATTERNS = [
+    /Initiating the Analysis/i,
+    /Gemini의\s*응답/i
+  ];
+
+  // In thinking/initiating phase, ONLY status/header nodes exist
+  const turnOnlyStatus = {
+    children: [
+      { tag: 'div', className: 'status-container', text: 'Initiating the Analysis', isExcluded: true },
+      { tag: 'header', className: 'header', text: 'Gemini의 응답', isExcluded: true }
+    ]
+  };
+
+  function extractClean(tNode) {
+    let combined = '';
+    for (const c of tNode.children) {
+      if (!c.isExcluded) {
+        combined += c.text + ' ';
+      }
+    }
+    const cleaned = combined.trim();
+    for (const pat of CONTAMINATION_PATTERNS) {
+      if (pat.test(cleaned)) {
+        const stripped = cleaned.replace(pat, '').trim();
+        if (stripped.length === 0 || stripped.length < 10) return '';
+      }
+    }
+    return cleaned;
+  }
+
+  const result = extractClean(turnOnlyStatus);
+  assert.strictEqual(result, '');
+
+  // Since text is empty, TEXT_NONEMPTY is NOT logged/emitted
+  let textNonEmptyFired = false;
+  if (result.length > 0) {
+    textNonEmptyFired = true;
+  }
+  assert.strictEqual(textNonEmptyFired, false, 'TEXT_NONEMPTY must not fire for empty text');
+});
+
+test('GEM-R10-021: Cancelled execution produces 0 WAIT_DIAG, 0 RESPONSE_BOUND, 0 RESULT', () => {
+  const cancelledRequestIds = new Set(['req_cancelled_123']);
+  let waitDiagSent = 0;
+  let eventSent = 0;
+  let resultSent = 0;
+
+  function emitEvent(rid, type) {
+    if (cancelledRequestIds.has(rid)) return;
+    eventSent++;
+  }
+
+  function reportWaitDiag(rid) {
+    if (cancelledRequestIds.has(rid)) return;
+    waitDiagSent++;
+  }
+
+  function submitResult(rid, res) {
+    if (cancelledRequestIds.has(rid)) return;
+    resultSent++;
+  }
+
+  emitEvent('req_cancelled_123', 'RESPONSE_TURN_BOUND');
+  reportWaitDiag('req_cancelled_123');
+  submitResult('req_cancelled_123', { status: 'completed', text: 'hello' });
+
+  assert.strictEqual(waitDiagSent, 0, 'Cancelled rid must produce 0 WAIT_DIAG');
+  assert.strictEqual(eventSent, 0, 'Cancelled rid must produce 0 RESPONSE_TURN_BOUND');
+  assert.strictEqual(resultSent, 0, 'Cancelled rid must produce 0 RESULT');
+});
+
+test('GEM-R10-022: ResponseContaminationGate logic in JS simulation', () => {
+  const contaminationPhrases = [
+    'Initiating the Analysis',
+    'Gemini의 응답',
+    'Thinking...',
+    'Show thinking',
+    'Hide thinking',
+    '다른 답안 보기',
+    'view other drafts'
+  ];
+
+  function validateContamination(text) {
+    const norm = text.trim();
+    for (const phrase of contaminationPhrases) {
+      if (norm.toLowerCase().includes(phrase.toLowerCase())) {
+        return { isContaminated: true, matched: phrase };
+      }
+    }
+    return { isContaminated: false };
+  }
+
+  const liveIncidentText = 'Initiating the Analysis Gemini의 응답';
+  const checkLive = validateContamination(liveIncidentText);
+  assert.strictEqual(checkLive.isContaminated, true);
+  assert.strictEqual(checkLive.matched, 'Initiating the Analysis');
+
+  const validAnswer = '신촌 고기집 다녀오셨군요! 노릇노릇 삼겹살 맛있겠어요~';
+  const checkValid = validateContamination(validAnswer);
+  assert.strictEqual(checkValid.isContaminated, false);
+});

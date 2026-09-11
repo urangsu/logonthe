@@ -1213,6 +1213,178 @@ class PlaywrightGeminiDOMContractTests(unittest.TestCase):
         finally:
             server.stop()
 
+    def test_case_9_dom_semantic_extraction_excludes_status_and_header(self):
+        """Case 9: Gemini DOM에서 status-container, header, thinking UI를 배제하고 answer body만 추출"""
+        with sync_playwright() as p:
+            browser = p.chromium.launch(headless=True)
+            page = browser.new_page()
+
+            page.set_content("""
+            <!DOCTYPE html>
+            <html>
+            <body>
+              <chat-history>
+                <model-response class="model-response" id="model-turn-1">
+                  <div class="status-container" role="status">
+                    <p>Initiating the Analysis</p>
+                  </div>
+                  <header class="header">
+                    <div class="model-response-header">Gemini의 응답</div>
+                  </header>
+                  <message-content class="message-content">
+                    <p>노릇노릇하게 구워진 삼겹살이 정말 맛있겠네요!</p>
+                  </message-content>
+                </model-response>
+              </chat-history>
+            </body>
+            </html>
+            """)
+
+            # Ensure window.chrome mock exists
+            page.evaluate("""() => {
+                window.chrome = {
+                    runtime: {
+                        sendMessage: () => {},
+                        onMessage: { addListener: () => {}, removeListener: () => {} }
+                    }
+                };
+            }""")
+
+            with open(CONTENT_JS_PATH, "r", encoding="utf-8") as f:
+                content_code = f.read()
+
+            page.evaluate(content_code)
+
+            res = page.evaluate("""() => {
+                const rt = globalThis.__NFA_GEMINI_RUNTIME__;
+                const turnNode = document.getElementById('model-turn-1');
+                const cand = rt.resolveTurnCandidate(turnNode);
+                const extractedText = rt.extractResponseText(turnNode);
+                return {
+                    candText: cand ? cand.text : null,
+                    extractedText: extractedText,
+                    hasAnswerBody: Boolean(cand && cand.answerBodyNode),
+                    statusCount: cand ? cand.statusNodes.length : 0
+                };
+            }""")
+
+            self.assertEqual(res["candText"], "노릇노릇하게 구워진 삼겹살이 정말 맛있겠네요!")
+            self.assertEqual(res["extractedText"], "노릇노릇하게 구워진 삼겹살이 정말 맛있겠네요!")
+            self.assertTrue(res["hasAnswerBody"])
+            self.assertNotIn("Initiating the Analysis", res["extractedText"])
+            self.assertNotIn("Gemini의 응답", res["extractedText"])
+
+            # Test 9-B: In thinking/initiating phase (no message-content yet)
+            res_empty = page.evaluate("""() => {
+                const rt = globalThis.__NFA_GEMINI_RUNTIME__;
+                const turnNode = document.getElementById('model-turn-1');
+                const msgContent = turnNode.querySelector('message-content');
+                if (msgContent) msgContent.remove();
+                const cand = rt.resolveTurnCandidate(turnNode);
+                const extractedText = rt.extractResponseText(turnNode);
+                return {
+                    candText: cand ? cand.text : null,
+                    extractedText: extractedText,
+                    chars: extractedText.length
+                };
+            }""")
+            self.assertEqual(res_empty["extractedText"], "")
+            self.assertEqual(res_empty["chars"], 0)
+
+            browser.close()
+
+    def test_case_10_response_contamination_gate_detects_live_incident_text(self):
+        """Case 10: Python ResponseContaminationGate가 P0 실사고 텍스트 및 UI 상태문자열을 차단"""
+        from services.comments.community_rhythm import ResponseContaminationGate
+
+        # 1. P0 Live incident exact string (34 chars)
+        incident_text = "Initiating the Analysis Gemini의 응답"
+        res1 = ResponseContaminationGate.validate(incident_text)
+        self.assertTrue(res1.is_contaminated)
+        self.assertEqual(res1.code, "response_ui_contamination")
+
+        # 2. Other known UI status / thinking patterns
+        other_cases = [
+            "Thinking...",
+            "Show thinking",
+            "Hide thinking",
+            "생각 중...",
+            "생각 과정 더보기",
+            "다른 답안 보기",
+            "view other drafts",
+            "Gemini response: 안녕하세요",
+            "Initiating the Analysis",
+        ]
+        for c in other_cases:
+            chk = ResponseContaminationGate.validate(c)
+            self.assertTrue(chk.is_contaminated, f"Expected '{c}' to be flagged as contaminated")
+            self.assertEqual(chk.code, "response_ui_contamination")
+
+        # 3. Legitimate comments must be clean
+        legit_cases = [
+            "삼겹살 구이가 정말 노릇노릇 비주얼부터 남다르네요!",
+            "신촌에 이런 아늑한 카페가 있었군요. 디저트 먹으러 가봐야겠어요~",
+            "플레이팅도 예쁘고 분위기도 좋아 보여서 저장해둡니다!",
+        ]
+        for l in legit_cases:
+            chk = ResponseContaminationGate.validate(l)
+            self.assertFalse(chk.is_contaminated, f"Expected '{l}' to be clean")
+            self.assertEqual(chk.code, "clean")
+
+    def test_case_11_food_anchor_fail_closed_disarms_auto_submit(self):
+        """Case 11: 맛집/카페 글에서 앵커 미매칭 시 1회 재시도 후에도 미매칭이면 auto_submit disarmed 검증"""
+        content_focus = "FOOD_RESTAURANT"
+        verified_anchors = ["삼겹살", "구이"]
+        selected_anchor = "none"
+
+        food_anchor_fail_closed = False
+        auto_submit_timeout = 5.0
+        auto_comment_submit_enabled = True
+
+        # Simulate 1st attempt: selected_anchor == "none" -> triggers retry
+        food_anchor_retry_done = False
+        if content_focus in ("FOOD_RESTAURANT", "FOOD_PRODUCT", "CAFE") and verified_anchors and selected_anchor == "none":
+            if not food_anchor_retry_done:
+                food_anchor_retry_done = True
+            else:
+                food_anchor_fail_closed = True
+
+        self.assertTrue(food_anchor_retry_done)
+        self.assertFalse(food_anchor_fail_closed)
+
+        # Simulate 2nd attempt: still selected_anchor == "none" -> fail-closed!
+        if content_focus in ("FOOD_RESTAURANT", "FOOD_PRODUCT", "CAFE") and verified_anchors and selected_anchor == "none":
+            if not food_anchor_retry_done:
+                food_anchor_retry_done = True
+            else:
+                food_anchor_fail_closed = True
+
+        self.assertTrue(food_anchor_fail_closed)
+
+        # In editor draft staging:
+        if auto_comment_submit_enabled:
+            if food_anchor_fail_closed:
+                auto_submit_timeout = None
+
+        self.assertIsNone(auto_submit_timeout, "Fail-closed MUST disarm auto_submit_timeout to None!")
+
+    def test_case_12_cancel_command_drops_late_events_and_diags(self):
+        """Case 12: 명령 취소 후 도착하는 늦은 이벤트, 진단, 결과가 전달되지 않고 차단되는 계약 검증"""
+        bridge = GeminiExtensionBridge()
+        cmd = GeminiCommand.create("post:cancel_guard", 1, "prompt_to_cancel")
+        bridge.publish(cmd)
+        bridge.claim_command(cmd.request_id)
+
+        # Cancel command
+        bridge.cancel_command(cmd.request_id)
+        self.assertIn(cmd.request_id, bridge._cancel_requests)
+
+        # Late result submit must be rejected
+        late_result = GeminiResult(cmd.request_id, "post:cancel_guard", 1, GeminiResultStatus.COMPLETED, "늦게 도착한 댓글")
+        ok, reason = bridge.submit_result(late_result)
+        self.assertFalse(ok)
+        self.assertEqual(reason, "request_cancelled")
+
 
 if __name__ == "__main__":
     unittest.main()

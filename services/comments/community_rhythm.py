@@ -134,6 +134,91 @@ class FinalQualityResult:
         return self.code
 
 
+@dataclass(frozen=True)
+class ContaminationResult:
+    """Outcome of model response contamination analysis."""
+
+    is_contaminated: bool
+    code: str
+    matched_pattern: Optional[str] = None
+    reason: str = ""
+
+    @property
+    def ok(self) -> bool:
+        return not self.is_contaminated
+
+    @property
+    def valid(self) -> bool:
+        return not self.is_contaminated
+
+
+class ResponseContaminationGate:
+    """Pre-gate to inspect model response text for UI chrome, thinking, or status contamination."""
+
+    CONTAMINATION_PATTERNS: ClassVar[Tuple[re.Pattern, ...]] = (
+        re.compile(r"initiating\s*the\s*analysis", re.IGNORECASE),
+        re.compile(r"gemini의\s*응답", re.IGNORECASE),
+        re.compile(r"gemini\s*response", re.IGNORECASE),
+        re.compile(r"thinking\.\.\.", re.IGNORECASE),
+        re.compile(r"thought\s*process", re.IGNORECASE),
+        re.compile(r"analyzing\.\.\.", re.IGNORECASE),
+        re.compile(r"generating\s*response", re.IGNORECASE),
+        re.compile(r"show\s*thinking", re.IGNORECASE),
+        re.compile(r"hide\s*thinking", re.IGNORECASE),
+        re.compile(r"생각\s*중\.\.\.", re.IGNORECASE),
+        re.compile(r"생각\s*과정\s*(?:숨기기|보기|더보기)?", re.IGNORECASE),
+        re.compile(r"분석\s*중\.\.\.", re.IGNORECASE),
+        re.compile(r"다른\s*답안\s*보기", re.IGNORECASE),
+        re.compile(r"view\s*other\s*drafts", re.IGNORECASE),
+        re.compile(r"model\s*response", re.IGNORECASE),
+    )
+
+    CONTAMINATION_EXACT_SUBSTRINGS: ClassVar[Tuple[str, ...]] = (
+        "Initiating the Analysis",
+        "Gemini의 응답",
+        "Gemini response",
+        "Show thinking",
+        "Hide thinking",
+        "생각 과정",
+        "다른 답안 보기",
+    )
+
+    @classmethod
+    def validate(cls, text: str) -> ContaminationResult:
+        if not text:
+            return ContaminationResult(
+                is_contaminated=False,
+                code="empty_text",
+                reason="Text is empty"
+            )
+
+        norm = text.strip()
+        for sub in cls.CONTAMINATION_EXACT_SUBSTRINGS:
+            if sub in norm:
+                return ContaminationResult(
+                    is_contaminated=True,
+                    code="response_ui_contamination",
+                    matched_pattern=sub,
+                    reason=f"UI chrome or status substring detected: '{sub}'"
+                )
+
+        for pat in cls.CONTAMINATION_PATTERNS:
+            m = pat.search(norm)
+            if m:
+                return ContaminationResult(
+                    is_contaminated=True,
+                    code="response_ui_contamination",
+                    matched_pattern=m.group(0),
+                    reason=f"UI chrome or thinking pattern detected: '{m.group(0)}'"
+                )
+
+        return ContaminationResult(
+            is_contaminated=False,
+            code="clean",
+            reason="No UI contamination detected"
+        )
+
+
 PresetLike = Union[CommunityRhythmPreset, str]
 
 
@@ -820,6 +905,8 @@ __all__ = [
     "COMMENT_POLICIES",
     "CommentLengthPolicy",
     "CommunityRhythmPreset",
+    "ContaminationResult",
+    "ResponseContaminationGate",
     "FinalQualityGate",
     "FinalQualityResult",
     "DraftInspectionResult",
