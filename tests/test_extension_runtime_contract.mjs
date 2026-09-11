@@ -604,14 +604,14 @@ test('GEM-R9-017: legitimate thinking grace vs zero-evidence stall separation', 
   assert.strictEqual(resNoEvidenceFailed.error, 'response_stream_no_text');
 });
 
-test('GEM-R10-018: old r9 runtime with r10 contract triggers reinjection', () => {
-  const contract = { runtimeBuild: '13.2.3-r10' };
-  const pingResponse = { ok: true, build: '13.2.3-r9' };
+test('GEM-R11-018: old r10 runtime with r11 contract triggers reinjection', () => {
+  const contract = { runtimeBuild: '13.2.3-r11' };
+  const pingResponse = { ok: true, build: '13.2.3-r10' };
   let reinjected = false;
   if (!pingResponse.ok || pingResponse.build !== contract.runtimeBuild) {
     reinjected = true;
   }
-  assert.strictEqual(reinjected, true, 'r9 build must trigger reinjection under r10 contract');
+  assert.strictEqual(reinjected, true, 'r10 build must trigger reinjection under r11 contract');
 });
 
 test('GEM-R10-019: Gemini DOM with thinking/header UI ("Initiating the Analysis Gemini의 응답" + actual text) extracts ONLY the actual text', () => {
@@ -754,3 +754,147 @@ test('GEM-R10-022: ResponseContaminationGate logic in JS simulation', () => {
   const checkValid = validateContamination(validAnswer);
   assert.strictEqual(checkValid.isContaminated, false);
 });
+
+test('GEM-R11-023: answer inside aria-live parent is properly extracted and not excluded', () => {
+  function isExcluded(node) {
+    if (node.isExcluded) return true;
+    if (node.role === 'status') return true;
+    if (node.role === 'status' && node.ariaLive) return true;
+    // Bare aria-live is NOT excluded
+    return false;
+  }
+
+  const liveContainer = {
+    ariaLive: 'polite',
+    children: [
+      {
+        tag: 'message-content',
+        text: '성수동 디저트 카페 소금빵과 크로플이 정말 맛있어 보이네요~',
+        isExcluded: false
+      }
+    ]
+  };
+
+  assert.strictEqual(isExcluded(liveContainer), false, 'Bare aria-live parent must NOT be excluded');
+  let extracted = '';
+  for (const child of liveContainer.children) {
+    if (!isExcluded(child)) extracted += child.text;
+  }
+  assert.strictEqual(extracted, '성수동 디저트 카페 소금빵과 크로플이 정말 맛있어 보이네요~');
+});
+
+test('GEM-R11-024: status/header + actual answer inside same container extracts ONLY actual answer', () => {
+  const sameContainerNode = {
+    children: [
+      { tag: 'div', role: 'status', text: 'Initiating the Analysis', isExcluded: true },
+      { tag: 'header', text: 'Gemini의 응답', isExcluded: true },
+      { tag: 'div', className: 'markdown', text: '여기는 육즙 가득한 수제 패티가 일품인 수제버거 맛집입니다.', isExcluded: false }
+    ]
+  };
+
+  let extracted = '';
+  for (const child of sameContainerNode.children) {
+    if (!child.isExcluded) {
+      extracted += child.text + ' ';
+    }
+  }
+  extracted = extracted.trim();
+  assert.strictEqual(extracted, '여기는 육즙 가득한 수제 패티가 일품인 수제버거 맛집입니다.');
+  assert.ok(!extracted.includes('Initiating the Analysis'));
+  assert.ok(!extracted.includes('Gemini의 응답'));
+});
+
+test('GEM-R11-025: CSS copy icon text inside action/button is excluded from answer text', () => {
+  const responseTurnWithButton = {
+    children: [
+      { tag: 'message-content', text: '이탈리안 정통 까르보나라 파스타 풍미가 진해 보이네요~', isExcluded: false },
+      { tag: 'button', className: 'copy-button', text: 'content_copy', isExcluded: true },
+      { tag: 'div', className: 'actions', text: '복사하기 share thumb_up', isExcluded: true }
+    ]
+  };
+
+  let extracted = '';
+  for (const child of responseTurnWithButton.children) {
+    if (!child.isExcluded) {
+      extracted += child.text;
+    }
+  }
+  assert.strictEqual(extracted, '이탈리안 정통 까르보나라 파스타 풍미가 진해 보이네요~');
+  assert.ok(!extracted.includes('content_copy'));
+  assert.ok(!extracted.includes('복사하기'));
+});
+
+test('GEM-R11-026: extractCleanText strips "Gemini의 응답\\n" prefix and returns clean remainder', () => {
+  const CONTAMINATION_PATTERNS = [
+    /Initiating the Analysis/i,
+    /Gemini의\s*응답/i,
+    /Thinking\.\.\./i
+  ];
+
+  function extractCleanTextSim(rawText) {
+    let remainder = rawText.trim();
+    if (!remainder) return '';
+
+    let hadContamination = false;
+    for (const pat of CONTAMINATION_PATTERNS) {
+      if (pat.test(remainder)) {
+        hadContamination = true;
+        const globalPat = new RegExp(pat.source, pat.flags.includes('g') ? pat.flags : pat.flags + 'g');
+        remainder = remainder.replace(globalPat, '');
+      }
+    }
+
+    if (hadContamination) {
+      remainder = remainder
+        .split('\n')
+        .map(line => line.trim())
+        .filter(Boolean)
+        .join('\n')
+        .trim();
+
+      for (const pat of CONTAMINATION_PATTERNS) {
+        if (pat.test(remainder)) {
+          return '';
+        }
+      }
+
+      if (remainder.length < 10) {
+        return '';
+      }
+      return remainder;
+    }
+
+    return remainder;
+  }
+
+  // Case 1: Mixed status + valid comment -> clean remainder returned
+  const mixedInput = "Gemini의 응답\n곱창 소스에 청양고추 넣으면 끝도 없이 들어가겠네요~";
+  const cleaned = extractCleanTextSim(mixedInput);
+  assert.strictEqual(cleaned, "곱창 소스에 청양고추 넣으면 끝도 없이 들어가겠네요~");
+
+  // Case 2: Only status string -> empty string returned (editor insert 0 / submit 0)
+  const onlyStatus = "Initiating the Analysis Gemini의 응답";
+  const cleanedEmpty = extractCleanTextSim(onlyStatus);
+  assert.strictEqual(cleanedEmpty, "");
+
+  // Case 3: Status string + short text (<10 chars) -> empty string returned
+  const statusPlusShort = "Thinking...\n좋아요";
+  const cleanedShort = extractCleanTextSim(statusPlusShort);
+  assert.strictEqual(cleanedShort, "");
+});
+
+test('GEM-R11-027: visibleTurnCandidates and visibleTextCandidates split verification', () => {
+  const candidates = [
+    { id: 'cand-1', isCandidate: true, text: '첫 번째 정상 생성 댓글입니다.' },
+    { id: 'cand-2', isCandidate: true, text: '' },
+    { id: 'cand-3', isCandidate: false, text: 'baseline turn' }
+  ];
+
+  const validCandidates = candidates.filter(c => c.isCandidate);
+  const visibleTurnCandidates = validCandidates.length;
+  const visibleTextCandidates = validCandidates.filter(c => (c.text || '').trim().length > 0).length;
+
+  assert.strictEqual(visibleTurnCandidates, 2, 'visibleTurnCandidates must count all valid candidate turns');
+  assert.strictEqual(visibleTextCandidates, 1, 'visibleTextCandidates must only count candidates with non-empty text');
+});
+

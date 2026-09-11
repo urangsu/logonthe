@@ -876,7 +876,7 @@ class PostProcessor:
                                                         logger.log(f"[FOOD_COMMENT] focus={content_focus} selected_anchor={selected_anchor}")
 
                                                     # P0-4: Food/Cafe anchor fail-closed check
-                                                    is_food_or_cafe = content_focus in ("FOOD_RESTAURANT", "FOOD_PRODUCT", "CAFE")
+                                                    is_food_or_cafe = content_focus in ("FOOD_RESTAURANT", "FOOD_PRODUCT", "CAFE_DESSERT")
                                                     if is_food_or_cafe and gen_ctx.verified_anchors and selected_anchor == "none":
                                                         if not getattr(self, "_food_anchor_retry_done", False) and gen_ctx.attempt_count < gen_ctx.max_attempts:
                                                             self._food_anchor_retry_done = True

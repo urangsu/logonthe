@@ -41,7 +41,7 @@
   ].join(', ');
   let runtimeContract = {
     extensionVersion: '13.2.3',
-    runtimeBuild: '13.2.3-r10',
+    runtimeBuild: '13.2.3-r11',
     protocolVersion: 3,
     bridgeSchemaVersion: 2
   };
@@ -424,7 +424,7 @@
     '[role="button"]',
     '[role="status"]',
     '[role="progressbar"]',
-    '[aria-live]',
+    '[role="status"][aria-live]',
     '.thinking',
     '.thought-container',
     '.thinking-container',
@@ -520,19 +520,39 @@
       }
     }
 
-    const cleaned = text.trim();
-    if (!cleaned) return '';
+    let remainder = text.trim();
+    if (!remainder) return '';
 
+    let hadContamination = false;
     for (const pat of CONTAMINATION_PATTERNS) {
-      if (pat.test(cleaned)) {
-        const stripped = cleaned.replace(pat, '').trim();
-        if (stripped.length === 0 || stripped.length < 10) {
-          return '';
-        }
+      if (pat.test(remainder)) {
+        hadContamination = true;
+        const globalPat = new RegExp(pat.source, pat.flags.includes('g') ? pat.flags : pat.flags + 'g');
+        remainder = remainder.replace(globalPat, '');
       }
     }
 
-    return cleaned;
+    if (hadContamination) {
+      remainder = remainder
+        .split('\n')
+        .map(line => line.trim())
+        .filter(Boolean)
+        .join('\n')
+        .trim();
+
+      for (const pat of CONTAMINATION_PATTERNS) {
+        if (pat.test(remainder)) {
+          return '';
+        }
+      }
+
+      if (remainder.length < 10) {
+        return '';
+      }
+      return remainder;
+    }
+
+    return remainder;
   }
 
   function resolveTurnCandidate(turnNode) {
@@ -652,11 +672,13 @@
     }
 
     const validCandidates = inventory.filter(c => c.isCandidate);
-    const visibleTextCandidates = validCandidates.length;
+    const visibleTurnCandidates = validCandidates.length;
+    const visibleTextCandidates = validCandidates.filter(c => (c.text || '').trim().length > 0).length;
 
     return {
       responseSelectorMatches,
       responseUniqueTurns,
+      visibleTurnCandidates,
       visibleTextCandidates,
       inventory,
       validCandidates
@@ -869,9 +891,10 @@
       // Unified inventory invariant verification
       const inv = getCandidateInventory(initialResponseSet, baselineResponseFingerprints, currentUserTurn);
       const cand = inv.inventory.find(c => c.turnNode === node);
-      if (!cand || !cand.isVisible || inv.visibleTextCandidates === 0) {
-        console.error('[GEMINI][INVARIANT_VIOLATION] Attempted to bind node when visibleTextCandidates=0 or node not visible', {
+      if (!cand || !cand.isVisible || inv.visibleTurnCandidates === 0) {
+        console.error('[GEMINI][INVARIANT_VIOLATION] Attempted to bind node when visibleTurnCandidates=0 or node not visible', {
           nodeTag: node.tagName,
+          visibleTurnCandidates: inv.visibleTurnCandidates,
           visibleTextCandidates: inv.visibleTextCandidates,
           responseSelectorMatches: inv.responseSelectorMatches,
           excludeReason: cand?.excludeReason || 'not_in_inventory'
@@ -887,12 +910,14 @@
         rid: command.requestId,
         evidence: evidence,
         responseUniqueTurns: rInv.responseUniqueTurns,
+        visibleTurnCandidates: rInv.visibleTurnCandidates,
         visibleTextCandidates: rInv.visibleTextCandidates,
         hasUserTurnAnchor: Boolean(currentUserTurn),
         nodeTag: node.tagName
       }));
       emitEvent('RESPONSE_TURN_BOUND', {
         responseUniqueTurns: rInv.responseUniqueTurns,
+        visibleTurnCandidates: rInv.visibleTurnCandidates,
         visibleTextCandidates: rInv.visibleTextCandidates,
         evidence: evidence
       });
@@ -1103,8 +1128,8 @@
       const candDiag = getCandidateInventory(initialResponseSet, baselineResponseFingerprints, currentUserTurn);
       const userDiag = getUserInventory();
 
-      if (targetResponseNode && candDiag.visibleTextCandidates === 0) {
-        console.error('[GEMINI][INVARIANT_VIOLATION] targetResponseNode bound but visibleTextCandidates=0');
+      if (targetResponseNode && candDiag.visibleTurnCandidates === 0) {
+        console.error('[GEMINI][INVARIANT_VIOLATION] targetResponseNode bound but visibleTurnCandidates=0');
       }
       if (confirmed && userDiag.userUniqueTurns === 0 && candDiag.responseUniqueTurns === 0) {
         console.error('[GEMINI][INVARIANT_VIOLATION] sendConfirmed=true but userUniqueTurns=0 and responseUniqueTurns=0');
@@ -1122,6 +1147,7 @@
         userUniqueTurns: userDiag.userUniqueTurns,
         responseSelectorMatches: candDiag.responseSelectorMatches,
         responseUniqueTurns: candDiag.responseUniqueTurns,
+        visibleTurnCandidates: candDiag.visibleTurnCandidates,
         visibleTextCandidates: candDiag.visibleTextCandidates,
         responseBound: Boolean(targetResponseNode),
         responseTextLength: curText.length,
@@ -1186,8 +1212,8 @@
         // Check invariant: response selector matches > 0, visible = 0, but bound = true!
         if (targetResponseNode) {
           const inv = getCandidateInventory(initialResponseSet, baselineResponseFingerprints, currentUserTurn);
-          if (inv.visibleTextCandidates === 0) {
-            console.error('[GEMINI][INVARIANT_VIOLATION] bound=true but visibleTextCandidates=0');
+          if (inv.visibleTurnCandidates === 0) {
+            console.error('[GEMINI][INVARIANT_VIOLATION] bound=true but visibleTurnCandidates=0');
             return finish({ status: 'failed', text: '', error: 'response_binding_invariant_violation' });
           }
         }
@@ -1396,7 +1422,7 @@
       const userDiag = getUserInventory();
       const candDiag = getCandidateInventory();
       const ed = editor();
-      const isFresh = userDiag.visibleUserNodes.length === 0 && candDiag.visibleTextCandidates === 0 && Boolean(ed);
+      const isFresh = userDiag.visibleUserNodes.length === 0 && candDiag.visibleTurnCandidates === 0 && Boolean(ed);
       sendResponse({
         ok: true,
         fresh: isFresh,
@@ -1406,12 +1432,13 @@
         userSelectorMatches: userDiag.userSelectorMatches,
         userUniqueTurns: userDiag.userUniqueTurns,
         selector_matches: candDiag.responseSelectorMatches,
-        visible_candidates: candDiag.visibleTextCandidates,
+        visible_candidates: candDiag.visibleTurnCandidates,
         responseSelectorMatches: candDiag.responseSelectorMatches,
         responseUniqueTurns: candDiag.responseUniqueTurns,
+        visibleTurnCandidates: candDiag.visibleTurnCandidates,
         visibleTextCandidates: candDiag.visibleTextCandidates,
         bound_response: Boolean(activeExecution && activeExecution.targetResponseNode),
-        responseCount: candDiag.visibleTextCandidates,
+        responseCount: candDiag.visibleTurnCandidates,
         composerAvailable: Boolean(ed)
       });
       return true;

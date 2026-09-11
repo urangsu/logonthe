@@ -12,6 +12,7 @@ from services.gemini_extension_bridge import (
     GeminiResult,
     GeminiResultStatus,
 )
+from services.comments.community_rhythm import ResponseContaminationGate
 
 WORKSPACE_DIR = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
 CONTENT_JS_PATH = os.path.join(WORKSPACE_DIR, "browser_extension", "content.js")
@@ -1343,7 +1344,7 @@ class PlaywrightGeminiDOMContractTests(unittest.TestCase):
 
         # Simulate 1st attempt: selected_anchor == "none" -> triggers retry
         food_anchor_retry_done = False
-        if content_focus in ("FOOD_RESTAURANT", "FOOD_PRODUCT", "CAFE") and verified_anchors and selected_anchor == "none":
+        if content_focus in ("FOOD_RESTAURANT", "FOOD_PRODUCT", "CAFE_DESSERT") and verified_anchors and selected_anchor == "none":
             if not food_anchor_retry_done:
                 food_anchor_retry_done = True
             else:
@@ -1353,7 +1354,7 @@ class PlaywrightGeminiDOMContractTests(unittest.TestCase):
         self.assertFalse(food_anchor_fail_closed)
 
         # Simulate 2nd attempt: still selected_anchor == "none" -> fail-closed!
-        if content_focus in ("FOOD_RESTAURANT", "FOOD_PRODUCT", "CAFE") and verified_anchors and selected_anchor == "none":
+        if content_focus in ("FOOD_RESTAURANT", "FOOD_PRODUCT", "CAFE_DESSERT") and verified_anchors and selected_anchor == "none":
             if not food_anchor_retry_done:
                 food_anchor_retry_done = True
             else:
@@ -1384,6 +1385,84 @@ class PlaywrightGeminiDOMContractTests(unittest.TestCase):
         ok, reason = bridge.submit_result(late_result)
         self.assertFalse(ok)
         self.assertEqual(reason, "request_cancelled")
+
+    def test_case_13_cafe_dessert_anchor_missing_disarms_auto_submit(self):
+        """Case 13: CAFE_DESSERT 글에서 앵커 미매칭 시 1회 재시도 후에도 미매칭이면 auto_submit disarmed 검증"""
+        content_focus = "CAFE_DESSERT"
+        verified_anchors = ["소금빵", "크로플", "바닐라라떼"]
+        selected_anchor = "none"
+
+        food_anchor_retry_done = False
+        food_anchor_fail_closed = False
+        auto_submit_timeout = 4.5
+        auto_comment_submit_enabled = True
+
+        # Attempt 1
+        is_food_or_cafe = content_focus in ("FOOD_RESTAURANT", "FOOD_PRODUCT", "CAFE_DESSERT")
+        self.assertTrue(is_food_or_cafe, "CAFE_DESSERT must be classified as food/cafe category")
+
+        if is_food_or_cafe and verified_anchors and selected_anchor == "none":
+            if not food_anchor_retry_done:
+                food_anchor_retry_done = True
+            else:
+                food_anchor_fail_closed = True
+
+        self.assertTrue(food_anchor_retry_done)
+        self.assertFalse(food_anchor_fail_closed)
+
+        # Attempt 2 (still missing anchor)
+        if is_food_or_cafe and verified_anchors and selected_anchor == "none":
+            if not food_anchor_retry_done:
+                food_anchor_retry_done = True
+            else:
+                food_anchor_fail_closed = True
+
+        self.assertTrue(food_anchor_fail_closed)
+        if auto_comment_submit_enabled and food_anchor_fail_closed:
+            auto_submit_timeout = None
+
+        self.assertIsNone(auto_submit_timeout, "CAFE_DESSERT anchor missing must disarm auto_submit_timeout to None!")
+
+    def test_case_14_initiating_analysis_zero_editor_insert_and_submit(self):
+        """Case 14: 'Initiating the Analysis Gemini의 응답' 발생 시 editor insert 0 / submit 0 보장 검증"""
+        contaminated_text = "Initiating the Analysis Gemini의 응답"
+
+        editor_inserts = []
+        submits_dispatched = []
+
+        # Gate check before draft inspector / editor injection
+        gate_res = ResponseContaminationGate.validate(contaminated_text)
+        self.assertTrue(gate_res.is_contaminated, "Contaminated text must be flagged")
+
+        # Processor logic: contaminated text triggers retry and aborts editor injection
+        if not gate_res.is_contaminated:
+            editor_inserts.append(contaminated_text)
+            submits_dispatched.append(contaminated_text)
+
+        self.assertEqual(len(editor_inserts), 0, "Editor insert must be 0 for contaminated text!")
+        self.assertEqual(len(submits_dispatched), 0, "Submit dispatch must be 0 for contaminated text!")
+
+    def test_case_15_clean_remainder_extraction_from_mixed_status(self):
+        """Case 15: 'Gemini의 응답\\n곱창 소스에...' 에서 UI line을 제거한 clean remainder 정상 댓글 반환 검증"""
+        raw_output = "Gemini의 응답\n곱창 소스에 청양고추 넣으면 끝도 없이 들어가겠네요~"
+
+        import re
+        patterns = [
+            re.compile(r"Initiating the Analysis", re.IGNORECASE),
+            re.compile(r"Gemini의\s*응답", re.IGNORECASE),
+            re.compile(r"Thinking\.\.\.", re.IGNORECASE)
+        ]
+
+        remainder = raw_output.strip()
+        for pat in patterns:
+            remainder = pat.sub("", remainder)
+
+        clean_remainder = "\n".join([line.strip() for line in remainder.split("\n") if line.strip()]).strip()
+
+        self.assertEqual(clean_remainder, "곱창 소스에 청양고추 넣으면 끝도 없이 들어가겠네요~")
+        gate_res = ResponseContaminationGate.validate(clean_remainder)
+        self.assertFalse(gate_res.is_contaminated)
+        self.assertEqual(gate_res.code, "clean")
 
 
 if __name__ == "__main__":
