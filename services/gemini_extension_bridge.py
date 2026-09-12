@@ -78,14 +78,29 @@ class GeminiResult:
 
     @classmethod
     def from_json(cls, payload: Dict[str, object]):
+        req_id = str(payload.get("requestId", "") or "").strip()
+        post_k = str(payload.get("postKey", "") or "").strip()
+        nav_v = payload.get("navigationVersion", 0)
+        try:
+            nav_int = int(nav_v) if nav_v is not None else 0
+        except (ValueError, TypeError):
+            nav_int = 0
+        raw_status = str(payload.get("status", "failed") or "failed").strip().lower()
+        try:
+            status_enum = GeminiResultStatus(raw_status)
+        except ValueError:
+            status_enum = GeminiResultStatus.FAILED
+        text_val = str(payload.get("text", "") or "")
+        err_val = str(payload.get("error", "") or "")
         return cls(
-            str(payload.get("requestId", "")),
-            str(payload.get("postKey", "")),
-            int(payload.get("navigationVersion", 0)),
-            GeminiResultStatus(str(payload.get("status", "failed"))),
-            str(payload.get("text", "")),
-            str(payload.get("error", "")),
+            req_id,
+            post_k,
+            nav_int,
+            status_enum,
+            text_val,
+            err_val,
         )
+
 
 
 @dataclass(frozen=True)
@@ -552,7 +567,7 @@ class GeminiExtensionBridge:
                 return False, "request_cancelled"
             if not command:
                 cached_res = self._results.get(result.request_id)
-                if cached_res and cached_res.post_key == result.post_key:
+                if cached_res and (not result.post_key or not cached_res.post_key or cached_res.post_key == result.post_key):
                     return True, "already_accepted"
                 return False, "no_active_command"
             if time.time() > command.deadline_at:
@@ -561,9 +576,9 @@ class GeminiExtensionBridge:
                 return False, "late_result"
             if result.request_id != command.request_id:
                 return False, "request_id_mismatch"
-            if result.post_key != command.post_key:
+            if result.post_key and command.post_key and result.post_key.strip() != command.post_key.strip():
                 return False, "post_key_mismatch"
-            if result.navigation_version != command.navigation_version:
+            if result.navigation_version and command.navigation_version and result.navigation_version != command.navigation_version:
                 return False, "navigation_version_mismatch"
             self._results[result.request_id] = result
             if len(self._results) > 100:
@@ -650,7 +665,8 @@ class GeminiBridgeHTTPServer:
                     self.send_header("Content-Type", "application/json; charset=utf-8")
                     self.send_header("Access-Control-Allow-Origin", "*")
                     self.send_header("Access-Control-Allow-Methods", "GET, POST, OPTIONS")
-                    self.send_header("Access-Control-Allow-Headers", "Content-Type, Authorization, X-Requested-With")
+                    self.send_header("Access-Control-Allow-Headers", "Content-Type, Authorization, X-Requested-With, Access-Control-Request-Private-Network")
+                    self.send_header("Access-Control-Allow-Private-Network", "true")
                     self.send_header("Cache-Control", "no-store, no-cache, must-revalidate")
                     self.send_header("Content-Length", str(len(body)))
                     self.end_headers()
@@ -663,7 +679,8 @@ class GeminiBridgeHTTPServer:
                     self.send_response(204)
                     self.send_header("Access-Control-Allow-Origin", "*")
                     self.send_header("Access-Control-Allow-Methods", "GET, POST, OPTIONS")
-                    self.send_header("Access-Control-Allow-Headers", "Content-Type, Authorization, X-Requested-With")
+                    self.send_header("Access-Control-Allow-Headers", "Content-Type, Authorization, X-Requested-With, Access-Control-Request-Private-Network")
+                    self.send_header("Access-Control-Allow-Private-Network", "true")
                     self.send_header("Access-Control-Max-Age", "86400")
                     self.send_header("Content-Length", "0")
                     self.end_headers()
@@ -724,8 +741,26 @@ class GeminiBridgeHTTPServer:
                     cancelled = bridge.cancel_command(str(payload.get("requestId", "")))
                     return self._json(200, {"ok": True, "cancelled": cancelled})
                 if self.path == "/v1/result":
-                    accepted, reason = bridge.submit_result(GeminiResult.from_json(payload))
-                    return self._json(200, {"ok": True, "accepted": accepted, "reason": reason})
+                    try:
+                        rid = str(payload.get("requestId", "") or "").strip()
+                        post_k = str(payload.get("postKey", "") or "").strip()
+                        nav_v = payload.get("navigationVersion", 0)
+                        status_v = str(payload.get("status", "") or "").strip()
+                        text_len = len(str(payload.get("text", "") or ""))
+                        logger.log(
+                            f"[GEMINI][RESULT_INCOMING] rid={rid} post={post_k} nav={nav_v} status={status_v} chars={text_len}"
+                        )
+                        res_obj = GeminiResult.from_json(payload)
+                        accepted, reason = bridge.submit_result(res_obj)
+                        if not accepted:
+                            logger.log(
+                                f"[GEMINI][RESULT_REJECTED] rid={rid} reason={reason}", "WARNING"
+                            )
+                        return self._json(200, {"ok": True, "accepted": accepted, "reason": reason})
+                    except Exception as err:
+                        logger.log(f"[GEMINI][RESULT_PARSE_ERROR] err={err}", "ERROR")
+                        return self._json(500, {"ok": False, "error": str(err)})
+
                 if self.path == "/v1/event":
                     ev_type = str(payload.get("type", ""))
                     if ev_type == "FRESH_CHAT_READY":

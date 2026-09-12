@@ -168,7 +168,7 @@ async function startHeartbeatLoop() {
         buildId: contract.runtimeBuild,
         protocolVersion: contract.protocolVersion,
         bridgeSchemaVersion: contract.bridgeSchemaVersion,
-        consumerId: 'background-r11',
+        consumerId: 'background-r12',
         lastRuntimePingAt: now,
         busyRequestId: activeRuntime?.ping.busyRequestId || null,
         busySince: activeRuntime?.ping.busySince || null,
@@ -226,7 +226,7 @@ async function ensureFreshGeminiConversation(tabId) {
           buildId: contract.runtimeBuild,
           protocolVersion: contract.protocolVersion,
           bridgeSchemaVersion: contract.bridgeSchemaVersion,
-          consumerId: 'background-r11',
+          consumerId: 'background-r12',
           lastRuntimePingAt: Date.now(),
           tabId: tabId,
           contentInstanceId: checkRes.contentInstanceId,
@@ -313,7 +313,7 @@ async function ensureFreshGeminiConversation(tabId) {
           buildId: contract.runtimeBuild,
           protocolVersion: contract.protocolVersion,
           bridgeSchemaVersion: contract.bridgeSchemaVersion,
-          consumerId: 'background-r11',
+          consumerId: 'background-r12',
           lastRuntimePingAt: Date.now(),
           tabId: tabId,
           contentInstanceId: checkRes.contentInstanceId,
@@ -408,8 +408,19 @@ async function runCommandCycle() {
               : 60000));
     const timeoutMs = Math.max(5000, deadlineMs);
 
+    const keepAliveInterval = setInterval(() => {
+      if (!inFlightCommandResolvers.has(command.requestId)) {
+        clearInterval(keepAliveInterval);
+        return;
+      }
+      try {
+        chrome.runtime.getPlatformInfo(() => {});
+      } catch (_) {}
+    }, 4500);
+
     const timer = setTimeout(() => {
       if (inFlightCommandResolvers.has(command.requestId)) {
+        clearInterval(keepAliveInterval);
         inFlightCommandResolvers.delete(command.requestId);
         trackCancelledRequestId(command.requestId);
         try {
@@ -425,6 +436,7 @@ async function runCommandCycle() {
     inFlightCommandResolvers.set(command.requestId, {
       resolve,
       timer,
+      keepAliveInterval,
       commandMetadata: {
         requestId: command.requestId,
         postKey: command.postKey,
@@ -444,6 +456,7 @@ async function runCommandCycle() {
           const inFlight = inFlightCommandResolvers.get(command.requestId);
           if (inFlight) {
             if (inFlight.timer) clearTimeout(inFlight.timer);
+            if (inFlight.keepAliveInterval) clearInterval(inFlight.keepAliveInterval);
             inFlightCommandResolvers.delete(command.requestId);
           }
           resolve({
@@ -477,6 +490,8 @@ async function runCommandCycle() {
       if (res && (res.accepted === true || res.reason === 'already_accepted')) {
         resultDelivered = true;
         break;
+      } else if (res) {
+        console.warn(`[GEMINI][BACKGROUND] result submit attempt ${attempt + 1} unaccepted:`, res.reason);
       }
     } catch (resErr) {
       console.debug(`[GEMINI][BACKGROUND] result submit attempt ${attempt + 1} fail:`, resErr);
@@ -500,7 +515,7 @@ async function runCommandCycle() {
       buildId: contract.runtimeBuild,
       protocolVersion: contract.protocolVersion,
       bridgeSchemaVersion: contract.bridgeSchemaVersion,
-      consumerId: 'background-r11',
+      consumerId: 'background-r12',
       lastRuntimePingAt: now,
       busyRequestId: postExecRuntime?.ping.busyRequestId || null,
       busySince: postExecRuntime?.ping.busySince || null,
@@ -601,8 +616,11 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
     const inFlight = inFlightCommandResolvers.get(message.requestId);
     if (inFlight) {
       if (inFlight.timer) clearTimeout(inFlight.timer);
+      if (inFlight.keepAliveInterval) clearInterval(inFlight.keepAliveInterval);
       inFlightCommandResolvers.delete(message.requestId);
       inFlight.resolve(message.result);
+      sendResponse({ ok: true, forwarded: true });
+      return true;
     } else {
       // Recovery fallback when resolver is missing (e.g. timeout race or extension restart)
       console.log('[GEMINI][BACKGROUND] resolver_missing_result_recovered', message.requestId);
@@ -614,11 +632,17 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
           status: message.result.status || 'failed',
           text: message.result.text || '',
           error: message.result.error || ''
-        }, 10000).catch(err => console.debug('[GEMINI][BACKGROUND] recovery submit fail:', err));
+        }, 10000)
+          .then(res => sendResponse({ ok: true, recovered: true, res }))
+          .catch(err => {
+            console.debug('[GEMINI][BACKGROUND] recovery submit fail:', err);
+            sendResponse({ ok: false, recovered: false, error: String(err?.message || err) });
+          });
+        return true;
       }
+      sendResponse({ ok: true, recovered: false });
+      return true;
     }
-    sendResponse({ ok: true });
-    return true;
   }
 
   if (message?.type === 'NFA_WAIT_DIAG') {

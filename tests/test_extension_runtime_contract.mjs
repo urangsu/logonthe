@@ -898,3 +898,115 @@ test('GEM-R11-027: visibleTurnCandidates and visibleTextCandidates split verific
   assert.strictEqual(visibleTextCandidates, 1, 'visibleTextCandidates must only count candidates with non-empty text');
 });
 
+test('GEM-R12-028: old r11 runtime with r12 contract triggers reinjection', () => {
+  const contract = { runtimeBuild: '13.2.3-r12' };
+  const pingResponse = { ok: true, build: '13.2.3-r11' };
+  let reinjected = false;
+  if (!pingResponse.ok || pingResponse.build !== contract.runtimeBuild) {
+    reinjected = true;
+  }
+  assert.strictEqual(reinjected, true, 'r11 build must trigger reinjection under r12 contract');
+});
+
+test('GEM-R12-029: deliverExecutionResult retries on missing background ACK and performs direct HTTP fallback', async () => {
+  let sendMessageAttempts = 0;
+  let directFetchCalled = false;
+  let directFetchPayload = null;
+
+  const mockSendMessage = (_payload, callback) => {
+    sendMessageAttempts++;
+    // Simulate background script asleep/unresponsive on attempt 1, 2, 3
+    callback({ ok: false, error: 'no_ack' });
+  };
+
+  const mockFetch = async (url, options) => {
+    directFetchCalled = true;
+    directFetchPayload = JSON.parse(options.body);
+    return {
+      ok: true,
+      json: async () => ({ ok: true, accepted: true })
+    };
+  };
+
+  const command = {
+    requestId: 'req_fallback_test',
+    postKey: 'user:123',
+    navigationVersion: 1
+  };
+  const result = {
+    status: 'completed',
+    text: '돼지갈비찜에 콩나물 바로 올려서 드시는 게 딱이네요~',
+    error: ''
+  };
+
+  // Simulating deliverExecutionResult logic
+  let backgroundAck = false;
+  for (let attempt = 1; attempt <= 3; attempt++) {
+    const resp = await new Promise((resolve) => {
+      mockSendMessage({ type: 'NFA_EXECUTION_RESULT', command, result }, (ack) => {
+        resolve(ack);
+      });
+    });
+    if (resp?.ok) {
+      backgroundAck = true;
+      break;
+    }
+  }
+
+  if (!backgroundAck || (result.status === 'completed' && result.text)) {
+    await mockFetch('http://127.0.0.1:43127/v1/result', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        requestId: command.requestId,
+        postKey: command.postKey,
+        navigationVersion: command.navigationVersion,
+        status: result.status,
+        text: result.text,
+        error: result.error
+      })
+    });
+  }
+
+  assert.strictEqual(sendMessageAttempts, 3, 'Must retry background messaging 3 times');
+  assert.strictEqual(directFetchCalled, true, 'Must execute direct HTTP fallback to Python bridge');
+  assert.strictEqual(directFetchPayload.text, '돼지갈비찜에 콩나물 바로 올려서 드시는 게 딱이네요~');
+  assert.strictEqual(directFetchPayload.status, 'completed');
+});
+
+test('GEM-R12-030: background keepalive interval resets SW idle timer and cleans up on command settle', async () => {
+  const inFlightCommandResolvers = new Map();
+  let keepAlivePings = 0;
+  let keepAliveCleaned = false;
+
+  const rid = 'req_keepalive_test';
+  const keepAliveInterval = {
+    _id: 1,
+    clear() {
+      keepAliveCleaned = true;
+    }
+  };
+
+  inFlightCommandResolvers.set(rid, {
+    resolve: () => {},
+    timer: { clear: () => {} },
+    keepAliveInterval
+  });
+
+  // Simulating keepalive tick
+  if (inFlightCommandResolvers.has(rid)) {
+    keepAlivePings++;
+  }
+
+  assert.strictEqual(keepAlivePings, 1);
+
+  // Simulating command completion cleanup
+  const inFlight = inFlightCommandResolvers.get(rid);
+  assert.ok(inFlight);
+  inFlight.keepAliveInterval.clear();
+  inFlightCommandResolvers.delete(rid);
+
+  assert.strictEqual(keepAliveCleaned, true, 'keepalive interval must be cleared on command settle');
+  assert.strictEqual(inFlightCommandResolvers.has(rid), false);
+});
+

@@ -41,7 +41,7 @@
   ].join(', ');
   let runtimeContract = {
     extensionVersion: '13.2.3',
-    runtimeBuild: '13.2.3-r11',
+    runtimeBuild: '13.2.3-r12',
     protocolVersion: 3,
     bridgeSchemaVersion: 2
   };
@@ -1389,6 +1389,82 @@
     }
   }
 
+  async function deliverExecutionResult(command, result) {
+    const rid = command?.requestId;
+    const postKey = command?.postKey || '';
+    const navigationVersion = command?.navigationVersion || 0;
+    console.log('[GEMINI][DELIVER_RESULT_START]', JSON.stringify({
+      rid,
+      status: result?.status,
+      textLen: result?.text?.length || 0
+    }));
+
+    const payload = {
+      type: 'NFA_EXECUTION_RESULT',
+      requestId: rid,
+      postKey: postKey,
+      navigationVersion: navigationVersion,
+      result: result
+    };
+
+    // 1. Deliver to background.js with acknowledgement and retry
+    let backgroundAck = false;
+    for (let attempt = 1; attempt <= 3; attempt++) {
+      try {
+        const resp = await new Promise((resolve) => {
+          try {
+            chrome.runtime.sendMessage(payload, (ack) => {
+              if (chrome.runtime.lastError || !ack?.ok) {
+                resolve({ ok: false, error: chrome.runtime.lastError?.message || 'no_ack' });
+              } else {
+                resolve(ack);
+              }
+            });
+          } catch (sendErr) {
+            resolve({ ok: false, error: String(sendErr?.message || sendErr) });
+          }
+        });
+        if (resp?.ok) {
+          backgroundAck = true;
+          console.log('[GEMINI][DELIVER_RESULT_BACKGROUND_ACK]', JSON.stringify({ rid, attempt }));
+          break;
+        }
+      } catch (err) {
+        console.warn('[GEMINI][DELIVER_RESULT_BACKGROUND_RETRY]', attempt, err);
+      }
+      await new Promise(r => setTimeout(r, 250));
+    }
+
+    // 2. Direct loopback HTTP delivery to Python bridge (http://127.0.0.1:43127/v1/result)
+    // Always trigger direct delivery if background ACK was missed OR if result has completed text
+    // (Idempotent: Python bridge accepts first and returns already_accepted for duplicates)
+    if (!backgroundAck || (result?.status === 'completed' && result?.text)) {
+      try {
+        const directBody = {
+          requestId: rid,
+          postKey: postKey,
+          navigationVersion: navigationVersion,
+          status: result?.status || 'failed',
+          text: result?.text || '',
+          error: result?.error || ''
+        };
+        const directRes = await fetch('http://127.0.0.1:43127/v1/result', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify(directBody)
+        });
+        if (directRes.ok) {
+          const directJson = await directRes.json();
+          console.log('[GEMINI][DELIVER_RESULT_DIRECT_SUCCESS]', JSON.stringify({ rid, directJson }));
+        } else {
+          console.warn('[GEMINI][DELIVER_RESULT_DIRECT_HTTP_FAIL]', directRes.status);
+        }
+      } catch (directErr) {
+        console.warn('[GEMINI][DELIVER_RESULT_DIRECT_FETCH_ERR]', String(directErr?.message || directErr));
+      }
+    }
+  }
+
   // Register message listeners
   const messageListener = (message, _sender, sendResponse) => {
     if (isStopped) return false;
@@ -1475,30 +1551,10 @@
         protocol: 'two-message-v2'
       });
 
-      // Asynchronous core execution followed by NFA_EXECUTION_RESULT push
+      // Asynchronous core execution followed by multi-channel result delivery
       execute(message.command)
-        .then(result => {
-          try {
-            chrome.runtime.sendMessage({
-              type: 'NFA_EXECUTION_RESULT',
-              requestId: message.command?.requestId,
-              postKey: message.command?.postKey,
-              navigationVersion: message.command?.navigationVersion,
-              result: result
-            });
-          } catch (_) {}
-        })
-        .catch(err => {
-          try {
-            chrome.runtime.sendMessage({
-              type: 'NFA_EXECUTION_RESULT',
-              requestId: message.command?.requestId,
-              postKey: message.command?.postKey,
-              navigationVersion: message.command?.navigationVersion,
-              result: { status: 'failed', text: '', error: String(err?.message || err) }
-            });
-          } catch (_) {}
-        });
+        .then(result => deliverExecutionResult(message.command, result))
+        .catch(err => deliverExecutionResult(message.command, { status: 'failed', text: '', error: String(err?.message || err) }));
 
       return false;
     }
@@ -1526,6 +1582,7 @@
     }),
     resolveTurnCandidate,
     extractCleanText,
-    extractResponseText
+    extractResponseText,
+    deliverExecutionResult
   };
 })();

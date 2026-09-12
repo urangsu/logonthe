@@ -55,7 +55,7 @@ class TestHighReliabilityMatrix(unittest.TestCase):
 
     def test_gem_01_result_then_busy_heartbeat_settling_window(self):
         """GEM-01: 결과 수신 직후 이전 busy 하트비트 도착 시 settling 유예로 정상 전환 처리"""
-        bridge = GeminiExtensionBridge(expected_extension_version="13.2.3", expected_build_id="13.2.3-r11")
+        bridge = GeminiExtensionBridge(expected_extension_version="13.2.3", expected_build_id="13.2.3-r12")
         cmd = GeminiCommand("req_01", "post_01", 1, "prompt", time.time(), time.time() + 50)
         bridge.publish(cmd)
         bridge.claim_command("req_01")
@@ -68,7 +68,7 @@ class TestHighReliabilityMatrix(unittest.TestCase):
             "status": "busy",
             "busyRequestId": "req_01",
             "extensionVersion": "13.2.3",
-            "contentBuild": "13.2.3-r11",
+            "contentBuild": "13.2.3-r12",
             "protocolVersion": 3,
             "bridgeSchemaVersion": 2,
         })
@@ -80,7 +80,7 @@ class TestHighReliabilityMatrix(unittest.TestCase):
 
     def test_gem_03_active_request_not_cancelled_by_foreign_status(self):
         """GEM-03: 정상 생성 중 다른 요청 상태 보고로 활성 요청 오취소 방지"""
-        bridge = GeminiExtensionBridge(expected_extension_version="13.2.3", expected_build_id="13.2.3-r11")
+        bridge = GeminiExtensionBridge(expected_extension_version="13.2.3", expected_build_id="13.2.3-r12")
         cmd = GeminiCommand("req_active", "post_01", 1, "prompt", time.time(), time.time() + 50)
         bridge.publish(cmd)
 
@@ -89,7 +89,7 @@ class TestHighReliabilityMatrix(unittest.TestCase):
             "status": "busy",
             "busyRequestId": "req_active",
             "extensionVersion": "13.2.3",
-            "contentBuild": "13.2.3-r11",
+            "contentBuild": "13.2.3-r12",
             "protocolVersion": 3,
             "bridgeSchemaVersion": 2,
         })
@@ -99,7 +99,7 @@ class TestHighReliabilityMatrix(unittest.TestCase):
 
     def test_gem_04_skip_discards_late_response(self):
         """GEM-04: 건너뛰기(Skip) 후 도착한 늦은 응답은 다음 글에 적용 금지"""
-        bridge = GeminiExtensionBridge(expected_extension_version="13.2.3", expected_build_id="13.2.3-r11")
+        bridge = GeminiExtensionBridge(expected_extension_version="13.2.3", expected_build_id="13.2.3-r12")
         cmd1 = GeminiCommand("req_old", "post_old", 1, "prompt", time.time(), time.time() + 50)
         bridge.publish(cmd1)
 
@@ -115,7 +115,7 @@ class TestHighReliabilityMatrix(unittest.TestCase):
 
     def test_gem_05_idempotent_duplicate_result_submission(self):
         """GEM-05: 동일 결과 재전송 시 중복 처리 없이 멱등 응답(already_accepted) 반환"""
-        bridge = GeminiExtensionBridge(expected_extension_version="13.2.3", expected_build_id="13.2.3-r11")
+        bridge = GeminiExtensionBridge(expected_extension_version="13.2.3", expected_build_id="13.2.3-r12")
         cmd = GeminiCommand("req_05", "post_05", 1, "prompt", time.time(), time.time() + 50)
         bridge.publish(cmd)
         bridge.claim_command("req_05")
@@ -166,7 +166,7 @@ class TestHighReliabilityMatrix(unittest.TestCase):
 
     def test_gem_06_claim_fixes_ownership_to_specific_runtime(self):
         """GEM-06: 여러 제미나이 탭이 있을 때 claim한 런타임에 고정"""
-        bridge = GeminiExtensionBridge(expected_extension_version="13.2.3", expected_build_id="13.2.3-r11")
+        bridge = GeminiExtensionBridge(expected_extension_version="13.2.3", expected_build_id="13.2.3-r12")
         cmd = GeminiCommand("req_06", "post_06", 1, "prompt", time.time(), time.time() + 50)
         bridge.publish(cmd)
 
@@ -180,7 +180,7 @@ class TestHighReliabilityMatrix(unittest.TestCase):
 
     def test_gem_07_result_delivery_ack_lost_client_retries(self):
         """GEM-07: 결과 전달 응답(ACK) 유실 시 클라이언트 재전송 멱등 수용 및 브릿지 일관성"""
-        bridge = GeminiExtensionBridge(expected_extension_version="13.2.3", expected_build_id="13.2.3-r11")
+        bridge = GeminiExtensionBridge(expected_extension_version="13.2.3", expected_build_id="13.2.3-r12")
         cmd = GeminiCommand("req_07", "post_07", 1, "prompt", time.time(), time.time() + 50)
         bridge.publish(cmd)
         bridge.claim_command("req_07")
