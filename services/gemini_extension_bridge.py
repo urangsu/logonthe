@@ -80,16 +80,27 @@ class GeminiResult:
     def from_json(cls, payload: Dict[str, object]):
         req_id = str(payload.get("requestId", "") or "").strip()
         post_k = str(payload.get("postKey", "") or "").strip()
-        nav_v = payload.get("navigationVersion", 0)
+        if not req_id:
+            raise ValueError("missing_request_id")
+        if not post_k:
+            raise ValueError("missing_post_key")
+
+        nav_v = payload.get("navigationVersion", None)
         try:
-            nav_int = int(nav_v) if nav_v is not None else 0
+            nav_int = int(nav_v)
         except (ValueError, TypeError):
-            nav_int = 0
-        raw_status = str(payload.get("status", "failed") or "failed").strip().lower()
+            raise ValueError("invalid_navigation_version")
+        if nav_int <= 0:
+            raise ValueError("invalid_navigation_version")
+
+        raw_status = str(payload.get("status", "") or "").strip().lower()
+        if not raw_status:
+            raise ValueError("missing_result_status")
         try:
             status_enum = GeminiResultStatus(raw_status)
-        except ValueError:
-            status_enum = GeminiResultStatus.FAILED
+        except ValueError as exc:
+            raise ValueError(f"invalid_result_status:{raw_status}") from exc
+
         text_val = str(payload.get("text", "") or "")
         err_val = str(payload.get("error", "") or "")
         return cls(
@@ -100,7 +111,6 @@ class GeminiResult:
             text_val,
             err_val,
         )
-
 
 
 @dataclass(frozen=True)
@@ -226,7 +236,6 @@ class GeminiExtensionBridge:
 
         with self._condition:
             now = time.time()
-            # If a late busy heartbeat arrives for a recently completed request, treat as settling
             if status == "busy" and busy_request_id and busy_request_id == self._last_completed_request_id:
                 if (now - self._last_completed_at) < 2.5:
                     status = "settling"
@@ -375,7 +384,6 @@ class GeminiExtensionBridge:
                 )
 
             if self._heartbeat_status == "busy":
-                # Check if this busy belongs to a recently completed command in transition
                 now_t = time.time()
                 if self._last_completed_request_id and (now_t - self._last_completed_at) < 2.5:
                     if not self._last_busy_request_id or self._last_busy_request_id == self._last_completed_request_id:
@@ -386,7 +394,6 @@ class GeminiExtensionBridge:
                             self.bridge_session_id, self._active_request_id, self._command_state
                         )
 
-                # Classify busy into busy_active_command, busy_orphaned, busy_stale_deadline
                 if self._last_busy_deadline_at and time.time() > (self._last_busy_deadline_at / 1000.0 if self._last_busy_deadline_at > 100_000_000_000 else self._last_busy_deadline_at):
                     return GeminiPreflight(
                         False, "busy_stale_deadline", self._heartbeat_title, self._heartbeat_url,
@@ -445,7 +452,6 @@ class GeminiExtensionBridge:
         stop_event: Optional[threading.Event] = None,
         skip_event: Optional[threading.Event] = None,
     ) -> GeminiPreflight:
-        """피드 작업 시작 및 재시도 시 유예 시간(5초)을 두고 ready 상태를 대기하며, orphan/stale은 자동 복구"""
         deadline = time.monotonic() + max(0.1, timeout)
         while time.monotonic() < deadline:
             if stop_event and stop_event.is_set():
@@ -560,26 +566,52 @@ class GeminiExtensionBridge:
             )
             return True
 
+    @staticmethod
+    def _same_result_payload(left: GeminiResult, right: GeminiResult) -> bool:
+        return (
+            left.request_id == right.request_id
+            and left.post_key == right.post_key
+            and left.navigation_version == right.navigation_version
+            and left.status == right.status
+            and left.text == right.text
+            and left.error == right.error
+        )
+
     def submit_result(self, result: GeminiResult) -> tuple[bool, str]:
         with self._condition:
-            command = self._command
+            if not result.request_id:
+                return False, "missing_request_id"
+
             if result.request_id in self._cancel_requests:
                 return False, "request_cancelled"
-            if not command:
-                cached_res = self._results.get(result.request_id)
-                if cached_res and (not result.post_key or not cached_res.post_key or cached_res.post_key == result.post_key):
+
+            cached_res = self._results.get(result.request_id)
+            if cached_res:
+                if self._same_result_payload(cached_res, result):
                     return True, "already_accepted"
+                return False, "duplicate_result_conflict"
+
+            if not result.post_key:
+                return False, "missing_post_key"
+            if result.navigation_version <= 0:
+                return False, "invalid_navigation_version"
+
+            command = self._command
+            if not command:
                 return False, "no_active_command"
+            if not command.post_key or command.navigation_version <= 0:
+                return False, "active_command_identity_invalid"
             if time.time() > command.deadline_at:
                 self._command = None
                 self._command_state = "expired"
                 return False, "late_result"
             if result.request_id != command.request_id:
                 return False, "request_id_mismatch"
-            if result.post_key and command.post_key and result.post_key.strip() != command.post_key.strip():
+            if result.post_key != command.post_key:
                 return False, "post_key_mismatch"
-            if result.navigation_version and command.navigation_version and result.navigation_version != command.navigation_version:
+            if result.navigation_version != command.navigation_version:
                 return False, "navigation_version_mismatch"
+
             self._results[result.request_id] = result
             if len(self._results) > 100:
                 oldest_key = next(iter(self._results))
@@ -596,7 +628,7 @@ class GeminiExtensionBridge:
             else:
                 self._heartbeat_status = "recovering"
             self._last_busy_request_id = None
-            logger.log(f"[GEMINI][RESULT] rid={result.request_id} post={result.post_key} nav={result.navigation_version} status={result.status.value}")
+            logger.log(f"[GEMINI][RESULT_ACCEPTED] rid={result.request_id} post={result.post_key} nav={result.navigation_version} status={result.status.value}")
             self._condition.notify_all()
             return True, "accepted"
 
@@ -626,6 +658,7 @@ class GeminiExtensionBridge:
                 if result:
                     if self._active_request_id == command.request_id:
                         self._active_request_id = None
+                    logger.log(f"[GEMINI][RESULT_CONSUMED] rid={command.request_id} post={result.post_key} nav={result.navigation_version}")
                     return result
                 remaining = deadline - time.monotonic()
                 if remaining <= 0:
@@ -744,7 +777,7 @@ class GeminiBridgeHTTPServer:
                     try:
                         rid = str(payload.get("requestId", "") or "").strip()
                         post_k = str(payload.get("postKey", "") or "").strip()
-                        nav_v = payload.get("navigationVersion", 0)
+                        nav_v = payload.get("navigationVersion", None)
                         status_v = str(payload.get("status", "") or "").strip()
                         text_len = len(str(payload.get("text", "") or ""))
                         logger.log(
@@ -752,14 +785,29 @@ class GeminiBridgeHTTPServer:
                         )
                         res_obj = GeminiResult.from_json(payload)
                         accepted, reason = bridge.submit_result(res_obj)
-                        if not accepted:
+                        if accepted:
+                            logger.log(f"[GEMINI][RESULT_DELIVERY_ACCEPTED] rid={rid} reason={reason}")
+                        else:
                             logger.log(
                                 f"[GEMINI][RESULT_REJECTED] rid={rid} reason={reason}", "WARNING"
                             )
-                        return self._json(200, {"ok": True, "accepted": accepted, "reason": reason})
+                        return self._json(200, {
+                            "ok": accepted,
+                            "received": True,
+                            "accepted": accepted,
+                            "reason": reason,
+                        })
+                    except ValueError as err:
+                        logger.log(f"[GEMINI][RESULT_PARSE_REJECTED] err={err}", "WARNING")
+                        return self._json(400, {
+                            "ok": False,
+                            "received": True,
+                            "accepted": False,
+                            "reason": str(err),
+                        })
                     except Exception as err:
                         logger.log(f"[GEMINI][RESULT_PARSE_ERROR] err={err}", "ERROR")
-                        return self._json(500, {"ok": False, "error": str(err)})
+                        return self._json(500, {"ok": False, "received": False, "accepted": False, "error": str(err)})
 
                 if self.path == "/v1/event":
                     ev_type = str(payload.get("type", ""))
@@ -822,7 +870,6 @@ class GeminiBridgeHTTPServer:
             self._thread = threading.Thread(target=self._server.serve_forever, daemon=True)
             self._thread.start()
 
-            # Execute loopback self-test on /v1/status
             self_test_status = "FAIL"
             try:
                 import http.client
