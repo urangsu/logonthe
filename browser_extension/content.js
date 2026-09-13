@@ -23,7 +23,7 @@
     '[data-test-id="model-response"]', '.response-container-content', 'message-content', '.model-response-text'
   ].join(', ');
   let runtimeContract = {
-    extensionVersion: '13.2.3', runtimeBuild: '13.2.3-r13', protocolVersion: 3, bridgeSchemaVersion: 2
+    extensionVersion: '13.2.3', runtimeBuild: '13.2.3-r14', protocolVersion: 3, bridgeSchemaVersion: 2
   };
 
   try {
@@ -52,6 +52,9 @@
     if (!reqId || activeExecution.requestId === reqId) {
       activeExecution.cancelled = true;
       if (activeExecution.requestId) cancelledRequestIds.add(activeExecution.requestId);
+      if (typeof activeExecution.cleanupObserver === 'function') {
+        try { activeExecution.cleanupObserver(); } catch (_) {}
+      }
       try { activeExecution.observer?.disconnect(); } catch (_) {}
       if (activeExecution.timer) { clearInterval(activeExecution.timer); activeExecution.timer = null; }
       if (typeof activeExecution.finish === 'function') activeExecution.finish({ status: 'failed', text: '', error: reason });
@@ -374,6 +377,49 @@
     } catch (_) {}
   }
 
+  function setupResponseObserver(execState, targetRoot, checkOutput) {
+    let checkTimer = null;
+    let cleanupDone = false;
+
+    let observer = null;
+    try {
+      observer = new MutationObserver(() => checkOutput());
+      if (targetRoot) {
+        observer.observe(targetRoot, { childList: true, subtree: true, characterData: true });
+      }
+    } catch (_) {}
+
+    const cleanupObserver = () => {
+      if (cleanupDone) return;
+      cleanupDone = true;
+
+      try {
+        observer?.disconnect();
+      } catch (_) {}
+
+      const timerToClear = checkTimer;
+      checkTimer = null;
+
+      if (timerToClear !== null) {
+        clearInterval(timerToClear);
+      }
+
+      if (execState.observer === observer) {
+        execState.observer = null;
+      }
+
+      if (execState.timer === timerToClear) {
+        execState.timer = null;
+      }
+    };
+
+    checkTimer = setInterval(checkOutput, 200);
+    execState.observer = observer;
+    execState.timer = checkTimer;
+
+    return cleanupObserver;
+  }
+
   async function executeCore(command, execState) {
     const isExecutionCancelled = () => isStopped || execState.cancelled || cancelledRequestIds.has(command.requestId);
     if (isExecutionCancelled()) return { status:'failed', text:'', error:'cancelled' };
@@ -451,11 +497,15 @@
       console.log('[GEMINI][WAIT_DIAG]',JSON.stringify(diag));try{chrome.runtime.sendMessage({type:'NFA_WAIT_DIAG',diag});}catch(_){}
     }
     return new Promise(resolve=>{
-      let resolved=false,checkTimer=null;
-      const targetRoot=document.querySelector('chat-history, main, body')||document.body;
-      const observer=new MutationObserver(()=>checkOutput());
-      const cleanupObserver=()=>{try{observer.disconnect();}catch(_){}if(checkTimer){clearInterval(checkTimer);checkTimer=null;}if(execState.observer===observer)execState.observer=null;if(execState.timer===checkTimer)execState.timer=null;};
-      const finish=res=>{if(resolved)return;resolved=true;cleanupObserver();if(isExecutionCancelled())resolve({status:'failed',text:'',error:'cancelled'});else resolve(res);};
+      let resolved=false;
+      let cleanupObserver=null;
+      const finish=res=>{
+        if(resolved)return;
+        resolved=true;
+        if(typeof cleanupObserver==='function')cleanupObserver();
+        if(isExecutionCancelled())resolve({status:'failed',text:'',error:'cancelled'});
+        else resolve(res);
+      };
       execState.finish=finish;execState.resolve=resolve;
       function checkOutput(){
         if(isStopped)return finish({status:'failed',text:'',error:'runtime_stopped'});if(isExecutionCancelled())return finish({status:'failed',text:'',error:'cancelled'});const nowMs=Date.now();
@@ -470,15 +520,17 @@
         const mutationAge=Date.now()-lastMutationAtMs,localEvidence=detectGenerationEvidence(targetResponseNode),isGenerating=localEvidence==='local_streaming'||localEvidence==='composer_stop_button';
         if(mutationAge>=1800&&!isGenerating){if(!textStableLogged){textStableLogged=true;console.log('[GEMINI][TEXT_STABLE]',JSON.stringify({rid:command.requestId,chars:current.length,stableMs:mutationAge}));emitEvent('TEXT_STABLE',{chars:current.length,stableMs:mutationAge});}return finish({status:'completed',text:current,error:''});}
       }
-      observer.observe(targetRoot,{childList:true,subtree:true,characterData:true});checkTimer=setInterval(checkOutput,200);execState.observer=observer;execState.timer=checkTimer;
+      const targetRoot=document.querySelector('chat-history, main, body')||document.body;
+      cleanupObserver=setupResponseObserver(execState,targetRoot,checkOutput);
+      execState.cleanupObserver=cleanupObserver;
     });
   }
 
   async function execute(command){
     if(isStopped)return{status:'failed',text:'',error:'runtime_stopped'};const currentReqId=command?.requestId||Math.random().toString(36).slice(2,10);if(cancelledRequestIds.has(currentReqId))return{status:'failed',text:'',error:'cancelled'};if(activeExecution){if(Date.now()>activeExecution.deadlineAtMs)cancelExecution(activeExecution.requestId,'command_deadline_exceeded');else return{status:'busy',text:'',error:'runtime_busy'};}
     let deadlineAtMs;if(typeof command?.deadlineAtMs==='number'&&command.deadlineAtMs>0)deadlineAtMs=command.deadlineAtMs;else if(typeof command?.deadlineAt==='number'&&command.deadlineAt>0)deadlineAtMs=command.deadlineAt<1e11?Math.round(command.deadlineAt*1000):Math.round(command.deadlineAt);else deadlineAtMs=Date.now()+55000;
-    const execState={requestId:currentReqId,startedAtMs:Date.now(),deadlineAtMs,cancelled:false,observer:null,timer:null,finish:null,resolve:null};activeExecution=execState;
-    try{return await executeCore(command,execState);}finally{if(activeExecution?.requestId===currentReqId){try{activeExecution.observer?.disconnect();}catch(_){}if(activeExecution.timer){clearInterval(activeExecution.timer);activeExecution.timer=null;}activeExecution=null;}}
+    const execState={requestId:currentReqId,startedAtMs:Date.now(),deadlineAtMs,cancelled:false,observer:null,timer:null,cleanupObserver:null,finish:null,resolve:null};activeExecution=execState;
+    try{return await executeCore(command,execState);}finally{if(activeExecution?.requestId===currentReqId){if(typeof activeExecution.cleanupObserver==='function'){try{activeExecution.cleanupObserver();}catch(_){}}try{activeExecution.observer?.disconnect();}catch(_){}if(activeExecution.timer){clearInterval(activeExecution.timer);activeExecution.timer=null;}activeExecution=null;}}
   }
 
   const RESULT_ACK_TIMEOUT_MS=1400,RESULT_DIRECT_TIMEOUT_MS=2500,RESULT_DELIVERY_BUDGET_MS=7500;
@@ -519,5 +571,5 @@
     return false;
   };
   chrome.runtime.onMessage.addListener(messageListener);eventCleanups.push(()=>{try{chrome.runtime.onMessage.removeListener(messageListener);}catch(_){}});
-  globalThis.__NFA_GEMINI_RUNTIME__={build:runtimeContract.runtimeBuild,instanceId:INSTANCE_ID,stop:stopRuntime,cancel:cancelExecution,ping:()=>({alive:!isStopped,build:runtimeContract.runtimeBuild,instanceId:INSTANCE_ID,busyRequestId:activeExecution?.requestId||null}),resolveTurnCandidate,extractCleanText,extractResponseText,deliverExecutionResult};
+  globalThis.__NFA_GEMINI_RUNTIME__={build:runtimeContract.runtimeBuild,instanceId:INSTANCE_ID,stop:stopRuntime,cancel:cancelExecution,ping:()=>({alive:!isStopped,build:runtimeContract.runtimeBuild,instanceId:INSTANCE_ID,busyRequestId:activeExecution?.requestId||null}),resolveTurnCandidate,extractCleanText,extractResponseText,deliverExecutionResult,execute,executeCore,getActiveExecution:()=>activeExecution,setupResponseObserver};
 })();

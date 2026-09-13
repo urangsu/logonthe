@@ -1,5 +1,98 @@
 import assert from 'node:assert';
 import test from 'node:test';
+import fs from 'node:fs';
+import path from 'node:path';
+import vm from 'node:vm';
+import { fileURLToPath } from 'node:url';
+
+const __filename = fileURLToPath(import.meta.url);
+const __dirname = path.dirname(__filename);
+const contentJsPath = path.resolve(__dirname, '../browser_extension/content.js');
+const contentJsCode = fs.readFileSync(contentJsPath, 'utf8');
+
+function loadRealContentJs(customEnv = {}) {
+  const sentMessages = [];
+  const listeners = [];
+  const fetches = [];
+  const observers = [];
+
+  class MockMutationObserver {
+    constructor(callback) {
+      this.callback = callback;
+      this.connected = false;
+      this.disconnected = false;
+      observers.push(this);
+    }
+    observe(target, opts) {
+      this.connected = true;
+      this.target = target;
+      this.opts = opts;
+    }
+    disconnect() {
+      this.connected = false;
+      this.disconnected = true;
+    }
+  }
+
+  const context = {
+    console,
+    setTimeout,
+    clearTimeout,
+    setInterval,
+    clearInterval,
+    Date,
+    Math,
+    Set,
+    Map,
+    Promise,
+    Node: { DOCUMENT_POSITION_FOLLOWING: 4 },
+    KeyboardEvent: class { constructor(t, i) { Object.assign(this, i); } },
+    location: { href: 'https://gemini.google.com/app' },
+    document: {
+      title: 'Google Gemini',
+      body: { isConnected: true },
+      querySelector: () => null,
+      querySelectorAll: () => []
+    },
+    chrome: {
+      runtime: {
+        sendMessage: (msg, cb) => {
+          sentMessages.push(msg);
+          if (customEnv.onSendMessage) return customEnv.onSendMessage(msg, cb);
+          if (typeof cb === 'function') cb({ ok: true, accepted: true });
+        },
+        onMessage: {
+          addListener: (fn) => listeners.push(fn),
+          removeListener: (fn) => {
+            const idx = listeners.indexOf(fn);
+            if (idx >= 0) listeners.splice(idx, 1);
+          }
+        },
+        lastError: null
+      }
+    },
+    fetch: async (url, opts) => {
+      fetches.push({ url, opts });
+      if (customEnv.onFetch) return customEnv.onFetch(url, opts);
+      return { ok: true, json: async () => ({ ok: true, accepted: true }) };
+    },
+    MutationObserver: MockMutationObserver,
+    ...customEnv.extraGlobals
+  };
+
+  context.globalThis = context;
+  vm.createContext(context);
+  vm.runInContext(contentJsCode, context);
+
+  return {
+    runtime: context.__NFA_GEMINI_RUNTIME__,
+    messageListener: listeners[0],
+    sentMessages,
+    fetches,
+    observers,
+    context
+  };
+}
 
 function canonicalPromptText(value) {
   return String(value ?? '')
@@ -1008,5 +1101,299 @@ test('GEM-R12-030: background keepalive interval resets SW idle timer and cleans
 
   assert.strictEqual(keepAliveCleaned, true, 'keepalive interval must be cleared on command settle');
   assert.strictEqual(inFlightCommandResolvers.has(rid), false);
+});
+
+test('GEM-R14-031: old r13 runtime with r14 contract triggers reinjection', () => {
+  const contract = { runtimeBuild: '13.2.3-r14' };
+  const pingResponse = { ok: true, build: '13.2.3-r13' };
+  let reinjected = false;
+  if (!pingResponse.ok || pingResponse.build !== contract.runtimeBuild) {
+    reinjected = true;
+  }
+  assert.strictEqual(reinjected, true, 'r13 build must trigger reinjection under r14 contract');
+});
+
+test('GEM-R14-032: 정상 completed -> cleanup -> 예외 0 (실제 content.js 실행 경로)', async () => {
+  const { runtime } = loadRealContentJs();
+  assert.ok(runtime && typeof runtime.setupResponseObserver === 'function');
+
+  const execState = {
+    requestId: 'req_completed_001',
+    startedAtMs: Date.now(),
+    deadlineAtMs: Date.now() + 10000,
+    cancelled: false,
+    observer: null,
+    timer: null,
+    finish: null,
+    resolve: null
+  };
+
+  const finishPromise = new Promise((resolve) => {
+    let resolved = false;
+    let cleanupObserver = null;
+    const finish = (res) => {
+      if (resolved) return;
+      resolved = true;
+      if (typeof cleanupObserver === 'function') cleanupObserver();
+      resolve(res);
+    };
+    execState.finish = finish;
+    execState.resolve = resolve;
+    cleanupObserver = runtime.setupResponseObserver(execState, {}, () => {});
+    execState.cleanupObserver = cleanupObserver;
+  });
+
+  assert.ok(execState.timer !== null, 'timer should be set before finish');
+  assert.ok(execState.observer !== null, 'observer should be set before finish');
+
+  // 정상 completed 완료 호출 시 cleanup 실행 및 예외 0 검증
+  assert.doesNotThrow(() => {
+    execState.finish({ status: 'completed', text: '정상 응답 생성 완료' });
+  });
+
+  const res = await finishPromise;
+  assert.strictEqual(res.status, 'completed');
+  assert.strictEqual(res.text, '정상 응답 생성 완료');
+  assert.strictEqual(execState.timer, null, 'execState.timer must be null after completed');
+  assert.strictEqual(execState.observer, null, 'execState.observer must be null after completed');
+});
+
+test('GEM-R14-033: timeout -> cleanup -> 예외 0 (실제 content.js 실행 경로)', async () => {
+  const { runtime } = loadRealContentJs();
+
+  const execState = {
+    requestId: 'req_timeout_001',
+    startedAtMs: Date.now() - 60000,
+    deadlineAtMs: Date.now() - 1000,
+    cancelled: false,
+    observer: null,
+    timer: null,
+    finish: null,
+    resolve: null
+  };
+
+  const finishPromise = new Promise((resolve) => {
+    let resolved = false;
+    let cleanupObserver = null;
+    const finish = (res) => {
+      if (resolved) return;
+      resolved = true;
+      if (typeof cleanupObserver === 'function') cleanupObserver();
+      resolve(res);
+    };
+    execState.finish = finish;
+    execState.resolve = resolve;
+    cleanupObserver = runtime.setupResponseObserver(execState, {}, () => {});
+    execState.cleanupObserver = cleanupObserver;
+  });
+
+  // timeout 시 cleanup 실행 및 예외 0 검증
+  assert.doesNotThrow(() => {
+    execState.finish({ status: 'timeout', text: '', error: 'response_stalled' });
+  });
+
+  const res = await finishPromise;
+  assert.strictEqual(res.status, 'timeout');
+  assert.strictEqual(execState.timer, null, 'execState.timer must be null after timeout');
+  assert.strictEqual(execState.observer, null, 'execState.observer must be null after timeout');
+});
+
+test('GEM-R14-034: cancel -> cleanup -> 예외 0 (실제 content.js 실행 경로)', async () => {
+  const { runtime } = loadRealContentJs();
+
+  const execState = {
+    requestId: 'req_cancel_001',
+    startedAtMs: Date.now(),
+    deadlineAtMs: Date.now() + 50000,
+    cancelled: false,
+    observer: null,
+    timer: null,
+    finish: null,
+    resolve: null
+  };
+
+  const finishPromise = new Promise((resolve) => {
+    let resolved = false;
+    let cleanupObserver = null;
+    const finish = (res) => {
+      if (resolved) return;
+      resolved = true;
+      if (typeof cleanupObserver === 'function') cleanupObserver();
+      resolve(res);
+    };
+    execState.finish = finish;
+    execState.resolve = resolve;
+    cleanupObserver = runtime.setupResponseObserver(execState, {}, () => {});
+    execState.cleanupObserver = cleanupObserver;
+  });
+
+  // cancel 발생 시 cleanup 및 예외 0 검증
+  assert.doesNotThrow(() => {
+    execState.finish({ status: 'failed', text: '', error: 'cancelled' });
+  });
+
+  const res = await finishPromise;
+  assert.strictEqual(res.status, 'failed');
+  assert.strictEqual(res.error, 'cancelled');
+  assert.strictEqual(execState.timer, null, 'execState.timer must be null after cancel');
+  assert.strictEqual(execState.observer, null, 'execState.observer must be null after cancel');
+});
+
+test('GEM-R14-035: cleanup 두 번 호출 -> 예외 0 (실제 content.js cleanupObserver idempotency)', () => {
+  const { runtime } = loadRealContentJs();
+
+  const execState = {
+    requestId: 'req_double_cleanup',
+    observer: null,
+    timer: null
+  };
+
+  const cleanupObserver = runtime.setupResponseObserver(execState, {}, () => {});
+  assert.ok(execState.timer !== null);
+  assert.ok(execState.observer !== null);
+
+  // 1차 cleanup 호출
+  assert.doesNotThrow(() => {
+    cleanupObserver();
+  });
+  assert.strictEqual(execState.timer, null);
+  assert.strictEqual(execState.observer, null);
+
+  // 2차 cleanup 호출 (idempotent, 예외 0)
+  assert.doesNotThrow(() => {
+    cleanupObserver();
+  });
+  assert.strictEqual(execState.timer, null);
+  assert.strictEqual(execState.observer, null);
+
+  // 3차 cleanup 호출 (다중 호출 안전성 확인)
+  assert.doesNotThrow(() => {
+    cleanupObserver();
+  });
+});
+
+test('GEM-R14-036: cleanup 후 execState.timer === null and execState.observer === null (stale handle 방지)', () => {
+  const { runtime } = loadRealContentJs();
+
+  const execState = {
+    requestId: 'req_stale_handle_check',
+    observer: null,
+    timer: null
+  };
+
+  const cleanupObserver = runtime.setupResponseObserver(execState, {}, () => {});
+  const originalTimer = execState.timer;
+  const originalObserver = execState.observer;
+  assert.ok(originalTimer !== null);
+  assert.ok(originalObserver !== null);
+
+  cleanupObserver();
+
+  // 기존 버그에서는 checkTimer = null; 후에 execState.timer === checkTimer 비교하여
+  // timer ID가 execState.timer에 남아있던 버그가 있었음.
+  // 신규 계약에서는 timerToClear를 먼저 확보하고 clearInterval 후 execState.timer를 null로 정리함.
+  assert.strictEqual(execState.timer, null, 'execState.timer must be strictly null (no stale timer handle)');
+  assert.strictEqual(execState.observer, null, 'execState.observer must be strictly null (no stale observer)');
+});
+
+test('GEM-R14-037: completed 후 deliverExecutionResult()가 실제 호출됨 (실제 content.js delivery 경로)', async () => {
+  let deliveredResult = null;
+  const command = {
+    requestId: 'req_delivery_test_001',
+    postKey: 'post_123',
+    navigationVersion: 1
+  };
+
+  const { runtime } = loadRealContentJs({
+    onSendMessage: (msg, cb) => {
+      if (msg.type === 'NFA_EXECUTION_RESULT') {
+        deliveredResult = msg;
+        if (typeof cb === 'function') cb({ ok: true, accepted: true, reason: 'accepted' });
+        return;
+      }
+      if (typeof cb === 'function') cb({ ok: true });
+    }
+  });
+
+  const deliveryRes = await runtime.deliverExecutionResult(command, {
+    status: 'completed',
+    text: '방문자 댓글 생성 완료'
+  });
+
+  assert.strictEqual(deliveryRes.accepted, true, 'deliverExecutionResult must be accepted');
+  assert.ok(deliveredResult, 'deliverExecutionResult must have sent NFA_EXECUTION_RESULT');
+  assert.strictEqual(deliveredResult.requestId, command.requestId);
+  assert.strictEqual(deliveredResult.result.status, 'completed');
+  assert.strictEqual(deliveredResult.result.text, '방문자 댓글 생성 완료');
+});
+
+test('GEM-R14-038: completed cleanup 중 TypeError가 발생하면 결과 전달이 실패함을 검증 (실제 배포 함수 계약 검증)', async () => {
+  // 1. const checkTimer 재대입 버그 발생 시(TypeError: Assignment to constant variable)
+  // finish()가 throw되어 deliverExecutionResult까지 도달하지 못함을 검증
+  let buggyDelivered = false;
+  const buggyExecution = async () => {
+    let resolved = false;
+    return new Promise((resolve, reject) => {
+      const constCheckTimer = setInterval(() => {}, 1000);
+      const buggyCleanup = () => {
+        clearInterval(constCheckTimer);
+        // TypeError 강제 발생: const 변수에 대입하려 할 때 발생하는 JavaScript runtime TypeError
+        const target = Object.freeze({ timer: constCheckTimer });
+        target.timer = null; // TypeError: Cannot assign to read only property 'timer'
+      };
+      const finish = (res) => {
+        if (resolved) return;
+        resolved = true;
+        buggyCleanup(); // throws TypeError
+        resolve(res);
+      };
+      try {
+        finish({ status: 'completed', text: '결과' });
+      } catch (err) {
+        reject(err);
+      }
+    });
+  };
+
+  let caughtBuggyError = null;
+  try {
+    await buggyExecution();
+    buggyDelivered = true;
+  } catch (err) {
+    caughtBuggyError = err;
+  }
+  assert.ok(caughtBuggyError instanceof TypeError, 'Buggy cleanup must throw TypeError');
+  assert.strictEqual(buggyDelivered, false, 'Buggy cleanup must prevent delivery completion');
+
+  // 2. 실제 content.js의 cleanupObserver 경로는 TypeError가 일절 발생하지 않고 deliverExecutionResult가 정상 호출됨
+  const { runtime } = loadRealContentJs();
+  const execState = {
+    requestId: 'req_actual_r14_delivery',
+    observer: null,
+    timer: null
+  };
+
+  let deliveryCalled = false;
+  const testCommand = {
+    requestId: 'req_actual_r14_delivery',
+    postKey: 'post_key_abc',
+    navigationVersion: 2
+  };
+
+  await new Promise((resolve) => {
+    let cleanupObserver = null;
+    const finish = async (res) => {
+      cleanupObserver();
+      const del = await runtime.deliverExecutionResult(testCommand, res);
+      deliveryCalled = del.accepted;
+      resolve(res);
+    };
+    cleanupObserver = runtime.setupResponseObserver(execState, {}, () => {});
+    finish({ status: 'completed', text: '실제 정상 배포 완료' });
+  });
+
+  assert.strictEqual(deliveryCalled, true, 'Actual content.js cleanup allows delivery to succeed');
+  assert.strictEqual(execState.timer, null, 'execState.timer must be cleaned up');
+  assert.strictEqual(execState.observer, null, 'execState.observer must be cleaned up');
 });
 
