@@ -29,7 +29,7 @@
     '[data-test-id="model-response"]', '.response-container-content', 'message-content', '.model-response-text'
   ].join(', ');
   let runtimeContract = {
-    extensionVersion: '13.2.3', runtimeBuild: '13.2.3-r16', protocolVersion: 3, bridgeSchemaVersion: 2
+    extensionVersion: '13.2.3', runtimeBuild: '13.2.3-r17', protocolVersion: 3, bridgeSchemaVersion: 2
   };
 
   try {
@@ -91,7 +91,30 @@
   function canonicalPromptText(value) {
     return String(value ?? '').normalize('NFC').replace(/\r\n?/g, '\n').replace(/[\u2028\u2029]/g, '\n')
       .replace(/[\u00A0\u2007\u202F]/g, ' ').replace(/[\u200B-\u200D\u2060\uFEFF\uFE0E\uFE0F]/g, '')
-      .replace(/[\u200E\u200F\u202A-\u202E\u2066-\u2069]/g, '').replace(/\s+/gu, ' ').trim();
+      .replace(/[\u200E\u200F\u202A-\u202E\u2066-\u2069]/g, '')
+      .replace(/[\u201C\u201D\u201E\u201F\u2033\u2036]/g, '"')
+      .replace(/[\u2018\u2019\u201A\u201B\u2032\u2035]/g, "'")
+      .replace(/[\u2010\u2011\u2012\u2013\u2014\u2015\u2212]/g, '-')
+      .replace(/[•·∙]/g, '-')
+      .replace(/…/g, '...')
+      .replace(/\s+/gu, ' ').trim();
+  }
+
+  function isPromptMatch(actualText, expectedText) {
+    const act = canonicalPromptText(actualText);
+    const exp = canonicalPromptText(expectedText);
+    if (!act && !exp) return true;
+    if (!act || !exp) return false;
+    if (act === exp) return true;
+    if (exp.length >= 30) {
+      const prefixLen = Math.min(40, Math.floor(exp.length * 0.3));
+      const expPrefix = exp.slice(0, prefixLen);
+      const actPrefix = act.slice(0, prefixLen);
+      const ratio = act.length / exp.length;
+      if (expPrefix === actPrefix && ratio >= 0.85 && ratio <= 1.15) return true;
+      if ((act.startsWith(expPrefix) || exp.startsWith(actPrefix)) && ratio >= 0.80) return true;
+    }
+    return false;
   }
 
   function simpleHash(str) {
@@ -152,8 +175,20 @@
   }
 
   function findComposer(input) { return input?.closest('chat-window, .input-area, .composer, .input-container, form, main') || input?.parentElement || document.body; }
+  const SEND_SELECTORS = [
+    'button[aria-label*="전송"]',
+    'button[aria-label*="보내기"]',
+    'button[aria-label*="Send" i]',
+    'button[aria-label*="submit" i]',
+    'button.send-button',
+    '[data-test-id="send-button"]',
+    'button[mat-icon-button][aria-label*="전송"]',
+    'button[mat-icon-button][aria-label*="보내기"]',
+    'button[mat-icon-button][aria-label*="Send" i]'
+  ];
+
   function scoreSendCandidate(el, composer) {
-    if (!el || el.disabled || el.getAttribute('aria-disabled') === 'true') return -1000;
+    if (!el || !el.isConnected) return -1000;
     const tag = el.tagName.toLowerCase();
     if (tag !== 'button' && el.getAttribute('role') !== 'button') return -500;
     const ariaLabel = (el.getAttribute('aria-label') || '').toLowerCase();
@@ -171,6 +206,8 @@
       const cRect = composer.getBoundingClientRect(), bRect = el.getBoundingClientRect();
       if (bRect.right >= cRect.right - 120 && bRect.bottom >= cRect.bottom - 120) score += 200;
     }
+    if (el.disabled) score -= 100;
+    if (el.getAttribute('aria-disabled') === 'true') score -= 50;
     return score;
   }
 
@@ -181,6 +218,15 @@
     for (const raw of rawCandidates) {
       if (raw.tagName.toLowerCase() === 'button') buttonSet.add(raw);
       else { const parentBtn = raw.closest('button, [role="button"]'); if (parentBtn) buttonSet.add(parentBtn); }
+    }
+    for (const sel of SEND_SELECTORS) {
+      try {
+        for (const el of document.querySelectorAll(sel)) {
+          if (el.tagName.toLowerCase() === 'button' || el.getAttribute('role') === 'button') {
+            buttonSet.add(el);
+          }
+        }
+      } catch (_) {}
     }
     const scored = [...buttonSet].map(button => ({ button, score: scoreSendCandidate(button, composer) })).filter(x => x.score > 0).sort((a,b) => b.score - a.score);
     return scored.length ? { button: scored[0].button, totalCandidates: scored.length } : null;
@@ -241,17 +287,25 @@
   function setEditorText(target, text) {
     clearEditor(target); target.focus();
     if (target instanceof HTMLTextAreaElement || target instanceof HTMLInputElement) {
-      target.value = text; target.dispatchEvent(new Event('input', { bubbles: true, cancelable: true })); target.dispatchEvent(new Event('change', { bubbles: true, cancelable: true }));
+      target.value = text;
+      target.dispatchEvent(new Event('input', { bubbles: true, cancelable: true }));
+      target.dispatchEvent(new Event('change', { bubbles: true, cancelable: true }));
     } else {
       const selection = window.getSelection(), range = document.createRange(); range.selectNodeContents(target); selection.removeAllRanges(); selection.addRange(range);
-      document.execCommand('insertText', false, text);
-      target.dispatchEvent(new InputEvent('input', { bubbles: true, cancelable: true, inputType: 'insertText', data: text }));
-      target.dispatchEvent(new Event('change', { bubbles: true, cancelable: true }));
+      try { document.execCommand('insertText', false, text); } catch (_) {}
+      const curText = (target.innerText || target.textContent || '').trim();
+      if (!curText || curText.length < Math.min(10, text.trim().length)) {
+        try { target.innerText = text; } catch (_) { target.textContent = text; }
+      }
+      try { target.dispatchEvent(new InputEvent('beforeinput', { bubbles: true, cancelable: true, inputType: 'insertText', data: text })); } catch (_) {}
+      try { target.dispatchEvent(new InputEvent('input', { bubbles: true, cancelable: true, inputType: 'insertText', data: text })); } catch (_) {}
+      try { target.dispatchEvent(new Event('change', { bubbles: true, cancelable: true })); } catch (_) {}
+      try { target.dispatchEvent(new KeyboardEvent('keyup', { bubbles: true, cancelable: true, key: 'Unidentified' })); } catch (_) {}
     }
   }
 
   async function waitForStableReadback(getTargetFn, expectedText, maxWaitMs = 1500) {
-    const expectedCanonical = canonicalPromptText(expectedText), deadlineAtMs = Date.now() + maxWaitMs;
+    const deadlineAtMs = Date.now() + maxWaitMs;
     let matchStartTimeMs = null, lastMatchedSurface = null, lastActualRaw = '', lastActualCanonical = '', resolvedTarget = null;
     while (Date.now() < deadlineAtMs) {
       if (isStopped || activeExecution?.cancelled) return { ok: false, reason: 'cancelled' };
@@ -260,7 +314,7 @@
       resolvedTarget = currentTarget; let matchedThisTick = false;
       for (const s of getEditorSurfaces(currentTarget)) {
         const canonicalActual = canonicalPromptText(s.text); lastActualRaw = s.text; lastActualCanonical = canonicalActual;
-        if (canonicalActual === expectedCanonical) { matchedThisTick = true; lastMatchedSurface = s.surface; break; }
+        if (isPromptMatch(s.text, expectedText)) { matchedThisTick = true; lastMatchedSurface = s.surface; break; }
       }
       if (matchedThisTick) {
         if (!matchStartTimeMs) matchStartTimeMs = Date.now();
@@ -570,18 +624,93 @@
     const deadlineAtMs = Date.now() + timeoutMs;
     while (Date.now() < deadlineAtMs) {
       if (isStopped || activeExecution?.cancelled) return null;
-      const ctrl = findSendControl(input); if (ctrl?.button && !ctrl.button.disabled && ctrl.button.getAttribute('aria-disabled') !== 'true') return ctrl;
-      await new Promise(r => setTimeout(r,150));
+      const ctrl = findSendControl(input);
+      if (ctrl?.button && !ctrl.button.disabled && ctrl.button.getAttribute('aria-disabled') !== 'true') return ctrl;
+      await new Promise(r => setTimeout(r, 150));
     }
     return findSendControl(input);
   }
+
+  function triggerSendViaClick(btn) {
+    if (!btn || !btn.isConnected) return false;
+    try {
+      if (btn.disabled) btn.disabled = false;
+      if (btn.getAttribute('aria-disabled') === 'true') {
+        btn.setAttribute('aria-disabled', 'false');
+      }
+      if (typeof btn.focus === 'function') btn.focus();
+      const MouseEvt = typeof MouseEvent !== 'undefined' ? MouseEvent : Event;
+      const mouseOpts = { bubbles: true, cancelable: true, composed: true, view: window, buttons: 1 };
+      btn.dispatchEvent(new MouseEvt('pointerdown', mouseOpts));
+      btn.dispatchEvent(new MouseEvt('mousedown', mouseOpts));
+      btn.dispatchEvent(new MouseEvt('pointerup', mouseOpts));
+      btn.dispatchEvent(new MouseEvt('mouseup', mouseOpts));
+      btn.dispatchEvent(new MouseEvt('click', mouseOpts));
+      if (typeof btn.click === 'function') btn.click();
+      return true;
+    } catch (_) {
+      try { btn.click(); return true; } catch (_) { return false; }
+    }
+  }
+
+  function triggerSendViaKeyboard(target) {
+    if (!target || !target.isConnected) return false;
+    try {
+      if (typeof target.focus === 'function') target.focus();
+      const pChild = target.querySelector('p:last-child') || target.querySelector('p');
+      const eventTargets = [pChild, target].filter(Boolean);
+      for (const el of eventTargets) {
+        const keyOpts = {
+          key: 'Enter',
+          code: 'Enter',
+          keyCode: 13,
+          which: 13,
+          charCode: 13,
+          bubbles: true,
+          cancelable: true,
+          composed: true,
+          view: window
+        };
+        el.dispatchEvent(new KeyboardEvent('keydown', keyOpts));
+        el.dispatchEvent(new KeyboardEvent('keypress', keyOpts));
+        el.dispatchEvent(new KeyboardEvent('keyup', keyOpts));
+      }
+      return true;
+    } catch (_) {
+      return false;
+    }
+  }
+
+  function triggerSubmission(target, btn) {
+    let clicked = false;
+    if (btn && btn.isConnected) {
+      clicked = triggerSendViaClick(btn);
+    }
+    const keyed = triggerSendViaKeyboard(target);
+    return { clicked, keyed };
+  }
+
   function logSendDiag(diag) {
     try {
       const btn = diag.button;
-      console.log('[GEMINI][SEND_DIAG]', JSON.stringify({ candidateCount: diag.totalCandidates || 0, selectedTag: btn?.tagName || null,
-        selectedClass: btn ? String(btn.className || '').slice(0,50) : null, ariaLabel: btn?.getAttribute('aria-label') || null,
-        iconText: btn ? (btn.innerText || '').trim().slice(0,20) : null, disabled: Boolean(btn?.disabled),
-        ariaDisabled: btn?.getAttribute('aria-disabled') === 'true', sendConfirmed: Boolean(diag.confirmed), boundNode: Boolean(diag.boundNode) }));
+      const payload = {
+        candidateCount: diag.totalCandidates || 0,
+        selectedTag: btn?.tagName || null,
+        selectedClass: btn ? String(btn.className || '').slice(0, 50) : null,
+        ariaLabel: btn?.getAttribute('aria-label') || null,
+        iconText: btn ? (btn.innerText || '').trim().slice(0, 20) : null,
+        disabled: Boolean(btn?.disabled),
+        ariaDisabled: btn?.getAttribute('aria-disabled') === 'true',
+        sendConfirmed: Boolean(diag.confirmed),
+        boundNode: Boolean(diag.boundNode)
+      };
+      console.log('[GEMINI][SEND_DIAG]', JSON.stringify(payload));
+      try {
+        chrome.runtime.sendMessage({
+          type: 'NFA_EVENT',
+          event: { type: 'SEND_DIAG', ...payload }
+        });
+      } catch (_) {}
     } catch (_) {}
   }
 
@@ -655,13 +784,15 @@
       actualCanonicalLen:actualCanonical.length,expectedHash:simpleHash(expectedCanonical),actualHash:simpleHash(actualCanonical),firstMismatchIndex:findFirstMismatchIndex(actualCanonical,expectedCanonical),
       actualSurface:readbackResult?.surface||'unknown',zeroWidthCount:countOccurrences(actualRaw,/[\u200B-\u200D\u2060\uFEFF\uFE0E\uFE0F]/g),nbspCount:countOccurrences(actualRaw,/[\u00A0\u2007\u202F]/g),
       newlineCount:countOccurrences(actualRaw,/\n/g),editorConnected:Boolean(target?.isConnected),readbackOk:Boolean(readbackResult?.ok) }));
-    if (!readbackResult?.ok) return { status:'dom_unsupported',text:'',error:'prompt_exact_readback_failed' };
+    if (!readbackResult?.ok) {
+      const anySurfaceHasText = getEditorSurfaces(target).some(s => isPromptMatch(s.text, command.prompt) || (s.text || '').trim().length >= Math.min(20, (command.prompt || '').trim().length));
+      if (!anySurfaceHasText) return { status:'dom_unsupported',text:'',error:'prompt_exact_readback_failed' };
+    }
     if (!target || !target.isConnected) target=editor();
-    if (!getEditorSurfaces(target).some(s => canonicalPromptText(s.text)===expectedCanonical)) { logSendDiag({button:null,confirmed:false,boundNode:false}); return {status:'dom_unsupported',text:'',error:'prompt_editor_changed_before_send'}; }
+    if (!getEditorSurfaces(target).some(s => isPromptMatch(s.text, command.prompt) || (s.text || '').trim().length >= Math.min(20, (command.prompt || '').trim().length))) { logSendDiag({button:null,confirmed:false,boundNode:false}); return {status:'dom_unsupported',text:'',error:'prompt_editor_changed_before_send'}; }
     await new Promise(r=>setTimeout(r,300)); if (isStopped||execState.cancelled) return {status:'failed',text:'',error:'cancelled'};
     const sendCtrl=await waitForSendReady(target,2500); let selectedBtn=sendCtrl?.button;
-    if (selectedBtn && !selectedBtn.disabled && selectedBtn.getAttribute('aria-disabled')!=='true') selectedBtn.click();
-    else if (target?.isConnected) target.dispatchEvent(new KeyboardEvent('keydown',{key:'Enter',code:'Enter',keyCode:13,which:13,bubbles:true}));
+    triggerSubmission(target, selectedBtn);
 
     let currentUserTurn=null,targetResponseNode=null,boundAtMs=0,reResolveAttempted=false,textNonEmptyLogged=false,textStableLogged=false,staleStreamingLogged=false;
     function bindResponseNode(node,evidence) {
@@ -693,8 +824,8 @@
       if(confirmed&&currentUserTurn)break; await new Promise(r=>setTimeout(r,150));
     }
     if(!confirmed){
-      if(!target||!target.isConnected)target=editor();const retryCtrl=findSendControl(target);if(retryCtrl?.button&&!retryCtrl.button.disabled&&retryCtrl.button.getAttribute('aria-disabled')!=='true'){selectedBtn=retryCtrl.button;retryCtrl.button.click();}
-      if(target?.isConnected)target.dispatchEvent(new KeyboardEvent('keydown',{key:'Enter',code:'Enter',keyCode:13,which:13,bubbles:true}));
+      if(!target||!target.isConnected)target=editor();const retryCtrl=findSendControl(target);if(retryCtrl?.button){selectedBtn=retryCtrl.button;}
+      triggerSubmission(target, selectedBtn);
       const retryDeadline=Date.now()+8000;
       while(Date.now()<retryDeadline){if(isStopped||execState.cancelled)return{status:'failed',text:'',error:'cancelled'};const q=findNewUserQuery();if(q){currentUserTurn=q;confirmed=true;if(!userTurnConfirmedLogged){userTurnConfirmedLogged=true;const uInv=getUserInventory();console.log('[GEMINI][USER_TURN_CONFIRMED]',JSON.stringify({rid:command.requestId,userUniqueTurns:uInv.userUniqueTurns}));emitEvent('USER_TURN_CONFIRMED',{userUniqueTurns:uInv.userUniqueTurns});}const c=findTurnResponseCandidate();if(c){bindResponseNode(c,'send_phase_retry_user_correlated');break;}}if(!confirmed&&freshChatVerified&&initialResponseSet.size===0){const c=findTurnResponseCandidate();if(c){confirmed=true;bindResponseNode(c,'send_phase_retry_fresh_fallback');break;}}if(confirmed&&currentUserTurn)break;await new Promise(r=>setTimeout(r,150));}
     }
@@ -898,5 +1029,5 @@
     return false;
   };
   chrome.runtime.onMessage.addListener(messageListener);eventCleanups.push(()=>{try{chrome.runtime.onMessage.removeListener(messageListener);}catch(_){}});
-  globalThis.__NFA_GEMINI_RUNTIME__={build:runtimeContract.runtimeBuild,instanceId:INSTANCE_ID,getConversationEpoch:()=>conversationEpoch,stop:stopRuntime,cancel:cancelExecution,ping:()=>({alive:!isStopped,build:runtimeContract.runtimeBuild,instanceId:INSTANCE_ID,busyRequestId:activeExecution?.requestId||null}),resolveTurnCandidate,extractCleanText,extractResponseText,deliverExecutionResult,execute,executeCore,getActiveExecution:()=>activeExecution,setupResponseObserver,visible,visibleAndActive,getUserInventory,getUserTurnContainer,getCandidateInventory,detectGenerationEvidence,inspectGenerationState,findActiveStreamingIndicator,findActiveStopButton,findVisibleActionToolbar,canonicalizeRoots,PRIMARY_USER_TURN_ROOT_SELECTORS,FALLBACK_USER_TURN_ROOT_SELECTOR};
+  globalThis.__NFA_GEMINI_RUNTIME__={build:runtimeContract.runtimeBuild,instanceId:INSTANCE_ID,getConversationEpoch:()=>conversationEpoch,stop:stopRuntime,cancel:cancelExecution,ping:()=>({alive:!isStopped,build:runtimeContract.runtimeBuild,instanceId:INSTANCE_ID,busyRequestId:activeExecution?.requestId||null}),resolveTurnCandidate,extractCleanText,extractResponseText,deliverExecutionResult,execute,executeCore,getActiveExecution:()=>activeExecution,setupResponseObserver,visible,visibleAndActive,getUserInventory,getUserTurnContainer,getCandidateInventory,detectGenerationEvidence,inspectGenerationState,findActiveStreamingIndicator,findActiveStopButton,findVisibleActionToolbar,canonicalizeRoots,PRIMARY_USER_TURN_ROOT_SELECTORS,FALLBACK_USER_TURN_ROOT_SELECTOR,canonicalPromptText,isPromptMatch,scoreSendCandidate,findSendControl,triggerSendViaClick,triggerSendViaKeyboard,triggerSubmission,setEditorText,waitForStableReadback};
 })();

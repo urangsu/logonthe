@@ -50,6 +50,7 @@ function loadRealContentJs(customEnv = {}) {
     Node: { DOCUMENT_POSITION_FOLLOWING: 4 },
     KeyboardEvent: class { constructor(t, i) { Object.assign(this, i); } },
     InputEvent: class { constructor(t, i) { Object.assign(this, i); } },
+    MouseEvent: class { constructor(t, i) { Object.assign(this, i); } },
     Event: class { constructor(t, i) { Object.assign(this, i); } },
     HTMLTextAreaElement: class {},
     HTMLInputElement: class {},
@@ -165,7 +166,7 @@ function loadRealBackgroundJs(customEnv = {}) {
         sendMessage: (tabId, msg, cb) => {
           tabMessages.push({ tabId, msg });
           if (customEnv.onTabSendMessage) return customEnv.onTabSendMessage(tabId, msg, cb);
-          if (typeof cb === 'function') cb({ ok: true, alive: true, build: '13.2.3-r16', status: 'ready' });
+          if (typeof cb === 'function') cb({ ok: true, alive: true, build: '13.2.3-r17', status: 'ready' });
         }
       }
     },
@@ -1890,7 +1891,7 @@ test('GEM-R15-JS-010: Background forwardResultToPython single-flight prevents du
   const { background } = loadRealBackgroundJs({
     onFetch: async (url, opts) => {
       if (url.endsWith('runtime_contract.json')) {
-        return { ok: true, json: async () => ({ extensionVersion: '13.2.3', runtimeBuild: '13.2.3-r16', protocolVersion: 3, bridgeSchemaVersion: 2 }) };
+        return { ok: true, json: async () => ({ extensionVersion: '13.2.3', runtimeBuild: '13.2.3-r17', protocolVersion: 3, bridgeSchemaVersion: 2 }) };
       }
       if (url.includes('/v1/result')) {
         postCount++;
@@ -1973,14 +1974,14 @@ test('GEM-R15-JS-011: deliverExecutionResult generates deliveryId and succeeds o
   assert.ok(postedDirect.body.deliveryId.startsWith('req_delivery_b:completed:'), 'Direct body must contain deliveryId');
 });
 
-test('GEM-R16-JS-012: Old r15 runtime with r16 contract triggers reinjection', () => {
-  const contract = { runtimeBuild: '13.2.3-r16' };
-  const pingResponse = { ok: true, build: '13.2.3-r15' };
+test('GEM-R17-JS-012: Old r16 runtime with r17 contract triggers reinjection', () => {
+  const contract = { runtimeBuild: '13.2.3-r17' };
+  const pingResponse = { ok: true, build: '13.2.3-r16' };
   let reinjected = false;
   if (!pingResponse.ok || pingResponse.build !== contract.runtimeBuild) {
     reinjected = true;
   }
-  assert.strictEqual(reinjected, true, 'r15 build must trigger reinjection under r16 contract');
+  assert.strictEqual(reinjected, true, 'r16 build must trigger reinjection under r17 contract');
 });
 
 test('GEM-R15-JS-013: execute() strictly validates contentInstanceId and conversationEpoch', async () => {
@@ -2270,4 +2271,80 @@ test('GEM-R16-JS-005: Result delivery registry prunes entries older than 10m TTL
   assert.ok(!registry.has('old_req_01'), 'Expired entry must be pruned');
   assert.ok(registry.size <= 200, `Registry size must be capped at 200, actual: ${registry.size}`);
 });
+
+test('GEM-R17-JS-001: canonicalPromptText normalizes smart quotes, dashes, bullets, ellipses', () => {
+  const { runtime } = loadRealContentJs();
+  const rawWithSmartChars = '“안녕하세요” ‘반갑습니다’ – 테스트 — 불릿 • 항목 … 끝';
+  const canonical = runtime.canonicalPromptText(rawWithSmartChars);
+  assert.strictEqual(canonical, '"안녕하세요" \'반갑습니다\' - 테스트 - 불릿 - 항목 ... 끝');
+});
+
+test('GEM-R17-JS-002: isPromptMatch matches exact and resilient long prompt prefix with length ratio >= 0.85', () => {
+  const { runtime } = loadRealContentJs();
+  const expectedPrompt = '이것은 네이버 블로그 자동 댓글 생성을 위한 프롬프트 테스트입니다. 길이 band는 보통이고 톤앤매너는 친근하게 작성해주세요.';
+  // Exact match
+  assert.strictEqual(runtime.isPromptMatch(expectedPrompt, expectedPrompt), true);
+
+  // Slight formatting variance in rich-text editor (e.g. minor smart quotes or minor suffix difference)
+  const actualInEditor = '이것은 네이버 블로그 자동 댓글 생성을 위한 프롬프트 테스트입니다. 길이 band는 보통이고 톤앤매너는 친근하게 작성해주세요';
+  assert.strictEqual(runtime.isPromptMatch(actualInEditor, expectedPrompt), true);
+
+  // Completely different text must NOT match
+  assert.strictEqual(runtime.isPromptMatch('전혀 다른 내용의 텍스트입니다.', expectedPrompt), false);
+});
+
+test('GEM-R17-JS-003: scoreSendCandidate does not disqualify button with aria-disabled="true" (score > 0)', () => {
+  const { runtime } = loadRealContentJs();
+  const sendBtn = {
+    tagName: 'BUTTON',
+    disabled: false,
+    isConnected: true,
+    getAttribute: (attr) => {
+      if (attr === 'aria-label') return '보내기';
+      if (attr === 'aria-disabled') return 'true';
+      return null;
+    },
+    innerText: '',
+    textContent: '',
+    className: 'send-button',
+    querySelector: () => null,
+    getBoundingClientRect: () => ({ right: 100, bottom: 100 })
+  };
+  const score = runtime.scoreSendCandidate(sendBtn, null);
+  assert.ok(score > 0, `Send button with aria-disabled="true" must still score positively, got: ${score}`);
+});
+
+test('GEM-R17-JS-004: triggerSubmission dispatches pointer/mouse click, native .click(), and keyboard Enter events', () => {
+  const { runtime } = loadRealContentJs();
+  let clickCalled = false;
+  let dispatchedEvents = [];
+
+  const mockBtn = {
+    tagName: 'BUTTON',
+    disabled: true,
+    isConnected: true,
+    getAttribute: (attr) => attr === 'aria-disabled' ? 'true' : null,
+    setAttribute: (attr, val) => {},
+    focus: () => {},
+    click: () => { clickCalled = true; },
+    dispatchEvent: (evt) => { dispatchedEvents.push(evt.type || 'unknown'); }
+  };
+
+  const keyEvents = [];
+  const mockTarget = {
+    tagName: 'DIV',
+    isConnected: true,
+    focus: () => {},
+    querySelector: () => null,
+    dispatchEvent: (evt) => { keyEvents.push(evt.key); }
+  };
+
+  const result = runtime.triggerSubmission(mockTarget, mockBtn);
+  assert.strictEqual(result.clicked, true, 'Click trigger must succeed');
+  assert.strictEqual(result.keyed, true, 'Keyboard trigger must succeed');
+  assert.strictEqual(clickCalled, true, 'Native click() must be invoked');
+  assert.strictEqual(mockBtn.disabled, false, 'Disabled property must be cleared');
+  assert.ok(keyEvents.includes('Enter'), 'Keyboard Enter must be dispatched');
+});
+
 

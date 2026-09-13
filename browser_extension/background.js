@@ -140,7 +140,7 @@ async function startHeartbeatLoop() {
         buildId: contract.runtimeBuild,
         protocolVersion: contract.protocolVersion,
         bridgeSchemaVersion: contract.bridgeSchemaVersion,
-        consumerId: 'background-r16',
+        consumerId: 'background-r17',
         lastRuntimePingAt: now,
         busyRequestId: activeRuntime?.ping.busyRequestId || null,
         busySince: activeRuntime?.ping.busySince || null,
@@ -171,7 +171,7 @@ async function ensureFreshGeminiConversation(tabId) {
           status: 'ready', transportAlive: true, runtimeAlive: true, runtimeStatus: 'ready', title: 'Google Gemini',
           url: 'https://gemini.google.com/app', extensionVersion: contract.extensionVersion, contentBuild: contract.runtimeBuild,
           buildId: contract.runtimeBuild, protocolVersion: contract.protocolVersion, bridgeSchemaVersion: contract.bridgeSchemaVersion,
-          consumerId: 'background-r16', lastRuntimePingAt: Date.now(), tabId, contentInstanceId: checkRes.contentInstanceId,
+          consumerId: 'background-r17', lastRuntimePingAt: Date.now(), tabId, contentInstanceId: checkRes.contentInstanceId,
           conversationEpoch: checkRes.conversationEpoch
         }, 5000);
       } catch (_) {}
@@ -209,7 +209,7 @@ async function ensureFreshGeminiConversation(tabId) {
           status: ping.status || 'ready', transportAlive: true, runtimeAlive: true, runtimeStatus: ping.status,
           title: ping.title || 'Google Gemini', url: ping.url || 'https://gemini.google.com/app', extensionVersion: contract.extensionVersion,
           contentBuild: contract.runtimeBuild, buildId: contract.runtimeBuild, protocolVersion: contract.protocolVersion,
-          bridgeSchemaVersion: contract.bridgeSchemaVersion, consumerId: 'background-r16', lastRuntimePingAt: Date.now(), tabId,
+          bridgeSchemaVersion: contract.bridgeSchemaVersion, consumerId: 'background-r17', lastRuntimePingAt: Date.now(), tabId,
           contentInstanceId: checkRes.contentInstanceId, conversationEpoch: checkRes.conversationEpoch
         }, 5000);
       } catch (_) {}
@@ -430,7 +430,7 @@ async function runCommandCycle() {
       runtimeAlive: Boolean(postExecRuntime), runtimeStatus: postExecRuntime ? postExecRuntime.ping.status : 'disconnected',
       title: postExecRuntime?.ping.title || 'Google Gemini', url: postExecRuntime?.ping.url || 'https://gemini.google.com/app',
       extensionVersion: contract.extensionVersion, contentBuild: contract.runtimeBuild, buildId: contract.runtimeBuild,
-      protocolVersion: contract.protocolVersion, bridgeSchemaVersion: contract.bridgeSchemaVersion, consumerId: 'background-r16',
+      protocolVersion: contract.protocolVersion, bridgeSchemaVersion: contract.bridgeSchemaVersion, consumerId: 'background-r17',
       lastRuntimePingAt: now, busyRequestId: postExecRuntime?.ping.busyRequestId || null, busySince: postExecRuntime?.ping.busySince || null,
       busyDeadlineAt: postExecRuntime?.ping.busyDeadlineAt || null
     }, 5000);

@@ -170,7 +170,7 @@ class TestV133DiscoveryAndRuntime(unittest.TestCase):
         """runtime_contract.json과 manifest.json 및 Python loader 일치 검증"""
         contract = load_runtime_contract()
         self.assertEqual(contract.extension_version, "13.2.3")
-        self.assertEqual(contract.runtime_build, "13.2.3-r16")
+        self.assertEqual(contract.runtime_build, "13.2.3-r17")
         self.assertEqual(contract.protocol_version, 3)
         self.assertEqual(contract.bridge_schema_version, 2)
 
@@ -272,8 +272,8 @@ class TestV133DiscoveryAndRuntime(unittest.TestCase):
 
     def test_gem_r15_py_001_generation_timeout_accepted_within_acceptance_deadline(self):
         """GEM-R15-PY-001: generation deadline 초과 후 acceptance deadline 이내에 도착한 timeout 결과는 late_result 거절 없이 accepted 됨"""
-        bridge = GeminiExtensionBridge(expected_extension_version="13.2.3", expected_build_id="13.2.3-r16")
-        bridge.record_heartbeat("ready", "Gemini", "https://gemini.google.com/app", "13.2.3", "13.2.3-r16", 3, 2)
+        bridge = GeminiExtensionBridge(expected_extension_version="13.2.3", expected_build_id="13.2.3-r17")
+        bridge.record_heartbeat("ready", "Gemini", "https://gemini.google.com/app", "13.2.3", "13.2.3-r17", 3, 2)
 
         now = time.time()
         # Generation deadline is in the past, while acceptance deadline is in the future
@@ -313,8 +313,8 @@ class TestV133DiscoveryAndRuntime(unittest.TestCase):
 
     def test_gem_r15_py_002_idempotent_failover_delivery(self):
         """GEM-R15-PY-002: Primary와 Failover 경로로 동일 delivery_id 결과가 2회 전달되어도 충돌 없이 already_accepted 처리"""
-        bridge = GeminiExtensionBridge(expected_extension_version="13.2.3", expected_build_id="13.2.3-r16")
-        bridge.record_heartbeat("ready", "Gemini", "https://gemini.google.com/app", "13.2.3", "13.2.3-r16", 3, 2)
+        bridge = GeminiExtensionBridge(expected_extension_version="13.2.3", expected_build_id="13.2.3-r17")
+        bridge.record_heartbeat("ready", "Gemini", "https://gemini.google.com/app", "13.2.3", "13.2.3-r17", 3, 2)
 
         cmd = GeminiCommand.create("post:idempotent_test", 1, "중복 전달 멱등성 테스트", timeout_seconds=30.0)
         bridge.publish(cmd)
@@ -351,8 +351,8 @@ class TestV133DiscoveryAndRuntime(unittest.TestCase):
 
     def test_gem_r15_int_001_extension_result_http_submission(self):
         """GEM-R15-INT-001: 실제 extension result payload -> HTTP bridge (/v1/result) -> submit_result 통합 검증"""
-        bridge = GeminiExtensionBridge(expected_extension_version="13.2.3", expected_build_id="13.2.3-r16")
-        bridge.record_heartbeat("ready", "Gemini", "https://gemini.google.com/app", "13.2.3", "13.2.3-r16", 3, 2)
+        bridge = GeminiExtensionBridge(expected_extension_version="13.2.3", expected_build_id="13.2.3-r17")
+        bridge.record_heartbeat("ready", "Gemini", "https://gemini.google.com/app", "13.2.3", "13.2.3-r17", 3, 2)
 
         # Find an open port and start GeminiBridgeHTTPServer
         import socket
