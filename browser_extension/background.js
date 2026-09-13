@@ -26,17 +26,12 @@ async function bridgeFetch(path, method = 'GET', body = null, timeoutMs = 20000)
       signal: controller.signal
     });
     const data = await response.json();
-    if (!response.ok) throw new Error(data.error || `http_${response.status}`);
+    if (!response.ok) throw new Error(data.error || data.reason || `http_${response.status}`);
     return data;
   } catch (error) {
     const msg = String(error?.message || error);
-    if (/permission|blocked|denied|security/i.test(msg)) {
-      throw new Error('local_network_access_blocked');
-    }
-    const isNetwork = /fetch|connect|network|econnrefused|aborted/i.test(msg);
-    if (isNetwork) {
-      throw new Error('loopback_bridge_unreachable');
-    }
+    if (/permission|blocked|denied|security/i.test(msg)) throw new Error('local_network_access_blocked');
+    if (/fetch|connect|network|econnrefused|aborted/i.test(msg)) throw new Error('loopback_bridge_unreachable');
     throw error;
   } finally {
     clearTimeout(timer);
@@ -72,29 +67,18 @@ async function pingRuntime(tabId) {
 async function ensureGeminiRuntime(tabId) {
   if (typeof tabId !== 'number') return { ok: false, status: 'missing_tab_id' };
   if (injectionInFlight.has(tabId)) return injectionInFlight.get(tabId);
-
   const task = (async () => {
     const contract = await getRuntimeContract();
     const ping = await pingRuntime(tabId);
-    if (ping.ok && ping.build === contract.runtimeBuild) {
-      return { ok: true, status: 'already_loaded', build: ping.build };
-    }
-
-    await chrome.scripting.executeScript({
-      target: { tabId },
-      files: ['content.js']
-    });
-
+    if (ping.ok && ping.build === contract.runtimeBuild) return { ok: true, status: 'already_loaded', build: ping.build };
+    await chrome.scripting.executeScript({ target: { tabId }, files: ['content.js'] });
     await new Promise(resolve => setTimeout(resolve, 300));
     const verify = await pingRuntime(tabId);
-    if (verify.ok) {
-      return { ok: true, status: 'injected', build: verify.build };
-    } else {
-      return { ok: false, status: 'injected_unverified', error: verify.error };
-    }
+    return verify.ok
+      ? { ok: true, status: 'injected', build: verify.build }
+      : { ok: false, status: 'injected_unverified', error: verify.error };
   })().catch(error => ({ ok: false, status: 'inject_failed', error: String(error?.message || error) }))
     .finally(() => injectionInFlight.delete(tabId));
-
   injectionInFlight.set(tabId, task);
   return task;
 }
@@ -119,9 +103,7 @@ async function findActiveGeminiRuntime() {
       await ensureGeminiRuntime(tab.id);
       ping = await pingRuntime(tab.id);
     }
-    if (ping.ok) {
-      return { tabId: tab.id, ping, contract };
-    }
+    if (ping.ok) return { tabId: tab.id, ping, contract };
   }
   return null;
 }
@@ -132,31 +114,21 @@ async function startHeartbeatLoop() {
       const contract = await getRuntimeContract();
       const activeRuntime = await findActiveGeminiRuntime();
       const now = Date.now();
-
-      // Check Python bridge status to reconcile orphaned busy states
       let bridgeStatus = null;
-      try {
-        bridgeStatus = await bridgeFetch('/v1/status', 'GET', null, 3000);
-      } catch (_) {}
-
-      // Reconcile orphan busy only when bridge contract is fully valid (Fail-closed on contract_invalid)
+      try { bridgeStatus = await bridgeFetch('/v1/status', 'GET', null, 3000); } catch (_) {}
       if (activeRuntime && activeRuntime.ping.status === 'busy' && activeRuntime.ping.busyRequestId) {
         if (bridgeStatus && (bridgeStatus.bridgeSessionId || bridgeStatus.status) && typeof bridgeStatus.activeRequestId !== 'undefined') {
-          const pythonActiveReqId = bridgeStatus.activeRequestId; // string or null
+          const pythonActiveReqId = bridgeStatus.activeRequestId;
           const busyReqId = activeRuntime.ping.busyRequestId;
           if (pythonActiveReqId === null || (typeof pythonActiveReqId === 'string' && pythonActiveReqId !== busyReqId)) {
             try {
               trackCancelledRequestId(busyReqId);
-              chrome.tabs.sendMessage(activeRuntime.tabId, {
-                type: 'NFA_CANCEL_COMMAND',
-                requestId: busyReqId
-              }, () => {});
+              chrome.tabs.sendMessage(activeRuntime.tabId, { type: 'NFA_CANCEL_COMMAND', requestId: busyReqId }, () => {});
             } catch (_) {}
           }
         }
       }
-
-      const heartbeatPayload = {
+      await bridgeFetch('/v1/heartbeat', 'POST', {
         status: activeRuntime ? (activeRuntime.ping.status || 'ready') : 'gemini_tab_not_found',
         transportAlive: true,
         runtimeAlive: Boolean(activeRuntime),
@@ -168,13 +140,12 @@ async function startHeartbeatLoop() {
         buildId: contract.runtimeBuild,
         protocolVersion: contract.protocolVersion,
         bridgeSchemaVersion: contract.bridgeSchemaVersion,
-        consumerId: 'background-r12',
+        consumerId: 'background-r13',
         lastRuntimePingAt: now,
         busyRequestId: activeRuntime?.ping.busyRequestId || null,
         busySince: activeRuntime?.ping.busySince || null,
         busyDeadlineAt: activeRuntime?.ping.busyDeadlineAt || null
-      };
-      await bridgeFetch('/v1/heartbeat', 'POST', heartbeatPayload, 5000);
+      }, 5000);
       lastHeartbeatSentAt = now;
     } catch (_) {}
     await new Promise(r => setTimeout(r, 10000));
@@ -184,152 +155,67 @@ async function startHeartbeatLoop() {
 async function ensureFreshGeminiConversation(tabId) {
   if (typeof tabId !== 'number') return { ok: false, error: 'missing_tab_id' };
   const contract = await getRuntimeContract();
-
-  // 1. Check if the tab already has an empty fresh conversation
   for (let attempt = 0; attempt < 2; attempt++) {
     const checkRes = await new Promise(resolve => {
       try {
         chrome.tabs.sendMessage(tabId, { type: 'NFA_CHECK_FRESH_CHAT' }, res => {
-          if (chrome.runtime.lastError || !res?.ok) resolve(null);
-          else resolve(res);
+          if (chrome.runtime.lastError || !res?.ok) resolve(null); else resolve(res);
         });
-      } catch (_) {
-        resolve(null);
-      }
+      } catch (_) { resolve(null); }
     });
-
     if (checkRes && checkRes.fresh) {
-      console.log('[GEMINI][BACKGROUND] FRESH_CHAT_READY (verified empty)', {
-        tabId,
-        contentInstanceId: checkRes.contentInstanceId,
-        conversationEpoch: checkRes.conversationEpoch
-      });
-      // Send verified fresh heartbeat to bridge
-      try {
-        await bridgeFetch('/v1/event', 'POST', {
-          type: 'FRESH_CHAT_READY',
-          tab: tabId,
-          instance: checkRes.contentInstanceId,
-          epoch: checkRes.conversationEpoch
-        }, 3000);
-      } catch (_) {}
+      console.log('[GEMINI][BACKGROUND] FRESH_CHAT_READY (verified empty)', { tabId, contentInstanceId: checkRes.contentInstanceId, conversationEpoch: checkRes.conversationEpoch });
+      try { await bridgeFetch('/v1/event', 'POST', { type: 'FRESH_CHAT_READY', tab: tabId, instance: checkRes.contentInstanceId, epoch: checkRes.conversationEpoch }, 3000); } catch (_) {}
       try {
         await bridgeFetch('/v1/heartbeat', 'POST', {
-          status: 'ready',
-          transportAlive: true,
-          runtimeAlive: true,
-          runtimeStatus: 'ready',
-          title: 'Google Gemini',
-          url: 'https://gemini.google.com/app',
-          extensionVersion: contract.extensionVersion,
-          contentBuild: contract.runtimeBuild,
-          buildId: contract.runtimeBuild,
-          protocolVersion: contract.protocolVersion,
-          bridgeSchemaVersion: contract.bridgeSchemaVersion,
-          consumerId: 'background-r12',
-          lastRuntimePingAt: Date.now(),
-          tabId: tabId,
-          contentInstanceId: checkRes.contentInstanceId,
+          status: 'ready', transportAlive: true, runtimeAlive: true, runtimeStatus: 'ready', title: 'Google Gemini',
+          url: 'https://gemini.google.com/app', extensionVersion: contract.extensionVersion, contentBuild: contract.runtimeBuild,
+          buildId: contract.runtimeBuild, protocolVersion: contract.protocolVersion, bridgeSchemaVersion: contract.bridgeSchemaVersion,
+          consumerId: 'background-r13', lastRuntimePingAt: Date.now(), tabId, contentInstanceId: checkRes.contentInstanceId,
           conversationEpoch: checkRes.conversationEpoch
         }, 5000);
       } catch (_) {}
-      return {
-        ok: true,
-        reason: 'already_fresh',
-        tabId,
-        contentInstanceId: checkRes.contentInstanceId,
-        conversationEpoch: checkRes.conversationEpoch
-      };
+      return { ok: true, reason: 'already_fresh', tabId, contentInstanceId: checkRes.contentInstanceId, conversationEpoch: checkRes.conversationEpoch };
     }
-
     if (attempt === 0) {
-      // Soft reset: click New Chat button inside page
       await new Promise(resolve => {
-        try {
-          chrome.tabs.sendMessage(tabId, { type: 'NFA_RESET_FRESH_CHAT' }, () => resolve());
-        } catch (_) {
-          resolve();
-        }
+        try { chrome.tabs.sendMessage(tabId, { type: 'NFA_RESET_FRESH_CHAT' }, () => resolve()); } catch (_) { resolve(); }
       });
       await new Promise(r => setTimeout(r, 1000));
     }
   }
-
-  // 2. Hard reset: navigate tab directly to https://gemini.google.com/app
   console.log('[GEMINI][BACKGROUND] Navigating tab to fresh https://gemini.google.com/app');
-  try {
-    await chrome.tabs.update(tabId, { url: 'https://gemini.google.com/app' });
-  } catch (navErr) {
-    return { ok: false, error: String(navErr?.message || navErr) };
-  }
-
-  // Wait for tab navigation and verify empty fresh state
+  try { await chrome.tabs.update(tabId, { url: 'https://gemini.google.com/app' }); } catch (navErr) { return { ok: false, error: String(navErr?.message || navErr) }; }
   const deadline = Date.now() + 15000;
   while (Date.now() < deadline) {
     await new Promise(r => setTimeout(r, 1000));
     const tab = await chrome.tabs.get(tabId).catch(() => null);
     if (!tab || tab.status !== 'complete') continue;
-
     await ensureGeminiRuntime(tabId);
     const ping = await pingRuntime(tabId);
     if (!ping.ok || ping.status !== 'ready') continue;
-
     const checkRes = await new Promise(resolve => {
       try {
         chrome.tabs.sendMessage(tabId, { type: 'NFA_CHECK_FRESH_CHAT' }, res => {
-          if (chrome.runtime.lastError || !res?.ok) resolve(null);
-          else resolve(res);
+          if (chrome.runtime.lastError || !res?.ok) resolve(null); else resolve(res);
         });
-      } catch (_) {
-        resolve(null);
-      }
+      } catch (_) { resolve(null); }
     });
-
     if (checkRes && checkRes.fresh) {
-      console.log('[GEMINI][BACKGROUND] FRESH_CHAT_READY (navigated and verified)', {
-        tabId,
-        contentInstanceId: checkRes.contentInstanceId,
-        conversationEpoch: checkRes.conversationEpoch
-      });
-      // Send fresh heartbeat to Python bridge after fresh navigation
-      try {
-        await bridgeFetch('/v1/event', 'POST', {
-          type: 'FRESH_CHAT_READY',
-          tab: tabId,
-          instance: checkRes.contentInstanceId,
-          epoch: checkRes.conversationEpoch
-        }, 3000);
-      } catch (_) {}
+      console.log('[GEMINI][BACKGROUND] FRESH_CHAT_READY (navigated and verified)', { tabId, contentInstanceId: checkRes.contentInstanceId, conversationEpoch: checkRes.conversationEpoch });
+      try { await bridgeFetch('/v1/event', 'POST', { type: 'FRESH_CHAT_READY', tab: tabId, instance: checkRes.contentInstanceId, epoch: checkRes.conversationEpoch }, 3000); } catch (_) {}
       try {
         await bridgeFetch('/v1/heartbeat', 'POST', {
-          status: ping.status || 'ready',
-          transportAlive: true,
-          runtimeAlive: true,
-          runtimeStatus: ping.status,
-          title: ping.title || 'Google Gemini',
-          url: ping.url || 'https://gemini.google.com/app',
-          extensionVersion: contract.extensionVersion,
-          contentBuild: contract.runtimeBuild,
-          buildId: contract.runtimeBuild,
-          protocolVersion: contract.protocolVersion,
-          bridgeSchemaVersion: contract.bridgeSchemaVersion,
-          consumerId: 'background-r12',
-          lastRuntimePingAt: Date.now(),
-          tabId: tabId,
-          contentInstanceId: checkRes.contentInstanceId,
-          conversationEpoch: checkRes.conversationEpoch
+          status: ping.status || 'ready', transportAlive: true, runtimeAlive: true, runtimeStatus: ping.status,
+          title: ping.title || 'Google Gemini', url: ping.url || 'https://gemini.google.com/app', extensionVersion: contract.extensionVersion,
+          contentBuild: contract.runtimeBuild, buildId: contract.runtimeBuild, protocolVersion: contract.protocolVersion,
+          bridgeSchemaVersion: contract.bridgeSchemaVersion, consumerId: 'background-r13', lastRuntimePingAt: Date.now(), tabId,
+          contentInstanceId: checkRes.contentInstanceId, conversationEpoch: checkRes.conversationEpoch
         }, 5000);
       } catch (_) {}
-      return {
-        ok: true,
-        reason: 'navigated_fresh',
-        tabId,
-        contentInstanceId: checkRes.contentInstanceId,
-        conversationEpoch: checkRes.conversationEpoch
-      };
+      return { ok: true, reason: 'navigated_fresh', tabId, contentInstanceId: checkRes.contentInstanceId, conversationEpoch: checkRes.conversationEpoch };
     }
   }
-
   return { ok: false, error: 'fresh_chat_not_verified' };
 }
 
@@ -339,189 +225,102 @@ const cancelledRequestIds = new Set();
 function trackCancelledRequestId(rid) {
   if (!rid) return;
   cancelledRequestIds.add(rid);
-  if (cancelledRequestIds.size > 100) {
-    const oldest = cancelledRequestIds.values().next().value;
-    cancelledRequestIds.delete(oldest);
+  if (cancelledRequestIds.size > 100) cancelledRequestIds.delete(cancelledRequestIds.values().next().value);
+}
+
+function resultEnvelope(message, fallbackMeta = null) {
+  const meta = fallbackMeta || {};
+  return {
+    requestId: message?.requestId || meta.requestId || '',
+    postKey: message?.postKey || meta.postKey || '',
+    navigationVersion: message?.navigationVersion || meta.navigationVersion || 0,
+    status: message?.result?.status || 'failed',
+    text: message?.result?.text || '',
+    error: message?.result?.error || ''
+  };
+}
+
+async function forwardResultToPython(message, fallbackMeta = null, timeoutMs = 3500) {
+  const body = resultEnvelope(message, fallbackMeta);
+  if (!body.requestId || !body.postKey || !Number.isInteger(Number(body.navigationVersion)) || Number(body.navigationVersion) <= 0) {
+    return { ok: false, received: true, accepted: false, reason: 'invalid_result_identity' };
+  }
+  try {
+    const res = await bridgeFetch('/v1/result', 'POST', body, timeoutMs);
+    const accepted = Boolean(res && (res.accepted === true || res.reason === 'already_accepted'));
+    return { ok: accepted, received: true, accepted, reason: res?.reason || (accepted ? 'accepted' : 'python_rejected') };
+  } catch (error) {
+    return { ok: false, received: true, accepted: false, reason: String(error?.message || error) };
   }
 }
 
 async function runCommandCycle() {
   const contract = await getRuntimeContract();
   const activeRuntime = await findActiveGeminiRuntime();
-
-  if (!activeRuntime || activeRuntime.ping.status !== 'ready') {
-    // If Gemini tab is missing or not ready, wait and retry
-    await new Promise(r => setTimeout(r, 2000));
-    return;
-  }
-
-  // 1. Long-poll for next command (up to 15s wait on bridge server)
+  if (!activeRuntime || activeRuntime.ping.status !== 'ready') { await new Promise(r => setTimeout(r, 2000)); return; }
   let cmdData = null;
-  try {
-    cmdData = await bridgeFetch('/v1/command/wait?timeout=15', 'GET', null, 20000);
-  } catch (cmdErr) {
-    return;
-  }
-
+  try { cmdData = await bridgeFetch('/v1/command/wait?timeout=15', 'GET', null, 20000); } catch (_) { return; }
   const command = cmdData?.command;
-  if (!command) {
-    return;
-  }
-
-  // 2. Claim command
+  if (!command) return;
   try {
-    const claim = await bridgeFetch('/v1/claim', 'POST', {
-      requestId: command.requestId,
-      claimant: `${contract.runtimeBuild}_tab_${activeRuntime.tabId}`
-    }, 5000);
-    if (!claim.claimed) {
-      return;
-    }
-  } catch (_) {
-    return;
-  }
-
-  // 3. Verify and prepare fresh Gemini conversation isolation
+    const claim = await bridgeFetch('/v1/claim', 'POST', { requestId: command.requestId, claimant: `${contract.runtimeBuild}_tab_${activeRuntime.tabId}` }, 5000);
+    if (!claim.claimed) return;
+  } catch (_) { return; }
   const freshCheck = await ensureFreshGeminiConversation(activeRuntime.tabId);
   if (!freshCheck.ok) {
     console.warn('[GEMINI][BACKGROUND] fresh chat verification failed:', freshCheck.error);
-    await bridgeFetch('/v1/result', 'POST', {
-      requestId: command.requestId,
-      postKey: command.postKey,
-      navigationVersion: command.navigationVersion,
-      status: 'dom_unsupported',
-      text: '',
-      error: 'fresh_chat_not_verified'
-    }, 10000).catch(() => {});
+    await bridgeFetch('/v1/result', 'POST', { requestId: command.requestId, postKey: command.postKey, navigationVersion: command.navigationVersion, status: 'dom_unsupported', text: '', error: 'fresh_chat_not_verified' }, 10000).catch(() => {});
     return;
   }
-
-  // 3. Dispatch NFA_EXECUTE_COMMAND to Gemini Content Script (Two-Message Protocol)
   let execResult = null;
-  const dispatchPromise = new Promise((resolve) => {
-    const deadlineMs = typeof command.deadlineAtMs === 'number' && command.deadlineAtMs > 0
-      ? (command.deadlineAtMs - Date.now())
-      : (typeof command.deadlineAt === 'number' && command.deadlineAt > 1e11
-          ? (command.deadlineAt - Date.now())
-          : (typeof command.deadlineAt === 'number' && command.deadlineAt > 0
-              ? (command.deadlineAt * 1000 - Date.now())
-              : 60000));
+  const dispatchPromise = new Promise(resolve => {
+    const deadlineMs = typeof command.deadlineAtMs === 'number' && command.deadlineAtMs > 0 ? command.deadlineAtMs - Date.now() : (typeof command.deadlineAt === 'number' && command.deadlineAt > 1e11 ? command.deadlineAt - Date.now() : (typeof command.deadlineAt === 'number' && command.deadlineAt > 0 ? command.deadlineAt * 1000 - Date.now() : 60000));
     const timeoutMs = Math.max(5000, deadlineMs);
-
     const keepAliveInterval = setInterval(() => {
-      if (!inFlightCommandResolvers.has(command.requestId)) {
-        clearInterval(keepAliveInterval);
-        return;
-      }
-      try {
-        chrome.runtime.getPlatformInfo(() => {});
-      } catch (_) {}
+      if (!inFlightCommandResolvers.has(command.requestId)) { clearInterval(keepAliveInterval); return; }
+      try { chrome.runtime.getPlatformInfo(() => {}); } catch (_) {}
     }, 4500);
-
     const timer = setTimeout(() => {
       if (inFlightCommandResolvers.has(command.requestId)) {
-        clearInterval(keepAliveInterval);
-        inFlightCommandResolvers.delete(command.requestId);
-        trackCancelledRequestId(command.requestId);
-        try {
-          chrome.tabs.sendMessage(activeRuntime.tabId, {
-            type: 'NFA_CANCEL_COMMAND',
-            requestId: command.requestId
-          }, () => {});
-        } catch (_) {}
+        clearInterval(keepAliveInterval); inFlightCommandResolvers.delete(command.requestId); trackCancelledRequestId(command.requestId);
+        try { chrome.tabs.sendMessage(activeRuntime.tabId, { type: 'NFA_CANCEL_COMMAND', requestId: command.requestId }, () => {}); } catch (_) {}
         resolve({ status: 'timeout', text: '', error: 'command_deadline_exceeded' });
       }
     }, timeoutMs);
-
-    inFlightCommandResolvers.set(command.requestId, {
-      resolve,
-      timer,
-      keepAliveInterval,
-      commandMetadata: {
-        requestId: command.requestId,
-        postKey: command.postKey,
-        navigationVersion: command.navigationVersion
-      }
-    });
-
+    inFlightCommandResolvers.set(command.requestId, { resolve, timer, keepAliveInterval, commandMetadata: { requestId: command.requestId, postKey: command.postKey, navigationVersion: command.navigationVersion } });
     command.tabId = freshCheck.tabId || activeRuntime.tabId;
     command.contentInstanceId = freshCheck.contentInstanceId;
     command.conversationEpoch = freshCheck.conversationEpoch;
-
-    chrome.tabs.sendMessage(
-      activeRuntime.tabId,
-      { type: 'NFA_EXECUTE_COMMAND', command },
-      (res) => {
-        if (chrome.runtime.lastError || !res?.ok) {
-          const inFlight = inFlightCommandResolvers.get(command.requestId);
-          if (inFlight) {
-            if (inFlight.timer) clearTimeout(inFlight.timer);
-            if (inFlight.keepAliveInterval) clearInterval(inFlight.keepAliveInterval);
-            inFlightCommandResolvers.delete(command.requestId);
-          }
-          resolve({
-            status: 'failed',
-            text: '',
-            error: chrome.runtime.lastError?.message || 'failed_to_start_command'
-          });
-        }
+    chrome.tabs.sendMessage(activeRuntime.tabId, { type: 'NFA_EXECUTE_COMMAND', command }, res => {
+      if (chrome.runtime.lastError || !res?.ok) {
+        const inFlight = inFlightCommandResolvers.get(command.requestId);
+        if (inFlight) { if (inFlight.timer) clearTimeout(inFlight.timer); if (inFlight.keepAliveInterval) clearInterval(inFlight.keepAliveInterval); inFlightCommandResolvers.delete(command.requestId); }
+        resolve({ status: 'failed', text: '', error: chrome.runtime.lastError?.message || 'failed_to_start_command' });
       }
-    );
+    });
   });
-
-  try {
-    execResult = await dispatchPromise;
-  } catch (e) {
-    execResult = { status: 'failed', text: '', error: String(e?.message || e) };
-  }
-
-  // 4. Submit execution result to Python with retry on transient delivery failure (GEM-07)
+  try { execResult = await dispatchPromise; } catch (e) { execResult = { status: 'failed', text: '', error: String(e?.message || e) }; }
   let resultDelivered = false;
   for (let attempt = 0; attempt < 3; attempt++) {
     try {
-      const res = await bridgeFetch('/v1/result', 'POST', {
-        requestId: command.requestId,
-        postKey: command.postKey,
-        navigationVersion: command.navigationVersion,
-        status: execResult?.status || 'failed',
-        text: execResult?.text || '',
-        error: execResult?.error || ''
-      }, 10000);
-      if (res && (res.accepted === true || res.reason === 'already_accepted')) {
-        resultDelivered = true;
-        break;
-      } else if (res) {
-        console.warn(`[GEMINI][BACKGROUND] result submit attempt ${attempt + 1} unaccepted:`, res.reason);
-      }
-    } catch (resErr) {
-      console.debug(`[GEMINI][BACKGROUND] result submit attempt ${attempt + 1} fail:`, resErr);
-      await new Promise(r => setTimeout(r, 500));
-    }
+      const res = await bridgeFetch('/v1/result', 'POST', { requestId: command.requestId, postKey: command.postKey, navigationVersion: command.navigationVersion, status: execResult?.status || 'failed', text: execResult?.text || '', error: execResult?.error || '' }, 10000);
+      if (res && (res.accepted === true || res.reason === 'already_accepted')) { resultDelivered = true; console.log('[GEMINI][BACKGROUND][RESULT_ACCEPTED]', command.requestId, res.reason || 'accepted'); break; }
+      if (res) console.warn(`[GEMINI][BACKGROUND] result submit attempt ${attempt + 1} unaccepted:`, res.reason);
+    } catch (resErr) { console.debug(`[GEMINI][BACKGROUND] result submit attempt ${attempt + 1} fail:`, resErr); await new Promise(r => setTimeout(r, 500)); }
   }
-
-  // 5. Immediately query runtime tab and report fresh status to bridge
+  if (!resultDelivered) console.warn('[GEMINI][BACKGROUND][RESULT_DELIVERY_UNCONFIRMED]', command.requestId);
   try {
     const postExecRuntime = await findActiveGeminiRuntime();
     const now = Date.now();
-    const heartbeatPayload = {
-      status: postExecRuntime ? (postExecRuntime.ping.status || 'ready') : 'gemini_tab_not_found',
-      transportAlive: true,
-      runtimeAlive: Boolean(postExecRuntime),
-      runtimeStatus: postExecRuntime ? postExecRuntime.ping.status : 'disconnected',
-      title: postExecRuntime?.ping.title || 'Google Gemini',
-      url: postExecRuntime?.ping.url || 'https://gemini.google.com/app',
-      extensionVersion: contract.extensionVersion,
-      contentBuild: contract.runtimeBuild,
-      buildId: contract.runtimeBuild,
-      protocolVersion: contract.protocolVersion,
-      bridgeSchemaVersion: contract.bridgeSchemaVersion,
-      consumerId: 'background-r12',
-      lastRuntimePingAt: now,
-      busyRequestId: postExecRuntime?.ping.busyRequestId || null,
-      busySince: postExecRuntime?.ping.busySince || null,
+    await bridgeFetch('/v1/heartbeat', 'POST', {
+      status: postExecRuntime ? (postExecRuntime.ping.status || 'ready') : 'gemini_tab_not_found', transportAlive: true,
+      runtimeAlive: Boolean(postExecRuntime), runtimeStatus: postExecRuntime ? postExecRuntime.ping.status : 'disconnected',
+      title: postExecRuntime?.ping.title || 'Google Gemini', url: postExecRuntime?.ping.url || 'https://gemini.google.com/app',
+      extensionVersion: contract.extensionVersion, contentBuild: contract.runtimeBuild, buildId: contract.runtimeBuild,
+      protocolVersion: contract.protocolVersion, bridgeSchemaVersion: contract.bridgeSchemaVersion, consumerId: 'background-r13',
+      lastRuntimePingAt: now, busyRequestId: postExecRuntime?.ping.busyRequestId || null, busySince: postExecRuntime?.ping.busySince || null,
       busyDeadlineAt: postExecRuntime?.ping.busyDeadlineAt || null
-    };
-    await bridgeFetch('/v1/heartbeat', 'POST', heartbeatPayload, 5000);
+    }, 5000);
     lastHeartbeatSentAt = now;
   } catch (_) {}
 }
@@ -531,150 +330,75 @@ async function startTransportEngine() {
   isTransportLoopRunning = true;
   startHeartbeatLoop();
   while (true) {
-    try {
-      await runCommandCycle();
-    } catch (cycleErr) {
-      console.debug('[GEMINI][BACKGROUND] cycle error:', cycleErr);
-      await new Promise(r => setTimeout(r, 1000));
-    }
+    try { await runCommandCycle(); } catch (cycleErr) { console.debug('[GEMINI][BACKGROUND] cycle error:', cycleErr); await new Promise(r => setTimeout(r, 1000)); }
   }
 }
 
 async function diagnose() {
   const injection = await ensureAllGeminiTabs();
-  if (injection.tabsFound === 0) {
-    return { ok: false, status: 'gemini_tab_not_found', injection };
-  }
-
+  if (injection.tabsFound === 0) return { ok: false, status: 'gemini_tab_not_found', injection };
   await new Promise(resolve => setTimeout(resolve, 500));
-  try {
-    const bridge = await bridgeFetch('/v1/status', 'GET', null, 3000);
-    return { ok: true, status: bridge.status || 'unknown', bridge, injection };
-  } catch (error) {
-    return {
-      ok: false,
-      status: 'loopback_bridge_unreachable',
-      error: String(error?.message || error),
-      injection
-    };
-  }
+  try { const bridge = await bridgeFetch('/v1/status', 'GET', null, 3000); return { ok: true, status: bridge.status || 'unknown', bridge, injection }; }
+  catch (error) { return { ok: false, status: 'loopback_bridge_unreachable', error: String(error?.message || error), injection }; }
 }
 
-chrome.runtime.onInstalled.addListener(() => {
-  ensureAllGeminiTabs().catch(() => {});
-});
-
-chrome.runtime.onStartup.addListener(() => {
-  ensureAllGeminiTabs().catch(() => {});
-});
-
+chrome.runtime.onInstalled.addListener(() => { ensureAllGeminiTabs().catch(() => {}); });
+chrome.runtime.onStartup.addListener(() => { ensureAllGeminiTabs().catch(() => {}); });
 chrome.tabs.onUpdated.addListener((tabId, changeInfo, tab) => {
   const url = changeInfo.url || tab.url || '';
-  if ((changeInfo.status === 'complete' || changeInfo.url) && /^https:\/\/gemini\.google\.com\//.test(url)) {
-    ensureGeminiRuntime(tabId).catch(() => {});
-  }
+  if ((changeInfo.status === 'complete' || changeInfo.url) && /^https:\/\/gemini\.google\.com\//.test(url)) ensureGeminiRuntime(tabId).catch(() => {});
 });
-
-// Launch background transport engine
 startTransportEngine().catch(() => {});
 
 chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
   if (message?.type === 'getRuntimeContract') {
-    getRuntimeContract()
-      .then(data => sendResponse({ ok: true, data }))
-      .catch(error => sendResponse({ ok: false, error: String(error?.message || error) }));
+    getRuntimeContract().then(data => sendResponse({ ok: true, data })).catch(error => sendResponse({ ok: false, error: String(error?.message || error) }));
     return true;
   }
-
   if (message?.type === 'ensureGeminiRuntime' || message?.type === 'reconnectGemini') {
     const tabId = sender.tab?.id;
-    if (tabId) {
-      ensureGeminiRuntime(tabId)
-        .then(data => sendResponse(data))
-        .catch(error => sendResponse({ ok: false, status: 'inject_failed', error: String(error?.message || error) }));
-    } else {
-      ensureAllGeminiTabs()
-        .then(data => sendResponse({ ok: true, data }))
-        .catch(error => sendResponse({ ok: false, status: 'inject_failed', error: String(error?.message || error) }));
-    }
+    if (tabId) ensureGeminiRuntime(tabId).then(data => sendResponse(data)).catch(error => sendResponse({ ok: false, status: 'inject_failed', error: String(error?.message || error) }));
+    else ensureAllGeminiTabs().then(data => sendResponse({ ok: true, data })).catch(error => sendResponse({ ok: false, status: 'inject_failed', error: String(error?.message || error) }));
     return true;
   }
-
   if (message?.type === 'diagnoseExtension') {
-    diagnose()
-      .then(data => sendResponse(data))
-      .catch(error => sendResponse({ ok: false, status: 'diagnostic_failed', error: String(error?.message || error) }));
+    diagnose().then(data => sendResponse(data)).catch(error => sendResponse({ ok: false, status: 'diagnostic_failed', error: String(error?.message || error) }));
     return true;
   }
-
   if (message?.type === 'NFA_EXECUTION_RESULT' || message?.type === 'NFA_COMMAND_RESULT') {
     if (cancelledRequestIds.has(message.requestId)) {
       console.log('[GEMINI][BACKGROUND] Dropping late execution result for cancelled rid:', message.requestId);
-      sendResponse({ ok: false, error: 'cancelled' });
+      sendResponse({ ok: true, received: true, accepted: false, reason: 'request_cancelled' });
       return true;
     }
     const inFlight = inFlightCommandResolvers.get(message.requestId);
+    const fallbackMeta = inFlight?.commandMetadata || null;
     if (inFlight) {
       if (inFlight.timer) clearTimeout(inFlight.timer);
       if (inFlight.keepAliveInterval) clearInterval(inFlight.keepAliveInterval);
       inFlightCommandResolvers.delete(message.requestId);
       inFlight.resolve(message.result);
-      sendResponse({ ok: true, forwarded: true });
-      return true;
     } else {
-      // Recovery fallback when resolver is missing (e.g. timeout race or extension restart)
       console.log('[GEMINI][BACKGROUND] resolver_missing_result_recovered', message.requestId);
-      if (message.requestId && message.result) {
-        bridgeFetch('/v1/result', 'POST', {
-          requestId: message.requestId,
-          postKey: message.postKey || '',
-          navigationVersion: message.navigationVersion || 0,
-          status: message.result.status || 'failed',
-          text: message.result.text || '',
-          error: message.result.error || ''
-        }, 10000)
-          .then(res => sendResponse({ ok: true, recovered: true, res }))
-          .catch(err => {
-            console.debug('[GEMINI][BACKGROUND] recovery submit fail:', err);
-            sendResponse({ ok: false, recovered: false, error: String(err?.message || err) });
-          });
-        return true;
-      }
-      sendResponse({ ok: true, recovered: false });
-      return true;
     }
+    forwardResultToPython(message, fallbackMeta, 3500)
+      .then(ack => sendResponse(ack))
+      .catch(error => sendResponse({ ok: false, received: true, accepted: false, reason: String(error?.message || error) }));
+    return true;
   }
-
   if (message?.type === 'NFA_WAIT_DIAG') {
-    if (message.diag?.rid && cancelledRequestIds.has(message.diag.rid)) {
-      sendResponse({ ok: false, error: 'cancelled' });
-      return true;
-    }
-    if (message.diag) {
-      bridgeFetch('/v1/diag', 'POST', message.diag, 4000).catch(() => {});
-    }
-    sendResponse({ ok: true });
-    return true;
+    if (message.diag?.rid && cancelledRequestIds.has(message.diag.rid)) { sendResponse({ ok: false, error: 'cancelled' }); return true; }
+    if (message.diag) bridgeFetch('/v1/diag', 'POST', message.diag, 4000).catch(() => {});
+    sendResponse({ ok: true }); return true;
   }
-
   if (message?.type === 'NFA_EVENT') {
-    if (message.event?.rid && cancelledRequestIds.has(message.event.rid)) {
-      sendResponse({ ok: false, error: 'cancelled' });
-      return true;
-    }
-    if (message.event) {
-      bridgeFetch('/v1/event', 'POST', message.event, 4000).catch(() => {});
-    }
-    sendResponse({ ok: true });
-    return true;
+    if (message.event?.rid && cancelledRequestIds.has(message.event.rid)) { sendResponse({ ok: false, error: 'cancelled' }); return true; }
+    if (message.event) bridgeFetch('/v1/event', 'POST', message.event, 4000).catch(() => {});
+    sendResponse({ ok: true }); return true;
   }
-
   if (message?.type === 'bridgeFetch') {
-    bridgeFetch(message.path, message.method || 'GET', message.body || null)
-      .then(data => sendResponse({ ok: true, data }))
-      .catch(error => sendResponse({ ok: false, error: String(error?.message || error) }));
+    bridgeFetch(message.path, message.method || 'GET', message.body || null).then(data => sendResponse({ ok: true, data })).catch(error => sendResponse({ ok: false, error: String(error?.message || error) }));
     return true;
   }
-
   return false;
 });
