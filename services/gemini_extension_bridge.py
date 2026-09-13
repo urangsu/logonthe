@@ -33,21 +33,37 @@ class GeminiCommand:
     deadline_at: float
     deadline_at_ms: Optional[int] = None
     created_at_ms: Optional[int] = None
+    generation_deadline_at: Optional[float] = None
+    generation_deadline_at_ms: Optional[int] = None
+    acceptance_deadline_at: Optional[float] = None
+    acceptance_deadline_at_ms: Optional[int] = None
+    timeout_seconds: float = 55.0
+    delivery_reserve_seconds: float = 9.0
+
+    DELIVERY_RESERVE_SECONDS: float = 9.0
 
     @classmethod
-    def create(cls, post_key: str, navigation_version: int, prompt: str, request_id: Optional[str] = None, timeout_seconds: float = 55.0):
+    def create(cls, post_key: str, navigation_version: int, prompt: str, request_id: Optional[str] = None, timeout_seconds: float = 55.0, delivery_reserve_seconds: Optional[float] = None):
         now = time.time()
         timeout = max(10.0, float(timeout_seconds or 55.0))
-        deadline = now + timeout
+        generation_deadline = now + timeout
+        delivery_reserve = float(delivery_reserve_seconds) if delivery_reserve_seconds is not None else cls.DELIVERY_RESERVE_SECONDS
+        acceptance_deadline = generation_deadline + delivery_reserve
         return cls(
             request_id or uuid.uuid4().hex,
             post_key,
             navigation_version,
             prompt,
             now,
-            deadline,
-            deadline_at_ms=int(deadline * 1000),
+            deadline_at=acceptance_deadline,
+            deadline_at_ms=int(acceptance_deadline * 1000),
             created_at_ms=int(now * 1000),
+            generation_deadline_at=generation_deadline,
+            generation_deadline_at_ms=int(generation_deadline * 1000),
+            acceptance_deadline_at=acceptance_deadline,
+            acceptance_deadline_at_ms=int(acceptance_deadline * 1000),
+            timeout_seconds=timeout,
+            delivery_reserve_seconds=delivery_reserve,
         )
 
     def to_json(self) -> Dict[str, object]:
@@ -55,6 +71,10 @@ class GeminiCommand:
         deadline = self.deadline_at
         d_ms = self.deadline_at_ms if self.deadline_at_ms is not None else (int(deadline) if deadline > 1e11 else int(deadline * 1000))
         c_ms = self.created_at_ms if self.created_at_ms is not None else (int(now) if now > 1e11 else int(now * 1000))
+        gen_at = self.generation_deadline_at if self.generation_deadline_at is not None else (self.created_at + self.timeout_seconds)
+        gen_ms = self.generation_deadline_at_ms if self.generation_deadline_at_ms is not None else int(gen_at * 1000)
+        acc_at = self.acceptance_deadline_at if self.acceptance_deadline_at is not None else deadline
+        acc_ms = self.acceptance_deadline_at_ms if self.acceptance_deadline_at_ms is not None else d_ms
         return {
             "requestId": self.request_id,
             "postKey": self.post_key,
@@ -64,6 +84,13 @@ class GeminiCommand:
             "deadlineAt": self.deadline_at,
             "deadlineAtMs": d_ms,
             "createdAtMs": c_ms,
+            "generationDeadlineAt": gen_at,
+            "generationDeadlineAtMs": gen_ms,
+            "acceptanceDeadlineAt": acc_at,
+            "acceptanceDeadlineAtMs": acc_ms,
+            "overallDeadlineAtMs": acc_ms,
+            "timeoutSeconds": self.timeout_seconds,
+            "deliveryReserveSeconds": self.delivery_reserve_seconds,
         }
 
 
@@ -75,6 +102,7 @@ class GeminiResult:
     status: GeminiResultStatus
     text: str = ""
     error: str = ""
+    delivery_id: Optional[str] = None
 
     @classmethod
     def from_json(cls, payload: Dict[str, object]):
@@ -103,6 +131,7 @@ class GeminiResult:
 
         text_val = str(payload.get("text", "") or "")
         err_val = str(payload.get("error", "") or "")
+        delivery_id = str(payload.get("deliveryId", "") or "").strip() or None
         return cls(
             req_id,
             post_k,
@@ -110,7 +139,21 @@ class GeminiResult:
             status_enum,
             text_val,
             err_val,
+            delivery_id,
         )
+
+    def to_json(self) -> Dict[str, object]:
+        data = {
+            "requestId": self.request_id,
+            "postKey": self.post_key,
+            "navigationVersion": self.navigation_version,
+            "status": self.status.value,
+            "text": self.text,
+            "error": self.error,
+        }
+        if self.delivery_id:
+            data["deliveryId"] = self.delivery_id
+        return data
 
 
 @dataclass(frozen=True)
@@ -601,7 +644,8 @@ class GeminiExtensionBridge:
                 return False, "no_active_command"
             if not command.post_key or command.navigation_version <= 0:
                 return False, "active_command_identity_invalid"
-            if time.time() > command.deadline_at:
+            acc_deadline = getattr(command, "acceptance_deadline_at", None) or command.deadline_at
+            if time.time() > acc_deadline:
                 self._command = None
                 self._command_state = "expired"
                 return False, "late_result"
@@ -623,12 +667,14 @@ class GeminiExtensionBridge:
                 self._active_request_id = None
             self._last_completed_request_id = result.request_id
             self._last_completed_at = time.time()
-            if result.status == GeminiResultStatus.COMPLETED:
+            status_val = result.status.value if hasattr(result.status, "value") else str(result.status)
+            if status_val == GeminiResultStatus.COMPLETED.value:
                 self._heartbeat_status = "settling"
             else:
                 self._heartbeat_status = "recovering"
+                logger.log(f"[GEMINI_GENERATION_FAILED] rid={result.request_id} reason={result.error or status_val}")
             self._last_busy_request_id = None
-            logger.log(f"[GEMINI][RESULT_ACCEPTED] rid={result.request_id} post={result.post_key} nav={result.navigation_version} status={result.status.value}")
+            logger.log(f"[GEMINI][RESULT_ACCEPTED] rid={result.request_id} post={result.post_key} nav={result.navigation_version} status={status_val}")
             self._condition.notify_all()
             return True, "accepted"
 
@@ -639,8 +685,9 @@ class GeminiExtensionBridge:
         stop_event: Optional[threading.Event] = None,
         skip_event: Optional[threading.Event] = None
     ) -> Optional[GeminiResult]:
-        timeout = float(timeout) if timeout is not None else max(0.0, command.deadline_at - time.time())
-        deadline_at = command.deadline_at or (time.time() + timeout)
+        acc_deadline = getattr(command, "acceptance_deadline_at", None) or command.deadline_at
+        timeout = float(timeout) if timeout is not None else max(0.0, acc_deadline - time.time())
+        deadline_at = acc_deadline or (time.time() + timeout)
         deadline = min(time.monotonic() + timeout, time.monotonic() + max(0.0, deadline_at - time.time()))
         with self._condition:
             while True:
@@ -811,11 +858,23 @@ class GeminiBridgeHTTPServer:
 
                 if self.path == "/v1/event":
                     ev_type = str(payload.get("type", ""))
-                    if ev_type == "FRESH_CHAT_READY":
-                        logger.log(
-                            f"[GEMINI][FRESH_CHAT_READY] tab={payload.get('tab')} "
-                            f"instance={payload.get('instance')} epoch={payload.get('epoch')}"
-                        )
+                    if ev_type in ("FRESH_CHAT_READY", "FRESH_CHAT_RUNTIME_READY", "FRESH_CHAT_EXEC_READY"):
+                        inst = payload.get("instance")
+                        epoch = payload.get("epoch")
+                        tab = payload.get("tab")
+                        epoch_key = f"{inst}:{epoch}"
+                        seen_epochs = getattr(bridge, "_seen_fresh_chat_epochs", None)
+                        if seen_epochs is None:
+                            seen_epochs = set()
+                            bridge._seen_fresh_chat_epochs = seen_epochs
+                        if epoch_key not in seen_epochs:
+                            seen_epochs.add(epoch_key)
+                            if len(seen_epochs) > 50:
+                                seen_epochs.pop()
+                            logger.log(
+                                f"[GEMINI][FRESH_CHAT_READY] tab={tab} "
+                                f"instance={inst} epoch={epoch} source={ev_type}"
+                            )
                     elif ev_type == "USER_TURN_CONFIRMED":
                         logger.log(
                             f"[GEMINI][USER_TURN_CONFIRMED] rid={payload.get('rid')} "
@@ -833,6 +892,11 @@ class GeminiBridgeHTTPServer:
                     elif ev_type == "TEXT_STABLE":
                         logger.log(
                             f"[GEMINI][TEXT_STABLE] stableMs={payload.get('stableMs')}"
+                        )
+                    elif ev_type == "STREAMING_STALE_SUSPECTED":
+                        logger.log(
+                            f"[GEMINI][STREAMING_STALE_SUSPECTED] rid={payload.get('rid')} "
+                            f"stableMs={payload.get('stableMs')} chars={payload.get('chars')}"
                         )
                     return self._json(200, {"ok": True})
                 if self.path == "/v1/diag":
@@ -852,13 +916,17 @@ class GeminiBridgeHTTPServer:
                     mut_age_s = f"{mut_age / 1000.0:.1f}s" if isinstance(mut_age, (int, float)) else str(mut_age)
                     evidence = payload.get("generationEvidence", "")
                     build = payload.get("runtimeBuild", "")
-                    logger.log(
+                    exclude_reasons = payload.get("candidateExcludeReasons", "")
+                    diag_log = (
                         f"[GEMINI][WAIT_DIAG] rid={rid} elapsed={elapsed_s} freshChatVerified={fresh} "
                         f"sendConfirmed={confirmed} userSelectorMatches={u_matches} userUniqueTurns={u_turns} "
                         f"responseSelectorMatches={r_matches} responseUniqueTurns={r_turns} "
                         f"visibleTextCandidates={v_cands} bound={r_bound} textLen={t_len} "
                         f"lastMutationAge={mut_age_s} evidence={evidence} build={build}"
                     )
+                    if exclude_reasons:
+                        diag_log += f" candidateExcludeReasons={exclude_reasons}"
+                    logger.log(diag_log)
                     return self._json(200, {"ok": True})
                 return self._json(404, {"error": "not_found"})
 

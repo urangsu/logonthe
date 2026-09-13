@@ -10,10 +10,14 @@
   let isStopped = false;
   const eventCleanups = [];
 
-  const USER_QUERY_SELECTORS = [
-    '.user-message', 'user-query', '[data-test-id="user-query"]', '.query-text',
-    '.user-query-container', 'div[data-message-author-role="user"]', '.user-query-content'
+  const USER_TURN_ROOT_SELECTORS = [
+    '.user-message', 'user-query', '[data-test-id="user-query"]',
+    '.user-query-container', 'div[data-message-author-role="user"]'
   ].join(', ');
+  const USER_TURN_TEXT_SELECTORS = [
+    '.query-text', '.user-query-text', '.user-query-content', 'p', 'div'
+  ].join(', ');
+  const USER_QUERY_SELECTORS = USER_TURN_ROOT_SELECTORS;
   const EDITOR_SELECTORS = [
     'rich-textarea div[contenteditable="true"]', 'div.ql-editor[contenteditable="true"]',
     'div[role="textbox"][contenteditable="true"]', 'div[contenteditable="true"]', 'textarea'
@@ -23,7 +27,7 @@
     '[data-test-id="model-response"]', '.response-container-content', 'message-content', '.model-response-text'
   ].join(', ');
   let runtimeContract = {
-    extensionVersion: '13.2.3', runtimeBuild: '13.2.3-r14', protocolVersion: 3, bridgeSchemaVersion: 2
+    extensionVersion: '13.2.3', runtimeBuild: '13.2.3-r15', protocolVersion: 3, bridgeSchemaVersion: 2
   };
 
   try {
@@ -120,6 +124,31 @@
     return false;
   }
 
+  function visibleAndActive(element) {
+    if (!element || !element.isConnected) return false;
+    if (element.disabled || (typeof element.getAttribute === 'function' && element.getAttribute('aria-disabled') === 'true')) return false;
+    if (typeof element.getAttribute === 'function' && element.getAttribute('aria-hidden') === 'true') return false;
+    const style = window.getComputedStyle(element);
+    if (style.visibility === 'hidden' || style.display === 'none') return false;
+    const opacity = parseFloat(style.opacity);
+    if (Number.isFinite(opacity) && opacity <= 0) return false;
+    const rect = element.getBoundingClientRect();
+    if (rect.width <= 0 && rect.height <= 0) {
+      if (style.display !== 'contents') return false;
+      const childWithText = element.querySelector('p, div, span, .markdown, .model-response-text');
+      if (childWithText) {
+        const cStyle = window.getComputedStyle(childWithText);
+        if (cStyle.visibility === 'hidden' || cStyle.display === 'none') return false;
+        const cOpacity = parseFloat(cStyle.opacity);
+        if (Number.isFinite(cOpacity) && cOpacity <= 0) return false;
+        const cRect = childWithText.getBoundingClientRect();
+        if (cRect.width > 0 || cRect.height > 0) return true;
+      }
+      return false;
+    }
+    return true;
+  }
+
   function findComposer(input) { return input?.closest('chat-window, .input-area, .composer, .input-container, form, main') || input?.parentElement || document.body; }
   function scoreSendCandidate(el, composer) {
     if (!el || el.disabled || el.getAttribute('aria-disabled') === 'true') return -1000;
@@ -189,7 +218,7 @@
     if (/captcha|로봇이 아닙니다|비정상적인 트래픽/i.test(body)) return 'captcha';
     if (/accounts\.google\.com/.test(location.href) || (/로그인/.test(body) && !editor())) return 'auth_required';
     if (activeExecution) {
-      if (Date.now() > activeExecution.deadlineAtMs) cancelExecution(activeExecution.requestId, 'command_deadline_exceeded');
+      if (Date.now() > (activeExecution.overallDeadlineAtMs || activeExecution.deadlineAtMs)) cancelExecution(activeExecution.requestId, 'command_deadline_exceeded');
       else return 'busy';
     }
     return editor() ? 'ready' : 'dom_unsupported';
@@ -240,7 +269,7 @@
     return { ok: false, target: resolvedTarget, reason: 'readback_mismatch', surface: lastMatchedSurface || 'none', actualRaw: lastActualRaw, actualCanonical: lastActualCanonical };
   }
 
-  function getUserTurnContainer(el) { return !el || !el.isConnected ? null : (el.closest(USER_QUERY_SELECTORS) || el); }
+  function getUserTurnContainer(el) { return !el || !el.isConnected ? null : (typeof el.closest === 'function' ? el.closest(USER_TURN_ROOT_SELECTORS) : null); }
   function getTurnContainer(el) { return !el || !el.isConnected ? null : (el.closest('model-response, div[data-message-author-role="model"], div.model-response, [data-test-id="model-response"]') || el); }
 
   const EXCLUDED_STATUS_SELECTORS = [
@@ -309,7 +338,10 @@
     const bestBody = bodyCandidates.filter(x => x.cleanText).pop() || bodyCandidates.pop() || null;
     const answerBodyNode = bestBody?.el || null;
     const statusNodes = [...turnNode.querySelectorAll(EXCLUDED_STATUS_SELECTORS)];
-    const streamingNode = turnNode.querySelector('.loading-dots, .streaming, [aria-busy="true"], mat-progress-bar, [data-is-generating="true"]');
+    let streamingNode = null;
+    for (const el of turnNode.querySelectorAll('.loading-dots, .streaming, [aria-busy="true"], mat-progress-bar, [data-is-generating="true"]')) {
+      if (visibleAndActive(el)) { streamingNode = el; break; }
+    }
     const targetTextNode = answerBodyNode || turnNode, cleanText = bestBody?.cleanText || extractCleanText(targetTextNode);
     let isCandidateVisible = false;
     const tStyle = window.getComputedStyle(turnNode);
@@ -323,39 +355,116 @@
   }
 
   function extractResponseText(node) { if (!node) return ''; const cand = resolveTurnCandidate(node); return cand ? (cand.text || '') : extractCleanText(node); }
-  function extractUserQueryText(node) { if (!node) return ''; const q = node.querySelector('.query-text, .user-query-text, p, div') || node; return (q.innerText || q.textContent || '').trim(); }
+  function extractUserQueryText(node) {
+    if (!node) return '';
+    const q = (typeof node.querySelector === 'function' ? node.querySelector(USER_TURN_TEXT_SELECTORS) : null) || node;
+    return (q.innerText || q.textContent || '').trim();
+  }
 
-  function getCandidateInventory(initialResponseSet = new Set(), baselineResponseFingerprints = new Set(), currentUserTurn = null) {
+  function getCandidateInventory(initialResponseSet = new Set(), baselineResponseFingerprints = new Set(), currentUserTurn = null, options = {}) {
     const allMatches = [...document.querySelectorAll(RESPONSE_SELECTORS)], responseSelectorMatches = allMatches.length;
     const uniqueTurnNodes = [], seenTurnSet = new Set();
     for (const el of allMatches) { const t = getTurnContainer(el); if (t && !seenTurnSet.has(t)) { seenTurnSet.add(t); uniqueTurnNodes.push(t); } }
     const inventory = [];
+    const excluded = {
+      disconnected: 0,
+      not_visible: 0,
+      initial_baseline_node: 0,
+      baseline_text_match: 0,
+      precedes_user_turn: 0,
+      relaxed_fresh_chat_precedes: 0
+    };
+
+    const isFreshChatEligible = Boolean(
+      options.freshChatVerified &&
+      initialResponseSet.size === 0 &&
+      baselineResponseFingerprints.size === 0 &&
+      uniqueTurnNodes.length === 1
+    );
+
+    let turnIndex = 0;
     for (const turnNode of uniqueTurnNodes) {
-      const cand = resolveTurnCandidate(turnNode); if (!cand) continue;
-      const textCanonical = canonicalPromptText(cand.text); let excludeReason = null;
-      if (!turnNode.isConnected) excludeReason = 'disconnected'; else if (!cand.isVisible) excludeReason = 'not_visible';
-      else if (initialResponseSet.has(turnNode)) excludeReason = 'initial_baseline_node';
-      else if (textCanonical && baselineResponseFingerprints.has(textCanonical)) excludeReason = 'baseline_text_match';
-      else if (currentUserTurn && (currentUserTurn.compareDocumentPosition(turnNode) & Node.DOCUMENT_POSITION_FOLLOWING) === 0) excludeReason = 'precedes_user_turn';
-      cand.excludeReason = excludeReason; cand.isCandidate = !excludeReason; inventory.push(cand);
+      const cand = resolveTurnCandidate(turnNode);
+      if (!cand) continue;
+      cand.turnIndex = turnIndex++;
+      cand.tag = turnNode.tagName || 'DIV';
+      cand.textLen = (cand.text || '').length;
+
+      const textCanonical = canonicalPromptText(cand.text);
+      const isBaselineNode = initialResponseSet.has(turnNode);
+      const baselineFingerprintMatch = Boolean(textCanonical && baselineResponseFingerprints.has(textCanonical));
+      const isAfterUserTurn = currentUserTurn ? ((currentUserTurn.compareDocumentPosition(turnNode) & Node.DOCUMENT_POSITION_FOLLOWING) !== 0) : true;
+
+      cand.isBaselineNode = isBaselineNode;
+      cand.baselineFingerprintMatch = baselineFingerprintMatch;
+      cand.isAfterUserTurn = isAfterUserTurn;
+
+      let excludeReason = null;
+      if (!turnNode.isConnected) {
+        excludeReason = 'disconnected';
+        excluded.disconnected++;
+      } else if (!cand.isVisible) {
+        excludeReason = 'not_visible';
+        excluded.not_visible++;
+      } else if (isBaselineNode) {
+        excludeReason = 'initial_baseline_node';
+        excluded.initial_baseline_node++;
+      } else if (baselineFingerprintMatch) {
+        excludeReason = 'baseline_text_match';
+        excluded.baseline_text_match++;
+      } else if (currentUserTurn && !isAfterUserTurn) {
+        const isStatusOnly = cand.textLen === 0 && !cand.answerBodyNode;
+        if (isFreshChatEligible && cand.isVisible && !isStatusOnly) {
+          cand.relaxedFreshChatPrecedes = true;
+          excluded.relaxed_fresh_chat_precedes++;
+          excludeReason = null;
+        } else {
+          excludeReason = 'precedes_user_turn';
+          excluded.precedes_user_turn++;
+        }
+      }
+
+      cand.excludeReason = excludeReason;
+      cand.isCandidate = !excludeReason;
+      inventory.push(cand);
     }
     const validCandidates = inventory.filter(c => c.isCandidate);
-    return { responseSelectorMatches, responseUniqueTurns: uniqueTurnNodes.length, visibleTurnCandidates: validCandidates.length,
-      visibleTextCandidates: validCandidates.filter(c => (c.text || '').trim().length > 0).length, inventory, validCandidates };
+    return {
+      responseSelectorMatches,
+      responseUniqueTurns: uniqueTurnNodes.length,
+      visibleTurnCandidates: validCandidates.length,
+      visibleTextCandidates: validCandidates.filter(c => (c.text || '').trim().length > 0).length,
+      inventory,
+      validCandidates,
+      excluded
+    };
   }
 
   function getUserInventory() {
-    const allMatches = [...document.querySelectorAll(USER_QUERY_SELECTORS)], uniqueUserNodes = [], seen = new Set();
-    for (const el of allMatches) { const c = getUserTurnContainer(el); if (c && !seen.has(c)) { seen.add(c); uniqueUserNodes.push(c); } }
-    return { userSelectorMatches: allMatches.length, userUniqueTurns: uniqueUserNodes.length, visibleUserNodes: uniqueUserNodes.filter(visible), allMatches };
+    const roots = [...document.querySelectorAll(USER_TURN_ROOT_SELECTORS)];
+    const uniqueRoots = [...new Set(roots)];
+    return {
+      userSelectorMatches: roots.length,
+      userUniqueTurns: uniqueRoots.length,
+      visibleUserNodes: uniqueRoots.filter(visible),
+      allMatches: roots
+    };
   }
   function responseNodes() { return getCandidateInventory().inventory.filter(c => c.isVisible).map(c => c.turnNode); }
   function userQueryNodes() { return getUserInventory().visibleUserNodes; }
   function detectGenerationEvidence(boundNode) {
-    if (!boundNode) return 'none';
-    if (boundNode.querySelector('.loading-dots, .streaming, [aria-busy="true"], mat-progress-bar, [data-is-generating="true"]')) return 'local_streaming';
+    if (!boundNode || !boundNode.isConnected) return 'none';
+    const indicators = boundNode.querySelectorAll('.loading-dots, .streaming, [aria-busy="true"], mat-progress-bar, [data-is-generating="true"]');
+    for (const el of indicators) {
+      if (visibleAndActive(el)) return 'local_streaming';
+    }
     const comp = findComposer(editor());
-    if (comp?.querySelector('[aria-label*="중지"], [aria-label*="Stop"], [aria-label*="생성 중지"]')) return 'composer_stop_button';
+    if (comp && typeof comp.querySelectorAll === 'function') {
+      const stopButtons = comp.querySelectorAll('button[aria-label*="중지"], button[aria-label*="Stop"], button[aria-label*="생성 중지"], [role="button"][aria-label*="중지"], [role="button"][aria-label*="Stop"], [role="button"][aria-label*="생성 중지"]');
+      for (const btn of stopButtons) {
+        if (visibleAndActive(btn)) return 'composer_stop_button';
+      }
+    }
     return 'idle';
   }
   async function waitForSendReady(input, timeoutMs = 2500) {
@@ -429,7 +538,10 @@
     const baselineUserQueryFingerprints = new Set(initialUserQueries.map(q => canonicalPromptText(extractUserQueryText(q))).filter(Boolean));
     function emitEvent(type,payload={}) { if (isExecutionCancelled()) return; try { chrome.runtime.sendMessage({ type:'NFA_EVENT', event:{ type, rid:command.requestId, ...payload } }); } catch (_) {} }
     const freshChatVerified = initialResponseList.length === 0 && initialUserQueries.length === 0;
-    if (freshChatVerified) { console.log('[GEMINI][FRESH_CHAT_READY]', JSON.stringify({ tab:command.tabId||null, instance:INSTANCE_ID, epoch:conversationEpoch })); emitEvent('FRESH_CHAT_READY',{ tab:command.tabId||null, instance:INSTANCE_ID, epoch:conversationEpoch }); }
+    if (freshChatVerified) {
+      console.log('[GEMINI][FRESH_CHAT_EXEC_READY]', JSON.stringify({ tab:command.tabId||null, instance:INSTANCE_ID, epoch:conversationEpoch }));
+      emitEvent('FRESH_CHAT_EXEC_READY', { tab:command.tabId||null, instance:INSTANCE_ID, epoch:conversationEpoch });
+    }
     let target = editor(); if (!target) return { status:'dom_unsupported', text:'', error:'Gemini 입력창을 찾지 못했습니다.' };
     let readbackResult = null;
     for (let attempt=1;attempt<=2;attempt++) {
@@ -452,13 +564,13 @@
     if (selectedBtn && !selectedBtn.disabled && selectedBtn.getAttribute('aria-disabled')!=='true') selectedBtn.click();
     else if (target?.isConnected) target.dispatchEvent(new KeyboardEvent('keydown',{key:'Enter',code:'Enter',keyCode:13,which:13,bubbles:true}));
 
-    let currentUserTurn=null,targetResponseNode=null,boundAtMs=0,reResolveAttempted=false,textNonEmptyLogged=false,textStableLogged=false;
+    let currentUserTurn=null,targetResponseNode=null,boundAtMs=0,reResolveAttempted=false,textNonEmptyLogged=false,textStableLogged=false,staleStreamingLogged=false;
     function bindResponseNode(node,evidence) {
       if (!node) return null; if (targetResponseNode?.isConnected && targetResponseNode===node) return targetResponseNode;
-      const inv=getCandidateInventory(initialResponseSet,baselineResponseFingerprints,currentUserTurn), cand=inv.inventory.find(c=>c.turnNode===node);
+      const inv=getCandidateInventory(initialResponseSet,baselineResponseFingerprints,currentUserTurn,{freshChatVerified,conversationEpoch}), cand=inv.inventory.find(c=>c.turnNode===node);
       if (!cand||!cand.isVisible||inv.visibleTurnCandidates===0) return null;
       targetResponseNode=node; boundAtMs=Date.now(); reResolveAttempted=false;
-      const rInv=getCandidateInventory(initialResponseSet,baselineResponseFingerprints,currentUserTurn);
+      const rInv=getCandidateInventory(initialResponseSet,baselineResponseFingerprints,currentUserTurn,{freshChatVerified,conversationEpoch});
       console.log('[GEMINI][RESPONSE_TURN_BOUND]',JSON.stringify({rid:command.requestId,evidence,responseUniqueTurns:rInv.responseUniqueTurns,visibleTurnCandidates:rInv.visibleTurnCandidates,visibleTextCandidates:rInv.visibleTextCandidates,hasUserTurnAnchor:Boolean(currentUserTurn),nodeTag:node.tagName}));
       emitEvent('RESPONSE_TURN_BOUND',{responseUniqueTurns:rInv.responseUniqueTurns,visibleTurnCandidates:rInv.visibleTurnCandidates,visibleTextCandidates:rInv.visibleTextCandidates,evidence}); return targetResponseNode;
     }
@@ -468,7 +580,7 @@
       return currentQueries.find(q=>!initialUserQuerySet.has(q)&&canonicalPromptText(extractUserQueryText(q))&&!baselineUserQueryFingerprints.has(canonicalPromptText(extractUserQueryText(q)))) || currentQueries.find(q=>!initialUserQuerySet.has(q)) || null;
     }
     function findTurnResponseCandidate() {
-      const valid=getCandidateInventory(initialResponseSet,baselineResponseFingerprints,currentUserTurn).validCandidates;
+      const valid=getCandidateInventory(initialResponseSet,baselineResponseFingerprints,currentUserTurn,{freshChatVerified,conversationEpoch}).validCandidates;
       if (freshChatVerified) return valid.length ? valid[valid.length-1].turnNode : null;
       if (!currentUserTurn?.isConnected) { const q=findNewUserQuery(); if(q){currentUserTurn=q;console.log('[GEMINI][USER_TURN_BOUND]',JSON.stringify({rid:command.requestId}));} }
       if (currentUserTurn?.isConnected) for (const cand of valid) if ((currentUserTurn.compareDocumentPosition(cand.turnNode)&Node.DOCUMENT_POSITION_FOLLOWING)!==0) return cand.turnNode;
@@ -489,11 +601,11 @@
     }
     logSendDiag({button:selectedBtn,totalCandidates:sendCtrl?.totalCandidates||0,confirmed,boundNode:Boolean(targetResponseNode)});
     if(!confirmed)return{status:'failed',text:'',error:selectedBtn?'user_turn_not_created':'send_not_confirmed'};
-    const deadlineAtMs=execState.deadlineAtMs;let lastMutationAtMs=Date.now(),previous='',lastDiagReportAtMs=0;
+    const generationDeadlineAtMs=execState.generationDeadlineAtMs||execState.deadlineAtMs;let lastMutationAtMs=Date.now(),previous='',lastDiagReportAtMs=0;
     function reportWaitDiag(reason='periodic'){
       if(isExecutionCancelled())return;const nowMs=Date.now();if(reason==='periodic'&&nowMs-lastDiagReportAtMs<4800)return;lastDiagReportAtMs=nowMs;
-      const curText=targetResponseNode?extractResponseText(targetResponseNode):'',candDiag=getCandidateInventory(initialResponseSet,baselineResponseFingerprints,currentUserTurn),userDiag=getUserInventory();
-      const diag={rid:command.requestId,elapsedMs:nowMs-execState.startedAtMs,freshChatVerified:Boolean(freshChatVerified),tabId:command.tabId||null,contentInstanceId:INSTANCE_ID,conversationEpoch,sendConfirmed:Boolean(confirmed),userSelectorMatches:userDiag.userSelectorMatches,userUniqueTurns:userDiag.userUniqueTurns,responseSelectorMatches:candDiag.responseSelectorMatches,responseUniqueTurns:candDiag.responseUniqueTurns,visibleTurnCandidates:candDiag.visibleTurnCandidates,visibleTextCandidates:candDiag.visibleTextCandidates,responseBound:Boolean(targetResponseNode),responseTextLength:curText.length,lastMutationAgeMs:targetResponseNode?(nowMs-lastMutationAtMs):0,generationEvidence:detectGenerationEvidence(targetResponseNode),runtimeBuild:runtimeContract.runtimeBuild};
+      const curText=targetResponseNode?extractResponseText(targetResponseNode):'',candDiag=getCandidateInventory(initialResponseSet,baselineResponseFingerprints,currentUserTurn,{freshChatVerified,conversationEpoch}),userDiag=getUserInventory();
+      const diag={rid:command.requestId,elapsedMs:nowMs-execState.startedAtMs,freshChatVerified:Boolean(freshChatVerified),tabId:command.tabId||null,contentInstanceId:INSTANCE_ID,conversationEpoch,sendConfirmed:Boolean(confirmed),userSelectorMatches:userDiag.userSelectorMatches,userUniqueTurns:userDiag.userUniqueTurns,responseSelectorMatches:candDiag.responseSelectorMatches,responseUniqueTurns:candDiag.responseUniqueTurns,visibleTurnCandidates:candDiag.visibleTurnCandidates,visibleTextCandidates:candDiag.visibleTextCandidates,responseBound:Boolean(targetResponseNode),responseTextLength:curText.length,lastMutationAgeMs:targetResponseNode?(nowMs-lastMutationAtMs):0,generationEvidence:detectGenerationEvidence(targetResponseNode),candidateExcludeReasons:JSON.stringify(candDiag.excluded),runtimeBuild:runtimeContract.runtimeBuild};
       console.log('[GEMINI][WAIT_DIAG]',JSON.stringify(diag));try{chrome.runtime.sendMessage({type:'NFA_WAIT_DIAG',diag});}catch(_){}
     }
     return new Promise(resolve=>{
@@ -509,16 +621,34 @@
       execState.finish=finish;execState.resolve=resolve;
       function checkOutput(){
         if(isStopped)return finish({status:'failed',text:'',error:'runtime_stopped'});if(isExecutionCancelled())return finish({status:'failed',text:'',error:'cancelled'});const nowMs=Date.now();
-        if(nowMs>deadlineAtMs){reportWaitDiag('timeout');const hasText=targetResponseNode&&extractResponseText(targetResponseNode).length>0;return finish({status:'timeout',text:'',error:hasText?'response_stalled':(targetResponseNode?'response_stream_no_text':'response_turn_not_found')});}
+        if(nowMs>generationDeadlineAtMs){reportWaitDiag('timeout');const hasText=targetResponseNode&&extractResponseText(targetResponseNode).length>0;return finish({status:'timeout',text:'',error:hasText?'response_stalled':(targetResponseNode?'response_stream_no_text':'response_turn_not_found')});}
         reportWaitDiag('periodic');
         if(!targetResponseNode||!targetResponseNode.isConnected){const c=findTurnResponseCandidate();if(c)bindResponseNode(c,'observer_phase');}
         if(!targetResponseNode)return;const current=extractResponseText(targetResponseNode);
-        if(!current){if(!boundAtMs)boundAtMs=Date.now();const zeroLenDuration=Date.now()-boundAtMs,localEvidence=detectGenerationEvidence(targetResponseNode),hasStreamingEvidence=localEvidence==='local_streaming'||localEvidence==='composer_stop_button';if(hasStreamingEvidence){if(zeroLenDuration>=15000)return finish({status:'failed',text:'',error:'response_stream_no_text'});}else if(zeroLenDuration>=3500){if(!reResolveAttempted){reResolveAttempted=true;targetResponseNode=null;boundAtMs=0;const c=findTurnResponseCandidate();if(c)bindResponseNode(c,'re_resolve_after_stalled_zero_len');else return finish({status:'failed',text:'',error:'response_text_target_not_found'});return;}return finish({status:'failed',text:'',error:'response_stream_no_text'});}return;}
+        if(!current){if(!boundAtMs)boundAtMs=Date.now();const zeroLenDuration=Date.now()-boundAtMs,localEvidence=detectGenerationEvidence(targetResponseNode),hasStreamingEvidence=localEvidence==='local_streaming'||localEvidence==='composer_stop_button';if(hasStreamingEvidence){if(zeroLenDuration>=15000)return finish({status:'failed',text:'',error:'response_stream_no_text'});}else if(zeroLenDuration>=3500){if(!reResolveAttempted){reResolveAttempted=true;targetResponseNode=null;boundAtMs=0;const c=findTurnResponseCandidate();if(c)bindResponseNode(c,'re_resolve_afterstalled_zero_len');else return finish({status:'failed',text:'',error:'response_text_target_not_found'});return;}return finish({status:'failed',text:'',error:'response_stream_no_text'});}return;}
         const currentCanonical=canonicalPromptText(current);if(baselineResponseFingerprints.has(currentCanonical)){targetResponseNode=null;return;}
         if(!textNonEmptyLogged){textNonEmptyLogged=true;console.log('[GEMINI][TEXT_NONEMPTY]',JSON.stringify({rid:command.requestId,chars:current.length}));emitEvent('TEXT_NONEMPTY',{chars:current.length});}
         if(current!==previous){previous=current;lastMutationAtMs=Date.now();return;}
-        const mutationAge=Date.now()-lastMutationAtMs,localEvidence=detectGenerationEvidence(targetResponseNode),isGenerating=localEvidence==='local_streaming'||localEvidence==='composer_stop_button';
-        if(mutationAge>=1800&&!isGenerating){if(!textStableLogged){textStableLogged=true;console.log('[GEMINI][TEXT_STABLE]',JSON.stringify({rid:command.requestId,chars:current.length,stableMs:mutationAge}));emitEvent('TEXT_STABLE',{chars:current.length,stableMs:mutationAge});}return finish({status:'completed',text:current,error:''});}
+        const mutationAge=Date.now()-lastMutationAtMs;
+        let localEvidence=detectGenerationEvidence(targetResponseNode);
+        if(mutationAge>=8000&&localEvidence==='local_streaming'){
+          if(!staleStreamingLogged){
+            staleStreamingLogged=true;
+            console.log('[GEMINI][STREAMING_STALE_SUSPECTED]',JSON.stringify({rid:command.requestId,mutationAge,chars:current.length}));
+          }
+          const indicators=targetResponseNode.querySelectorAll('.loading-dots, .streaming, [aria-busy="true"], mat-progress-bar, [data-is-generating="true"]');
+          const genuinelyActive=[...indicators].some(el=>visibleAndActive(el));
+          if(!genuinelyActive) localEvidence='idle';
+        }
+        const isGenerating=localEvidence==='local_streaming'||localEvidence==='composer_stop_button';
+        if(mutationAge>=1800&&!isGenerating){
+          if(!textStableLogged){
+            textStableLogged=true;
+            console.log('[GEMINI][TEXT_STABLE]',JSON.stringify({rid:command.requestId,chars:current.length,stableMs:mutationAge}));
+            emitEvent('TEXT_STABLE',{chars:current.length,stableMs:mutationAge});
+          }
+          return finish({status:'completed',text:current,error:''});
+        }
       }
       const targetRoot=document.querySelector('chat-history, main, body')||document.body;
       cleanupObserver=setupResponseObserver(execState,targetRoot,checkOutput);
@@ -527,10 +657,58 @@
   }
 
   async function execute(command){
-    if(isStopped)return{status:'failed',text:'',error:'runtime_stopped'};const currentReqId=command?.requestId||Math.random().toString(36).slice(2,10);if(cancelledRequestIds.has(currentReqId))return{status:'failed',text:'',error:'cancelled'};if(activeExecution){if(Date.now()>activeExecution.deadlineAtMs)cancelExecution(activeExecution.requestId,'command_deadline_exceeded');else return{status:'busy',text:'',error:'runtime_busy'};}
-    let deadlineAtMs;if(typeof command?.deadlineAtMs==='number'&&command.deadlineAtMs>0)deadlineAtMs=command.deadlineAtMs;else if(typeof command?.deadlineAt==='number'&&command.deadlineAt>0)deadlineAtMs=command.deadlineAt<1e11?Math.round(command.deadlineAt*1000):Math.round(command.deadlineAt);else deadlineAtMs=Date.now()+55000;
-    const execState={requestId:currentReqId,startedAtMs:Date.now(),deadlineAtMs,cancelled:false,observer:null,timer:null,cleanupObserver:null,finish:null,resolve:null};activeExecution=execState;
-    try{return await executeCore(command,execState);}finally{if(activeExecution?.requestId===currentReqId){if(typeof activeExecution.cleanupObserver==='function'){try{activeExecution.cleanupObserver();}catch(_){}}try{activeExecution.observer?.disconnect();}catch(_){}if(activeExecution.timer){clearInterval(activeExecution.timer);activeExecution.timer=null;}activeExecution=null;}}
+    if(isStopped)return{status:'failed',text:'',error:'runtime_stopped'};
+    const currentReqId=command?.requestId||Math.random().toString(36).slice(2,10);
+    if(cancelledRequestIds.has(currentReqId))return{status:'failed',text:'',error:'cancelled'};
+    if(activeExecution){
+      if(Date.now()>(activeExecution.overallDeadlineAtMs||activeExecution.deadlineAtMs))cancelExecution(activeExecution.requestId,'command_deadline_exceeded');
+      else return{status:'busy',text:'',error:'runtime_busy'};
+    }
+    const startedAtMs=Date.now();
+    let generationDeadlineAtMs=0;
+    if(typeof command?.generationDeadlineAtMs==='number'&&command.generationDeadlineAtMs>0) generationDeadlineAtMs=command.generationDeadlineAtMs;
+    else if(typeof command?.generation_deadline_at_ms==='number'&&command.generation_deadline_at_ms>0) generationDeadlineAtMs=command.generation_deadline_at_ms;
+    else if(typeof command?.generation_deadline_at==='number'&&command.generation_deadline_at>0) generationDeadlineAtMs=command.generation_deadline_at<1e11?Math.round(command.generation_deadline_at*1000):Math.round(command.generation_deadline_at);
+    else if(typeof command?.timeout_seconds==='number'&&command.timeout_seconds>0) generationDeadlineAtMs=startedAtMs+Math.round(command.timeout_seconds*1000);
+    else if(typeof command?.deadlineAtMs==='number'&&command.deadlineAtMs>0) generationDeadlineAtMs=command.deadlineAtMs;
+    else if(typeof command?.deadlineAt==='number'&&command.deadlineAt>0) generationDeadlineAtMs=command.deadlineAt<1e11?Math.round(command.deadlineAt*1000):Math.round(command.deadlineAt);
+    else generationDeadlineAtMs=startedAtMs+55000;
+
+    let overallDeadlineAtMs=0;
+    if(typeof command?.overallDeadlineAtMs==='number'&&command.overallDeadlineAtMs>0) overallDeadlineAtMs=command.overallDeadlineAtMs;
+    else if(typeof command?.acceptance_deadline_at_ms==='number'&&command.acceptance_deadline_at_ms>0) overallDeadlineAtMs=command.acceptance_deadline_at_ms;
+    else if(typeof command?.acceptance_deadline_at==='number'&&command.acceptance_deadline_at>0) overallDeadlineAtMs=command.acceptance_deadline_at<1e11?Math.round(command.acceptance_deadline_at*1000):Math.round(command.acceptance_deadline_at);
+    else overallDeadlineAtMs=generationDeadlineAtMs+RESULT_DELIVERY_BUDGET_MS+1500;
+
+    const execState={
+      requestId:currentReqId,
+      startedAtMs,
+      generationDeadlineAtMs,
+      overallDeadlineAtMs,
+      deadlineAtMs:generationDeadlineAtMs,
+      cancelled:false,
+      observer:null,
+      timer:null,
+      cleanupObserver:null,
+      finish:null,
+      resolve:null
+    };
+    activeExecution=execState;
+    try{
+      return await executeCore(command,execState);
+    }finally{
+      if(activeExecution?.requestId===currentReqId){
+        if(typeof activeExecution.cleanupObserver==='function'){
+          try{activeExecution.cleanupObserver();}catch(_){}
+        }
+        try{activeExecution.observer?.disconnect();}catch(_){}
+        if(activeExecution.timer){
+          clearInterval(activeExecution.timer);
+          activeExecution.timer=null;
+        }
+        activeExecution=null;
+      }
+    }
   }
 
   const RESULT_ACK_TIMEOUT_MS=1400,RESULT_DIRECT_TIMEOUT_MS=2500,RESULT_DELIVERY_BUDGET_MS=7500;
@@ -544,26 +722,58 @@
 
   async function deliverExecutionResult(command,result){
     const rid=String(command?.requestId||'').trim(),postKey=String(command?.postKey||'').trim(),navigationVersion=Number(command?.navigationVersion||0);
-    console.log('[GEMINI][DELIVER_RESULT_START]',JSON.stringify({rid,status:result?.status,textLen:result?.text?.length||0}));
+    const status=result?.status||'failed',text=result?.text||'',error=result?.error||'';
+    const deliveryId=`${rid}:${status}:${text.length}:${simpleHash(text)}`;
+    console.log('[GEMINI][DELIVER_RESULT_START]',JSON.stringify({rid,status,textLen:text.length,deliveryId}));
     if(!rid||!postKey||!Number.isInteger(navigationVersion)||navigationVersion<=0){const reason='invalid_result_identity';console.warn('[GEMINI][DELIVER_RESULT_REJECTED]',JSON.stringify({rid,reason}));return{accepted:false,received:false,reason};}
     if(cancelledRequestIds.has(rid))return{accepted:false,received:false,reason:'request_cancelled'};
-    const payload={type:'NFA_EXECUTION_RESULT',requestId:rid,postKey,navigationVersion,result};const directBody={requestId:rid,postKey,navigationVersion,status:result?.status||'failed',text:result?.text||'',error:result?.error||''};const deliveryDeadline=Date.now()+RESULT_DELIVERY_BUDGET_MS;
+
+    const payload={type:'NFA_EXECUTION_RESULT',requestId:rid,postKey,navigationVersion,deliveryId,result:{status,text,error,deliveryId}};
+    const directBody={requestId:rid,postKey,navigationVersion,deliveryId,status,text,error};
+
+    let overallDeadlineMs=command?.overallDeadlineAtMs||command?.acceptance_deadline_at_ms;
+    if(!overallDeadlineMs&&command?.acceptance_deadline_at){
+      overallDeadlineMs=command.acceptance_deadline_at<1e11?Math.round(command.acceptance_deadline_at*1000):Math.round(command.acceptance_deadline_at);
+    }
+    const deliveryDeadline=overallDeadlineMs?Math.min(Date.now()+RESULT_DELIVERY_BUDGET_MS,overallDeadlineMs-500):(Date.now()+RESULT_DELIVERY_BUDGET_MS);
+
     let lastReason='delivery_not_accepted';
     for(let attempt=1;attempt<=3&&Date.now()<deliveryDeadline;attempt++){
-      const remaining=deliveryDeadline-Date.now(),resp=await sendRuntimeMessageWithTimeout(payload,Math.min(RESULT_ACK_TIMEOUT_MS,remaining));lastReason=resp?.reason||resp?.error||lastReason;
-      if(resp?.accepted===true||resp?.reason==='already_accepted'){console.log('[GEMINI][DELIVER_RESULT_ACCEPTED]',JSON.stringify({rid,channel:'background',attempt,reason:resp.reason||'accepted'}));return{accepted:true,received:true,channel:'background',reason:resp.reason||'accepted'};}
-      if(resp?.received||resp?.forwarded)console.log('[GEMINI][DELIVER_RESULT_BACKGROUND_RECEIVED]',JSON.stringify({rid,attempt,reason:lastReason}));
-      if(authoritativeDeliveryRejection(lastReason)){console.warn('[GEMINI][DELIVER_RESULT_REJECTED]',JSON.stringify({rid,channel:'background',reason:lastReason}));return{accepted:false,received:Boolean(resp?.received),channel:'background',reason:lastReason};}
+      const remaining=Math.max(100,deliveryDeadline-Date.now());
+      const resp=await sendRuntimeMessageWithTimeout(payload,Math.min(RESULT_ACK_TIMEOUT_MS,remaining));
+      lastReason=resp?.reason||resp?.error||lastReason;
+      if(resp?.accepted===true||resp?.reason==='already_accepted'){
+        console.log('[GEMINI][DELIVER_RESULT_ACCEPTED]',JSON.stringify({rid,channel:'background',attempt,reason:resp.reason||'accepted'}));
+        return{accepted:true,received:true,channel:'background',reason:resp.reason||'accepted'};
+      }
+      if(resp?.received||resp?.forwarded){
+        console.log('[GEMINI][DELIVER_RESULT_BACKGROUND_RECEIVED]',JSON.stringify({rid,attempt,reason:lastReason}));
+      }
+      if(authoritativeDeliveryRejection(lastReason)){
+        console.warn('[GEMINI][DELIVER_RESULT_REJECTED]',JSON.stringify({rid,channel:'background',reason:lastReason}));
+        return{accepted:false,received:Boolean(resp?.received),channel:'background',reason:lastReason};
+      }
       if(attempt<3)await new Promise(r=>setTimeout(r,200));
     }
     const remaining=deliveryDeadline-Date.now();
-    if(remaining>100){const direct=await directResultPost(directBody,Math.min(RESULT_DIRECT_TIMEOUT_MS,remaining));lastReason=direct.reason||lastReason;if(direct.accepted){console.log('[GEMINI][DELIVER_RESULT_ACCEPTED]',JSON.stringify({rid,channel:'direct',reason:direct.reason}));return{...direct,channel:'direct'};}console.warn('[GEMINI][DELIVER_RESULT_DIRECT_REJECTED]',JSON.stringify({rid,reason:lastReason,httpStatus:direct.httpStatus||0}));return{...direct,channel:'direct'};}
-    console.warn('[GEMINI][DELIVER_RESULT_UNCONFIRMED]',JSON.stringify({rid,reason:lastReason}));return{accepted:false,received:false,reason:lastReason};
+    if(remaining>100){
+      console.log('[GEMINI][DELIVER_RESULT_FAILOVER_DIRECT]',JSON.stringify({rid,remainingMs:remaining}));
+      const direct=await directResultPost(directBody,Math.min(RESULT_DIRECT_TIMEOUT_MS,remaining));
+      lastReason=direct.reason||lastReason;
+      if(direct.accepted){
+        console.log('[GEMINI][DELIVER_RESULT_ACCEPTED]',JSON.stringify({rid,channel:'direct',reason:direct.reason}));
+        return{...direct,channel:'direct'};
+      }
+      console.warn('[GEMINI][DELIVER_RESULT_DIRECT_REJECTED]',JSON.stringify({rid,reason:lastReason,httpStatus:direct.httpStatus||0}));
+      return{...direct,channel:'direct'};
+    }
+    console.warn('[GEMINI][DELIVER_RESULT_UNCONFIRMED]',JSON.stringify({rid,reason:lastReason}));
+    return{accepted:false,received:false,reason:lastReason};
   }
 
   const messageListener=(message,_sender,sendResponse)=>{
     if(isStopped)return false;
-    if(message.type==='NFA_RUNTIME_PING'){sendResponse({ok:true,alive:true,build:runtimeContract.runtimeBuild,version:runtimeContract.extensionVersion,instanceId:INSTANCE_ID,status:pageStatus(),url:location.href,title:document.title,busyRequestId:activeExecution?.requestId||null,busySince:activeExecution?.startedAtMs||null,busyDeadlineAt:activeExecution?.deadlineAtMs||null,busySinceMs:activeExecution?.startedAtMs||null,busyDeadlineAtMs:activeExecution?.deadlineAtMs||null});return true;}
+    if(message.type==='NFA_RUNTIME_PING'){sendResponse({ok:true,alive:true,build:runtimeContract.runtimeBuild,version:runtimeContract.extensionVersion,instanceId:INSTANCE_ID,status:pageStatus(),url:location.href,title:document.title,busyRequestId:activeExecution?.requestId||null,busySince:activeExecution?.startedAtMs||null,busyDeadlineAt:activeExecution?.overallDeadlineAtMs||activeExecution?.deadlineAtMs||null,busySinceMs:activeExecution?.startedAtMs||null,busyDeadlineAtMs:activeExecution?.overallDeadlineAtMs||activeExecution?.deadlineAtMs||null});return true;}
     if(message.type==='NFA_CANCEL_COMMAND'){const cancelled=cancelExecution(message.requestId,'cancelled_by_bridge');sendResponse({ok:true,cancelled,status:pageStatus()});return true;}
     if(message.type==='NFA_CHECK_FRESH_CHAT'){const userDiag=getUserInventory(),candDiag=getCandidateInventory(),ed=editor(),isFresh=userDiag.visibleUserNodes.length===0&&candDiag.visibleTurnCandidates===0&&Boolean(ed);sendResponse({ok:true,fresh:isFresh,contentInstanceId:INSTANCE_ID,conversationEpoch,userQueryCount:userDiag.visibleUserNodes.length,userSelectorMatches:userDiag.userSelectorMatches,userUniqueTurns:userDiag.userUniqueTurns,selector_matches:candDiag.responseSelectorMatches,visible_candidates:candDiag.visibleTurnCandidates,responseSelectorMatches:candDiag.responseSelectorMatches,responseUniqueTurns:candDiag.responseUniqueTurns,visibleTurnCandidates:candDiag.visibleTurnCandidates,visibleTextCandidates:candDiag.visibleTextCandidates,bound_response:Boolean(activeExecution&&activeExecution.targetResponseNode),responseCount:candDiag.visibleTurnCandidates,composerAvailable:Boolean(ed)});return true;}
     if(message.type==='NFA_RESET_FRESH_CHAT'){conversationEpoch++;const sels=['a[href="/app"]','button[aria-label*="새 대화"]','button[aria-label*="New chat"]','[data-test-id="new-chat-button"]','.new-chat-button'];let clicked=false;for(const sel of sels){const btn=document.querySelector(sel);if(btn&&visible(btn)){btn.click();clicked=true;break;}}sendResponse({ok:true,clicked,conversationEpoch,contentInstanceId:INSTANCE_ID});return true;}
@@ -571,5 +781,5 @@
     return false;
   };
   chrome.runtime.onMessage.addListener(messageListener);eventCleanups.push(()=>{try{chrome.runtime.onMessage.removeListener(messageListener);}catch(_){}});
-  globalThis.__NFA_GEMINI_RUNTIME__={build:runtimeContract.runtimeBuild,instanceId:INSTANCE_ID,stop:stopRuntime,cancel:cancelExecution,ping:()=>({alive:!isStopped,build:runtimeContract.runtimeBuild,instanceId:INSTANCE_ID,busyRequestId:activeExecution?.requestId||null}),resolveTurnCandidate,extractCleanText,extractResponseText,deliverExecutionResult,execute,executeCore,getActiveExecution:()=>activeExecution,setupResponseObserver};
+  globalThis.__NFA_GEMINI_RUNTIME__={build:runtimeContract.runtimeBuild,instanceId:INSTANCE_ID,stop:stopRuntime,cancel:cancelExecution,ping:()=>({alive:!isStopped,build:runtimeContract.runtimeBuild,instanceId:INSTANCE_ID,busyRequestId:activeExecution?.requestId||null}),resolveTurnCandidate,extractCleanText,extractResponseText,deliverExecutionResult,execute,executeCore,getActiveExecution:()=>activeExecution,setupResponseObserver,visible,visibleAndActive,getUserInventory,getUserTurnContainer,getCandidateInventory,detectGenerationEvidence};
 })();

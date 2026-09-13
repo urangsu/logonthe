@@ -140,7 +140,7 @@ async function startHeartbeatLoop() {
         buildId: contract.runtimeBuild,
         protocolVersion: contract.protocolVersion,
         bridgeSchemaVersion: contract.bridgeSchemaVersion,
-        consumerId: 'background-r14',
+        consumerId: 'background-r15',
         lastRuntimePingAt: now,
         busyRequestId: activeRuntime?.ping.busyRequestId || null,
         busySince: activeRuntime?.ping.busySince || null,
@@ -165,13 +165,13 @@ async function ensureFreshGeminiConversation(tabId) {
     });
     if (checkRes && checkRes.fresh) {
       console.log('[GEMINI][BACKGROUND] FRESH_CHAT_READY (verified empty)', { tabId, contentInstanceId: checkRes.contentInstanceId, conversationEpoch: checkRes.conversationEpoch });
-      try { await bridgeFetch('/v1/event', 'POST', { type: 'FRESH_CHAT_READY', tab: tabId, instance: checkRes.contentInstanceId, epoch: checkRes.conversationEpoch }, 3000); } catch (_) {}
+      try { await bridgeFetch('/v1/event', 'POST', { type: 'FRESH_CHAT_RUNTIME_READY', tab: tabId, instance: checkRes.contentInstanceId, epoch: checkRes.conversationEpoch }, 3000); } catch (_) {}
       try {
         await bridgeFetch('/v1/heartbeat', 'POST', {
           status: 'ready', transportAlive: true, runtimeAlive: true, runtimeStatus: 'ready', title: 'Google Gemini',
           url: 'https://gemini.google.com/app', extensionVersion: contract.extensionVersion, contentBuild: contract.runtimeBuild,
           buildId: contract.runtimeBuild, protocolVersion: contract.protocolVersion, bridgeSchemaVersion: contract.bridgeSchemaVersion,
-          consumerId: 'background-r14', lastRuntimePingAt: Date.now(), tabId, contentInstanceId: checkRes.contentInstanceId,
+          consumerId: 'background-r15', lastRuntimePingAt: Date.now(), tabId, contentInstanceId: checkRes.contentInstanceId,
           conversationEpoch: checkRes.conversationEpoch
         }, 5000);
       } catch (_) {}
@@ -203,13 +203,13 @@ async function ensureFreshGeminiConversation(tabId) {
     });
     if (checkRes && checkRes.fresh) {
       console.log('[GEMINI][BACKGROUND] FRESH_CHAT_READY (navigated and verified)', { tabId, contentInstanceId: checkRes.contentInstanceId, conversationEpoch: checkRes.conversationEpoch });
-      try { await bridgeFetch('/v1/event', 'POST', { type: 'FRESH_CHAT_READY', tab: tabId, instance: checkRes.contentInstanceId, epoch: checkRes.conversationEpoch }, 3000); } catch (_) {}
+      try { await bridgeFetch('/v1/event', 'POST', { type: 'FRESH_CHAT_RUNTIME_READY', tab: tabId, instance: checkRes.contentInstanceId, epoch: checkRes.conversationEpoch }, 3000); } catch (_) {}
       try {
         await bridgeFetch('/v1/heartbeat', 'POST', {
           status: ping.status || 'ready', transportAlive: true, runtimeAlive: true, runtimeStatus: ping.status,
           title: ping.title || 'Google Gemini', url: ping.url || 'https://gemini.google.com/app', extensionVersion: contract.extensionVersion,
           contentBuild: contract.runtimeBuild, buildId: contract.runtimeBuild, protocolVersion: contract.protocolVersion,
-          bridgeSchemaVersion: contract.bridgeSchemaVersion, consumerId: 'background-r14', lastRuntimePingAt: Date.now(), tabId,
+          bridgeSchemaVersion: contract.bridgeSchemaVersion, consumerId: 'background-r15', lastRuntimePingAt: Date.now(), tabId,
           contentInstanceId: checkRes.contentInstanceId, conversationEpoch: checkRes.conversationEpoch
         }, 5000);
       } catch (_) {}
@@ -221,6 +221,7 @@ async function ensureFreshGeminiConversation(tabId) {
 
 const inFlightCommandResolvers = new Map();
 const cancelledRequestIds = new Set();
+const resultDeliveryRegistry = new Map();
 
 function trackCancelledRequestId(rid) {
   if (!rid) return;
@@ -230,13 +231,21 @@ function trackCancelledRequestId(rid) {
 
 function resultEnvelope(message, fallbackMeta = null) {
   const meta = fallbackMeta || {};
+  const rid = String(message?.requestId || meta.requestId || '').trim();
+  const postKey = String(message?.postKey || meta.postKey || '').trim();
+  const navigationVersion = Number(message?.navigationVersion || meta.navigationVersion || 0);
+  const status = message?.result?.status || message?.status || 'failed';
+  const text = message?.result?.text || message?.text || '';
+  const error = message?.result?.error || message?.error || '';
+  const deliveryId = message?.deliveryId || (rid ? `${rid}:${status}:${text.length}` : '');
   return {
-    requestId: message?.requestId || meta.requestId || '',
-    postKey: message?.postKey || meta.postKey || '',
-    navigationVersion: message?.navigationVersion || meta.navigationVersion || 0,
-    status: message?.result?.status || 'failed',
-    text: message?.result?.text || '',
-    error: message?.result?.error || ''
+    requestId: rid,
+    postKey,
+    navigationVersion,
+    status,
+    text,
+    error,
+    deliveryId
   };
 }
 
@@ -245,11 +254,18 @@ async function forwardResultToPython(message, fallbackMeta = null, timeoutMs = 3
   if (!body.requestId || !body.postKey || !Number.isInteger(Number(body.navigationVersion)) || Number(body.navigationVersion) <= 0) {
     return { ok: false, received: true, accepted: false, reason: 'invalid_result_identity' };
   }
+  resultDeliveryRegistry.set(body.requestId, { state: 'forwarding', lastAttemptAt: Date.now() });
   try {
     const res = await bridgeFetch('/v1/result', 'POST', body, timeoutMs);
     const accepted = Boolean(res && (res.accepted === true || res.reason === 'already_accepted'));
+    if (accepted) {
+      resultDeliveryRegistry.set(body.requestId, { state: 'accepted', lastAttemptAt: Date.now(), reason: res?.reason || 'accepted' });
+    } else {
+      resultDeliveryRegistry.set(body.requestId, { state: 'failed', lastAttemptAt: Date.now(), reason: res?.reason || 'python_rejected' });
+    }
     return { ok: accepted, received: true, accepted, reason: res?.reason || (accepted ? 'accepted' : 'python_rejected') };
   } catch (error) {
+    resultDeliveryRegistry.set(body.requestId, { state: 'failed', lastAttemptAt: Date.now(), reason: String(error?.message || error) });
     return { ok: false, received: true, accepted: false, reason: String(error?.message || error) };
   }
 }
@@ -300,15 +316,41 @@ async function runCommandCycle() {
     });
   });
   try { execResult = await dispatchPromise; } catch (e) { execResult = { status: 'failed', text: '', error: String(e?.message || e) }; }
-  let resultDelivered = false;
-  for (let attempt = 0; attempt < 3; attempt++) {
-    try {
-      const res = await bridgeFetch('/v1/result', 'POST', { requestId: command.requestId, postKey: command.postKey, navigationVersion: command.navigationVersion, status: execResult?.status || 'failed', text: execResult?.text || '', error: execResult?.error || '' }, 10000);
-      if (res && (res.accepted === true || res.reason === 'already_accepted')) { resultDelivered = true; console.log('[GEMINI][BACKGROUND][RESULT_ACCEPTED]', command.requestId, res.reason || 'accepted'); break; }
-      if (res) console.warn(`[GEMINI][BACKGROUND] result submit attempt ${attempt + 1} unaccepted:`, res.reason);
-    } catch (resErr) { console.debug(`[GEMINI][BACKGROUND] result submit attempt ${attempt + 1} fail:`, resErr); await new Promise(r => setTimeout(r, 500)); }
+  const existingDelivery = resultDeliveryRegistry.get(command.requestId);
+  if (existingDelivery && (existingDelivery.state === 'accepted' || existingDelivery.state === 'forwarding')) {
+    console.log('[GEMINI][BACKGROUND] Result delivery handled by primary handler:', command.requestId, existingDelivery.state);
+  } else {
+    resultDeliveryRegistry.set(command.requestId, { state: 'forwarding', lastAttemptAt: Date.now() });
+    let resultDelivered = false;
+    for (let attempt = 0; attempt < 3; attempt++) {
+      try {
+        const body = {
+          requestId: command.requestId,
+          postKey: command.postKey,
+          navigationVersion: command.navigationVersion,
+          status: execResult?.status || 'failed',
+          text: execResult?.text || '',
+          error: execResult?.error || '',
+          deliveryId: `${command.requestId}:cycle:${attempt}`
+        };
+        const res = await bridgeFetch('/v1/result', 'POST', body, 10000);
+        if (res && (res.accepted === true || res.reason === 'already_accepted')) {
+          resultDelivered = true;
+          resultDeliveryRegistry.set(command.requestId, { state: 'accepted', lastAttemptAt: Date.now(), reason: res.reason || 'accepted' });
+          console.log('[GEMINI][BACKGROUND][RESULT_ACCEPTED]', command.requestId, res.reason || 'accepted');
+          break;
+        }
+        if (res) console.warn(`[GEMINI][BACKGROUND] result submit attempt ${attempt + 1} unaccepted:`, res.reason);
+      } catch (resErr) {
+        console.debug(`[GEMINI][BACKGROUND] result submit attempt ${attempt + 1} fail:`, resErr);
+        await new Promise(r => setTimeout(r, 500));
+      }
+    }
+    if (!resultDelivered) {
+      resultDeliveryRegistry.set(command.requestId, { state: 'failed', lastAttemptAt: Date.now() });
+      console.warn('[GEMINI][BACKGROUND][RESULT_DELIVERY_UNCONFIRMED]', command.requestId);
+    }
   }
-  if (!resultDelivered) console.warn('[GEMINI][BACKGROUND][RESULT_DELIVERY_UNCONFIRMED]', command.requestId);
   try {
     const postExecRuntime = await findActiveGeminiRuntime();
     const now = Date.now();
@@ -317,7 +359,7 @@ async function runCommandCycle() {
       runtimeAlive: Boolean(postExecRuntime), runtimeStatus: postExecRuntime ? postExecRuntime.ping.status : 'disconnected',
       title: postExecRuntime?.ping.title || 'Google Gemini', url: postExecRuntime?.ping.url || 'https://gemini.google.com/app',
       extensionVersion: contract.extensionVersion, contentBuild: contract.runtimeBuild, buildId: contract.runtimeBuild,
-      protocolVersion: contract.protocolVersion, bridgeSchemaVersion: contract.bridgeSchemaVersion, consumerId: 'background-r14',
+      protocolVersion: contract.protocolVersion, bridgeSchemaVersion: contract.bridgeSchemaVersion, consumerId: 'background-r15',
       lastRuntimePingAt: now, busyRequestId: postExecRuntime?.ping.busyRequestId || null, busySince: postExecRuntime?.ping.busySince || null,
       busyDeadlineAt: postExecRuntime?.ping.busyDeadlineAt || null
     }, 5000);

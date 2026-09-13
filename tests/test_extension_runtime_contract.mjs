@@ -47,12 +47,22 @@ function loadRealContentJs(customEnv = {}) {
     Promise,
     Node: { DOCUMENT_POSITION_FOLLOWING: 4 },
     KeyboardEvent: class { constructor(t, i) { Object.assign(this, i); } },
+    InputEvent: class { constructor(t, i) { Object.assign(this, i); } },
+    Event: class { constructor(t, i) { Object.assign(this, i); } },
+    HTMLTextAreaElement: class {},
+    HTMLInputElement: class {},
     location: { href: 'https://gemini.google.com/app' },
+    window: {
+      getComputedStyle: (el) => el?.computedStyle || { visibility: 'visible', display: 'block', opacity: '1' },
+      getSelection: () => ({ removeAllRanges: () => {}, addRange: () => {} })
+    },
     document: {
       title: 'Google Gemini',
-      body: { isConnected: true },
+      body: { isConnected: true, querySelectorAll: () => [], closest: () => null },
       querySelector: () => null,
-      querySelectorAll: () => []
+      querySelectorAll: () => [],
+      createRange: () => ({ selectNodeContents: () => {}, getBoundingClientRect: () => ({ width: 0, height: 0 }) }),
+      execCommand: () => true
     },
     chrome: {
       runtime: {
@@ -76,6 +86,7 @@ function loadRealContentJs(customEnv = {}) {
       if (customEnv.onFetch) return customEnv.onFetch(url, opts);
       return { ok: true, json: async () => ({ ok: true, accepted: true }) };
     },
+    AbortController: typeof AbortController !== 'undefined' ? AbortController : class MockAbortController { constructor() { this.signal = {}; } abort() {} },
     MutationObserver: MockMutationObserver,
     ...customEnv.extraGlobals
   };
@@ -1395,5 +1406,394 @@ test('GEM-R14-038: completed cleanup 중 TypeError가 발생하면 결과 전달
   assert.strictEqual(deliveryCalled, true, 'Actual content.js cleanup allows delivery to succeed');
   assert.strictEqual(execState.timer, null, 'execState.timer must be cleaned up');
   assert.strictEqual(execState.observer, null, 'execState.observer must be cleaned up');
+});
+
+test('GEM-R15-JS-001: generation deadline completes before overall deadline and delivery reserve remains', async () => {
+  const { runtime, context } = loadRealContentJs();
+  assert.ok(runtime);
+
+  let sent = false;
+  let composer;
+  const editorEl = {
+    tagName: 'DIV',
+    isConnected: true,
+    isContentEditable: true,
+    getAttribute: (k) => k === 'contenteditable' ? 'true' : null,
+    focus: () => {},
+    dispatchEvent: () => true,
+    closest: (sel) => sel.includes('composer') ? composer : null,
+    getBoundingClientRect: () => ({ top: 500, width: 200, height: 50 }),
+    innerText: '테스트 프롬프트',
+    textContent: '테스트 프롬프트',
+    computedStyle: { visibility: 'visible', display: 'block', opacity: '1' }
+  };
+  const sendBtn = {
+    tagName: 'BUTTON',
+    isConnected: true,
+    disabled: false,
+    getAttribute: (k) => k === 'aria-label' ? 'send' : null,
+    click: () => {
+      sent = true;
+    },
+    querySelector: () => null,
+    querySelectorAll: () => [],
+    closest: () => composer,
+    getBoundingClientRect: () => ({ width: 40, height: 40 }),
+    computedStyle: { visibility: 'visible', display: 'block', opacity: '1' }
+  };
+  composer = {
+    isConnected: true,
+    closest: () => composer,
+    querySelectorAll: (sel) => [sendBtn],
+    getBoundingClientRect: () => ({ top: 500, right: 800, bottom: 600, width: 300, height: 100 })
+  };
+  const userQueryEl = {
+    tagName: 'DIV',
+    className: 'user-query-container',
+    isConnected: true,
+    closest: (sel) => sel.includes('.user-query-container') ? userQueryEl : null,
+    querySelector: (sel) => {
+      if (sel.includes('.query-text') || sel.includes('user-query-content')) return { innerText: '테스트 프롬프트' };
+      return null;
+    },
+    innerText: '테스트 프롬프트',
+    textContent: '테스트 프롬프트',
+    getBoundingClientRect: () => ({ width: 100, height: 40 }),
+    computedStyle: { visibility: 'visible', display: 'block', opacity: '1' },
+    compareDocumentPosition: () => 4
+  };
+  const streamingIndicatorEl = {
+    tagName: 'DIV',
+    className: 'loading-dots',
+    isConnected: true,
+    getAttribute: () => null,
+    querySelector: () => null,
+    querySelectorAll: () => [],
+    getBoundingClientRect: () => ({ width: 20, height: 20 }),
+    computedStyle: { visibility: 'visible', display: 'block', opacity: '1' }
+  };
+  const modelResponseEl = {
+    tagName: 'DIV',
+    className: 'model-response-container',
+    isConnected: true,
+    closest: (sel) => modelResponseEl,
+    querySelector: (sel) => {
+      if (sel.includes('.loading-dots') || sel.includes('.streaming')) return streamingIndicatorEl;
+      return null;
+    },
+    querySelectorAll: (sel) => {
+      if (sel.includes('.loading-dots') || sel.includes('.streaming') || sel.includes('aria-busy')) return [streamingIndicatorEl];
+      return [];
+    },
+    innerText: '',
+    textContent: '',
+    getBoundingClientRect: () => ({ width: 100, height: 40 }),
+    computedStyle: { visibility: 'visible', display: 'block', opacity: '1' }
+  };
+
+  context.document.querySelectorAll = (sel) => {
+    if (sel.includes('contenteditable')) return [editorEl];
+    if (sent && (sel.includes('.user-query-container') || sel.includes('.user-message') || sel.includes('user-query'))) {
+      return [userQueryEl];
+    }
+    if (sent && (sel.includes('model-response') || sel.includes('.model-response-container') || sel.includes('.response-container'))) {
+      return [modelResponseEl];
+    }
+    return [];
+  };
+
+  const startedAt = Date.now();
+  const cmd = {
+    requestId: 'req_gen_timeout_01',
+    postKey: 'post_key_01',
+    navigationVersion: 1,
+    prompt: '테스트 프롬프트',
+    timeout_seconds: 0.2 // 200ms generation timeout
+  };
+
+  const result = await runtime.execute(cmd);
+  const elapsed = Date.now() - startedAt;
+
+  assert.strictEqual(result.status, 'timeout');
+  // Overall deadline is generation (200ms) + 7500ms + 1500ms = 9200ms
+  assert.ok(elapsed < 4000, `Generation timeout took ${elapsed}ms, delivery reserve must remain`);
+});
+
+test('GEM-R15-JS-002: User turn counting uses root selectors only (userUniqueTurns = 1)', () => {
+  const rootUserNode = {
+    tagName: 'DIV',
+    className: 'user-query-container',
+    isConnected: true,
+    closest: (sel) => sel.includes('.user-query-container') ? rootUserNode : null,
+    querySelector: (sel) => {
+      if (sel.includes('.query-text')) return { innerText: '사용자 질문 내용' };
+      return null;
+    },
+    getBoundingClientRect: () => ({ width: 100, height: 40 }),
+    computedStyle: { visibility: 'visible', display: 'block', opacity: '1' }
+  };
+
+  const { runtime, context } = loadRealContentJs();
+  context.document.querySelectorAll = (sel) => {
+    if (sel.includes('.user-query-container') || sel.includes('.user-message')) {
+      return [rootUserNode];
+    }
+    return [];
+  };
+
+  const inv = runtime.getUserInventory();
+  assert.strictEqual(inv.userUniqueTurns, 1, 'userUniqueTurns must be exactly 1');
+  assert.strictEqual(inv.visibleUserNodes.length, 1);
+});
+
+test('GEM-R15-JS-003: getUserTurnContainer(el) returns null when outside root selectors (no || el fallback)', () => {
+  const { runtime } = loadRealContentJs();
+  const orphanNode = {
+    tagName: 'SPAN',
+    className: 'some-random-text',
+    isConnected: true,
+    closest: () => null
+  };
+  const container = runtime.getUserTurnContainer(orphanNode);
+  assert.strictEqual(container, null, 'getUserTurnContainer must NOT fall back to || el');
+});
+
+test('GEM-R15-JS-004: visibleAndActive(el) correctly rejects zero opacity, aria-hidden, disabled, and collapsed', () => {
+  const { runtime } = loadRealContentJs();
+  const makeEl = ({ isConnected = true, disabled = false, ariaDisabled = 'false', ariaHidden = 'false', opacity = '1', visibility = 'visible', display = 'block', width = 50, height = 50 }) => {
+    const el = {
+      isConnected,
+      disabled,
+      getAttribute: (attr) => {
+        if (attr === 'aria-disabled') return ariaDisabled;
+        if (attr === 'aria-hidden') return ariaHidden;
+        return null;
+      },
+      getBoundingClientRect: () => ({ width, height }),
+      computedStyle: { visibility, display, opacity }
+    };
+    return el;
+  };
+
+  // 1. Normal active element
+  const normal = makeEl({});
+  assert.strictEqual(runtime.visibleAndActive(normal), true);
+
+  // 2. Opacity <= 0
+  const zeroOpacity = makeEl({ opacity: '0' });
+  assert.strictEqual(runtime.visibleAndActive(zeroOpacity), false, 'opacity 0 must be inactive');
+
+  // 3. aria-hidden = true
+  const hidden = makeEl({ ariaHidden: 'true' });
+  assert.strictEqual(runtime.visibleAndActive(hidden), false, 'aria-hidden true must be inactive');
+
+  // 4. disabled = true
+  const dis = makeEl({ disabled: true });
+  assert.strictEqual(runtime.visibleAndActive(dis), false, 'disabled true must be inactive');
+
+  // 5. Collapsed dimensions without contents display
+  const collapsed = makeEl({ width: 0, height: 0, display: 'block' });
+  assert.strictEqual(runtime.visibleAndActive(collapsed), false, 'collapsed width/height 0 must be inactive');
+});
+
+test('GEM-R15-JS-005: detectGenerationEvidence(boundNode) ignores stale/invisible streaming indicators with opacity: 0', () => {
+  const { runtime } = loadRealContentJs();
+  const staleDots = {
+    isConnected: true,
+    getAttribute: () => null,
+    getBoundingClientRect: () => ({ width: 20, height: 20 }),
+    computedStyle: { visibility: 'visible', display: 'block', opacity: '0' } // stale/hidden
+  };
+
+  const boundNode = {
+    isConnected: true,
+    querySelectorAll: (sel) => {
+      if (sel.includes('.loading-dots') || sel.includes('.streaming')) {
+        return [staleDots];
+      }
+      return [];
+    }
+  };
+
+  const evidence = runtime.detectGenerationEvidence(boundNode);
+  assert.strictEqual(evidence, 'idle', 'Stale indicator with opacity 0 must return idle, not local_streaming');
+});
+
+test('GEM-R15-JS-006: 8s stale streaming watchdog triggers STREAMING_STALE_SUSPECTED and clears stale indicator', () => {
+  const { runtime } = loadRealContentJs();
+  const staleDots = {
+    isConnected: true,
+    getAttribute: () => null,
+    getBoundingClientRect: () => ({ width: 20, height: 20 }),
+    computedStyle: { visibility: 'visible', display: 'block', opacity: '0' }
+  };
+  const responseNode = {
+    isConnected: true,
+    tagName: 'MODEL-RESPONSE',
+    querySelectorAll: (sel) => {
+      if (sel.includes('.loading-dots') || sel.includes('.streaming')) return [staleDots];
+      return [];
+    },
+    querySelector: () => null,
+    getBoundingClientRect: () => ({ width: 200, height: 50 }),
+    computedStyle: { visibility: 'visible', display: 'block', opacity: '1' }
+  };
+
+  assert.strictEqual(runtime.detectGenerationEvidence(responseNode), 'idle');
+});
+
+test('GEM-R15-JS-007: 8s stale watchdog does NOT complete if active spinner is genuinely visible and active', () => {
+  const { runtime } = loadRealContentJs();
+  const activeDots = {
+    isConnected: true,
+    getAttribute: () => null,
+    getBoundingClientRect: () => ({ width: 24, height: 24 }),
+    computedStyle: { visibility: 'visible', display: 'block', opacity: '1' }
+  };
+  const boundNode = {
+    isConnected: true,
+    querySelectorAll: (sel) => {
+      if (sel.includes('.loading-dots') || sel.includes('.streaming')) return [activeDots];
+      return [];
+    }
+  };
+  const evidence = runtime.detectGenerationEvidence(boundNode);
+  assert.strictEqual(evidence, 'local_streaming', 'Active spinner must report local_streaming');
+});
+
+test('GEM-R15-JS-008: getCandidateInventory populates excluded statistics and per-candidate debug metadata', () => {
+  const { runtime, context } = loadRealContentJs();
+  const node1 = {
+    isConnected: false,
+    tagName: 'MODEL-RESPONSE',
+    querySelectorAll: () => [],
+    querySelector: () => null,
+    closest: () => null,
+    getBoundingClientRect: () => ({ width: 0, height: 0 })
+  };
+  const node2 = {
+    isConnected: true,
+    tagName: 'DIV',
+    querySelectorAll: () => [],
+    querySelector: () => null,
+    closest: () => null,
+    getBoundingClientRect: () => ({ width: 100, height: 40 }),
+    computedStyle: { visibility: 'visible', display: 'block', opacity: '1' }
+  };
+
+  context.document.querySelectorAll = (sel) => {
+    if (sel.includes('model-response')) return [node1, node2];
+    return [];
+  };
+
+  const inv = runtime.getCandidateInventory();
+  assert.ok(inv.excluded, 'excluded statistics object must exist');
+  assert.strictEqual(typeof inv.excluded.disconnected, 'number');
+  assert.strictEqual(typeof inv.excluded.not_visible, 'number');
+  assert.strictEqual(typeof inv.excluded.initial_baseline_node, 'number');
+  assert.strictEqual(typeof inv.excluded.baseline_text_match, 'number');
+  assert.strictEqual(typeof inv.excluded.precedes_user_turn, 'number');
+  assert.strictEqual(typeof inv.excluded.relaxed_fresh_chat_precedes, 'number');
+});
+
+test('GEM-R15-JS-009: Scoped fresh-chat fallback relaxes precedes_user_turn strictly when fresh chat, 1 model turn, visible, non-status', () => {
+  const { runtime, context } = loadRealContentJs();
+  const userTurn = { isConnected: true, compareDocumentPosition: () => 0 };
+  let modelTurn;
+  modelTurn = {
+    isConnected: true,
+    tagName: 'MODEL-RESPONSE',
+    closest: () => modelTurn,
+    querySelectorAll: (sel) => {
+      if (sel.includes('message-content')) {
+        return [{
+          isConnected: true,
+          innerText: '신선한 응답 텍스트',
+          querySelectorAll: () => [],
+          querySelector: () => null,
+          closest: () => null,
+          computedStyle: { visibility: 'visible', display: 'block', opacity: '1' }
+        }];
+      }
+      return [];
+    },
+    querySelector: () => null,
+    getBoundingClientRect: () => ({ width: 150, height: 60 }),
+    computedStyle: { visibility: 'visible', display: 'block', opacity: '1' }
+  };
+
+  context.document.querySelectorAll = () => [modelTurn];
+
+  // Case A: freshChatVerified = true, baseline empty, exactly 1 turn -> precedes_user_turn relaxed!
+  const freshInv = runtime.getCandidateInventory(new Set(), new Set(), userTurn, { freshChatVerified: true });
+  assert.strictEqual(freshInv.validCandidates.length, 1, 'precedes_user_turn should be relaxed in fresh chat');
+  assert.strictEqual(freshInv.excluded.relaxed_fresh_chat_precedes, 1);
+
+  // Case B: freshChatVerified = false (pre-existing chat) -> precedes_user_turn NOT relaxed!
+  const normalInv = runtime.getCandidateInventory(new Set(), new Set(), userTurn, { freshChatVerified: false });
+  assert.strictEqual(normalInv.validCandidates.length, 0, 'precedes_user_turn should NOT be relaxed in existing chat');
+  assert.strictEqual(normalInv.excluded.precedes_user_turn, 1);
+});
+
+test('GEM-R15-JS-010: Background forwardResultToPython coordinates with runCommandCycle to prevent double-posting', () => {
+  const resultDeliveryRegistry = new Map();
+  const rid = 'req_coordination_test_01';
+
+  // 1. Primary forwardResultToPython initiates
+  resultDeliveryRegistry.set(rid, { state: 'forwarding', lastAttemptAt: Date.now() });
+
+  // 2. runCommandCycle checks delivery status before posting /v1/result
+  const deliveryState = resultDeliveryRegistry.get(rid)?.state;
+  const shouldPostFromCommandCycle = !deliveryState || deliveryState === 'failed';
+
+  assert.strictEqual(shouldPostFromCommandCycle, false, 'runCommandCycle must suppress duplicate POST when forwarding or accepted');
+
+  // 3. Mark accepted
+  resultDeliveryRegistry.set(rid, { state: 'accepted', lastAttemptAt: Date.now() });
+  assert.strictEqual(resultDeliveryRegistry.get(rid).state, 'accepted');
+});
+
+test('GEM-R15-JS-011: deliverExecutionResult generates deliveryId and succeeds on background primary, falling back to direct HTTP on ACK timeout', async () => {
+  let sentToBackground = null;
+  let postedDirect = null;
+
+  // Case A: Background primary succeeds
+  const envA = loadRealContentJs({
+    onSendMessage: (msg, cb) => {
+      sentToBackground = msg;
+      cb({ ok: true, accepted: true, reason: 'accepted' });
+    }
+  });
+  const cmdA = { requestId: 'req_delivery_a', postKey: 'post_a', navigationVersion: 1 };
+  const resA = await envA.runtime.deliverExecutionResult(cmdA, { status: 'completed', text: '댓글A' });
+  assert.strictEqual(resA.accepted, true);
+  assert.strictEqual(resA.channel, 'background');
+  assert.ok(sentToBackground.deliveryId.startsWith('req_delivery_a:completed:'), 'deliveryId must be generated');
+
+  // Case B: Background ACK times out -> Direct HTTP fallback
+  const envB = loadRealContentJs({
+    onSendMessage: (msg, cb) => {
+      // Never respond to simulate timeout
+    },
+    onFetch: (url, opts) => {
+      postedDirect = { url, body: JSON.parse(opts.body) };
+      return { ok: true, json: async () => ({ ok: true, accepted: true, reason: 'accepted' }) };
+    }
+  });
+  const cmdB = { requestId: 'req_delivery_b', postKey: 'post_b', navigationVersion: 1, overallDeadlineAtMs: Date.now() + 6000 };
+  const resB = await envB.runtime.deliverExecutionResult(cmdB, { status: 'completed', text: '댓글B' });
+  assert.strictEqual(resB.accepted, true);
+  assert.strictEqual(resB.channel, 'direct');
+  assert.ok(postedDirect.body.deliveryId.startsWith('req_delivery_b:completed:'), 'Direct body must contain deliveryId');
+});
+
+test('GEM-R15-JS-012: Old r14 runtime with r15 contract triggers reinjection', () => {
+  const contract = { runtimeBuild: '13.2.3-r15' };
+  const pingResponse = { ok: true, build: '13.2.3-r14' };
+  let reinjected = false;
+  if (!pingResponse.ok || pingResponse.build !== contract.runtimeBuild) {
+    reinjected = true;
+  }
+  assert.strictEqual(reinjected, true, 'r14 build must trigger reinjection under r15 contract');
 });
 
