@@ -29,7 +29,7 @@
     '[data-test-id="model-response"]', '.response-container-content', 'message-content', '.model-response-text'
   ].join(', ');
   let runtimeContract = {
-    extensionVersion: '13.2.3', runtimeBuild: '13.2.3-r15', protocolVersion: 3, bridgeSchemaVersion: 2
+    extensionVersion: '13.2.3', runtimeBuild: '13.2.3-r16', protocolVersion: 3, bridgeSchemaVersion: 2
   };
 
   try {
@@ -273,7 +273,37 @@
 
   function getUserTurnContainer(el) {
     if (!el || !el.isConnected || typeof el.closest !== 'function') return null;
-    return el.closest(PRIMARY_USER_TURN_ROOT_SELECTORS) || el.closest(FALLBACK_USER_TURN_ROOT_SELECTOR);
+    const primary = el.closest(PRIMARY_USER_TURN_ROOT_SELECTORS);
+    if (primary) {
+      let outermost = primary;
+      let parent = primary.parentElement;
+      while (parent && typeof parent.closest === 'function') {
+        const higher = parent.closest(PRIMARY_USER_TURN_ROOT_SELECTORS);
+        if (higher) {
+          outermost = higher;
+          parent = higher.parentElement;
+        } else {
+          break;
+        }
+      }
+      return outermost;
+    }
+    const fallback = el.closest(FALLBACK_USER_TURN_ROOT_SELECTOR);
+    if (fallback) {
+      let outermost = fallback;
+      let parent = fallback.parentElement;
+      while (parent && typeof parent.closest === 'function') {
+        const higher = parent.closest(FALLBACK_USER_TURN_ROOT_SELECTOR);
+        if (higher) {
+          outermost = higher;
+          parent = higher.parentElement;
+        } else {
+          break;
+        }
+      }
+      return outermost;
+    }
+    return null;
   }
   function getTurnContainer(el) { return !el || !el.isConnected ? null : (el.closest('model-response, div[data-message-author-role="model"], div.model-response, [data-test-id="model-response"]') || el); }
 
@@ -446,12 +476,26 @@
     };
   }
 
+  function canonicalizeRoots(roots) {
+    if (!Array.isArray(roots) || roots.length <= 1) return roots || [];
+    const unique = [...new Set(roots)];
+    const nodeSet = new Set(unique);
+    return unique.filter(node => {
+      let curr = node.parentElement;
+      while (curr) {
+        if (nodeSet.has(curr)) return false;
+        curr = curr.parentElement;
+      }
+      return true;
+    });
+  }
+
   function getUserInventory() {
     let roots = [...document.querySelectorAll(PRIMARY_USER_TURN_ROOT_SELECTORS)];
     if (!roots.length) {
       roots = [...document.querySelectorAll(FALLBACK_USER_TURN_ROOT_SELECTOR)];
     }
-    const uniqueRoots = [...new Set(roots)];
+    const uniqueRoots = canonicalizeRoots(roots);
     return {
       userSelectorMatches: roots.length,
       userUniqueTurns: uniqueRoots.length,
@@ -461,19 +505,65 @@
   }
   function responseNodes() { return getCandidateInventory().inventory.filter(c => c.isVisible).map(c => c.turnNode); }
   function userQueryNodes() { return getUserInventory().visibleUserNodes; }
-  function detectGenerationEvidence(boundNode) {
-    if (!boundNode || !boundNode.isConnected) return 'none';
+
+  function findActiveStreamingIndicator(boundNode) {
+    if (!boundNode || !boundNode.isConnected) return null;
     const indicators = boundNode.querySelectorAll('.loading-dots, .streaming, [aria-busy="true"], mat-progress-bar, [data-is-generating="true"]');
     for (const el of indicators) {
-      if (visibleAndActive(el)) return 'local_streaming';
+      if (visibleAndActive(el)) return el;
     }
+    return null;
+  }
+
+  function findActiveStopButton() {
     const comp = findComposer(editor());
     if (comp && typeof comp.querySelectorAll === 'function') {
       const stopButtons = comp.querySelectorAll('button[aria-label*="중지"], button[aria-label*="Stop"], button[aria-label*="생성 중지"], [role="button"][aria-label*="중지"], [role="button"][aria-label*="Stop"], [role="button"][aria-label*="생성 중지"]');
       for (const btn of stopButtons) {
-        if (visibleAndActive(btn)) return 'composer_stop_button';
+        if (visibleAndActive(btn)) return btn;
       }
     }
+    return null;
+  }
+
+  const ACTION_TOOLBAR_SELECTORS = [
+    '.actions', '.response-actions', '.model-response-actions',
+    '[data-test-id*="action"]', '[data-test-id*="copy"]',
+    'button[aria-label*="복사"]', 'button[aria-label*="Copy"]',
+    'button[aria-label*="좋아요"]', 'button[aria-label*="Good response"]',
+    'button[aria-label*="Bad response"]'
+  ].join(', ');
+
+  function findVisibleActionToolbar(boundNode) {
+    if (!boundNode || !boundNode.isConnected) return null;
+    const candidates = [
+      ...boundNode.querySelectorAll(ACTION_TOOLBAR_SELECTORS),
+      ...(boundNode.parentElement ? boundNode.parentElement.querySelectorAll(ACTION_TOOLBAR_SELECTORS) : [])
+    ];
+    for (const el of candidates) {
+      if (visibleAndActive(el)) return el;
+    }
+    return null;
+  }
+
+  function inspectGenerationState(boundNode) {
+    const activeStreamingIndicator = findActiveStreamingIndicator(boundNode);
+    const activeStopButton = findActiveStopButton();
+    const visibleActionToolbar = findVisibleActionToolbar(boundNode);
+    return {
+      activeStreamingIndicator,
+      activeStopButton,
+      visibleActionToolbar,
+      hasActiveStreamingIndicator: Boolean(activeStreamingIndicator),
+      hasActiveStopButton: Boolean(activeStopButton),
+      hasVisibleActionToolbar: Boolean(visibleActionToolbar)
+    };
+  }
+
+  function detectGenerationEvidence(boundNode) {
+    if (!boundNode || !boundNode.isConnected) return 'none';
+    if (findActiveStreamingIndicator(boundNode)) return 'local_streaming';
+    if (findActiveStopButton()) return 'composer_stop_button';
     return 'idle';
   }
   async function waitForSendReady(input, timeoutMs = 2500) {
@@ -639,25 +729,27 @@
         if(!textNonEmptyLogged){textNonEmptyLogged=true;console.log('[GEMINI][TEXT_NONEMPTY]',JSON.stringify({rid:command.requestId,chars:current.length}));emitEvent('TEXT_NONEMPTY',{chars:current.length});}
         if(current!==previous){previous=current;lastMutationAtMs=Date.now();return;}
         const mutationAge=Date.now()-lastMutationAtMs;
-        let localEvidence=detectGenerationEvidence(targetResponseNode);
+        const genState=inspectGenerationState(targetResponseNode);
+        let localEvidence=genState.hasActiveStreamingIndicator?'local_streaming':(genState.hasActiveStopButton?'composer_stop_button':'idle');
         if(mutationAge>=8000&&localEvidence==='local_streaming'){
           if(!staleStreamingLogged){
             staleStreamingLogged=true;
             console.log('[GEMINI][STREAMING_STALE_SUSPECTED]',JSON.stringify({rid:command.requestId,mutationAge,chars:current.length}));
             try{chrome.runtime.sendMessage({type:'NFA_EVENT',event:{type:'STREAMING_STALE_SUSPECTED',rid:command.requestId,stableMs:mutationAge,chars:current.length}});}catch(_){}
           }
-          const indicators=targetResponseNode.querySelectorAll('.loading-dots, .streaming, [aria-busy="true"], mat-progress-bar, [data-is-generating="true"]');
-          const genuinelyActive=[...indicators].some(el=>visibleAndActive(el));
-          const hasActionToolbar=Boolean(
-            targetResponseNode.querySelector('.actions, .response-actions, .model-response-actions, [data-test-id*="action"], [data-test-id*="copy"], button[aria-label*="복사"], button[aria-label*="Copy"], button[aria-label*="좋아요"], button[aria-label*="Good response"], button[aria-label*="Bad response"]') ||
-            targetResponseNode.parentElement?.querySelector('.actions, .response-actions, .model-response-actions')
-          );
-          if(!genuinelyActive||hasActionToolbar){
+          if(!genState.hasActiveStopButton&&(!genState.hasActiveStreamingIndicator||genState.hasVisibleActionToolbar)){
             localEvidence='idle';
-            console.log('[GEMINI][STREAMING_STALE_CLEARED]',JSON.stringify({rid:command.requestId,mutationAge,chars:current.length,reason:!genuinelyActive?'indicators_inactive':'action_toolbar_present'}));
+            console.log('[GEMINI][STREAMING_STALE_CLEARED]',JSON.stringify({
+              rid:command.requestId,
+              mutationAge,
+              chars:current.length,
+              reason:!genState.hasActiveStreamingIndicator?'indicators_inactive':'action_toolbar_present_without_stop_button'
+            }));
+          } else if(genState.hasActiveStopButton){
+            console.log('[GEMINI][STREAMING_STALE_SUPPRESSED_BY_STOP_BUTTON]',JSON.stringify({rid:command.requestId,mutationAge,chars:current.length}));
           }
         }
-        const isGenerating=localEvidence==='local_streaming'||localEvidence==='composer_stop_button';
+        const isGenerating=localEvidence==='local_streaming'||localEvidence==='composer_stop_button'||genState.hasActiveStopButton;
         if(mutationAge>=1800&&!isGenerating){
           if(!textStableLogged){
             textStableLogged=true;
@@ -806,5 +898,5 @@
     return false;
   };
   chrome.runtime.onMessage.addListener(messageListener);eventCleanups.push(()=>{try{chrome.runtime.onMessage.removeListener(messageListener);}catch(_){}});
-  globalThis.__NFA_GEMINI_RUNTIME__={build:runtimeContract.runtimeBuild,instanceId:INSTANCE_ID,getConversationEpoch:()=>conversationEpoch,stop:stopRuntime,cancel:cancelExecution,ping:()=>({alive:!isStopped,build:runtimeContract.runtimeBuild,instanceId:INSTANCE_ID,busyRequestId:activeExecution?.requestId||null}),resolveTurnCandidate,extractCleanText,extractResponseText,deliverExecutionResult,execute,executeCore,getActiveExecution:()=>activeExecution,setupResponseObserver,visible,visibleAndActive,getUserInventory,getUserTurnContainer,getCandidateInventory,detectGenerationEvidence,PRIMARY_USER_TURN_ROOT_SELECTORS,FALLBACK_USER_TURN_ROOT_SELECTOR};
+  globalThis.__NFA_GEMINI_RUNTIME__={build:runtimeContract.runtimeBuild,instanceId:INSTANCE_ID,getConversationEpoch:()=>conversationEpoch,stop:stopRuntime,cancel:cancelExecution,ping:()=>({alive:!isStopped,build:runtimeContract.runtimeBuild,instanceId:INSTANCE_ID,busyRequestId:activeExecution?.requestId||null}),resolveTurnCandidate,extractCleanText,extractResponseText,deliverExecutionResult,execute,executeCore,getActiveExecution:()=>activeExecution,setupResponseObserver,visible,visibleAndActive,getUserInventory,getUserTurnContainer,getCandidateInventory,detectGenerationEvidence,inspectGenerationState,findActiveStreamingIndicator,findActiveStopButton,findVisibleActionToolbar,canonicalizeRoots,PRIMARY_USER_TURN_ROOT_SELECTORS,FALLBACK_USER_TURN_ROOT_SELECTOR};
 })();

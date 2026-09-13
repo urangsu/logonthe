@@ -140,7 +140,7 @@ async function startHeartbeatLoop() {
         buildId: contract.runtimeBuild,
         protocolVersion: contract.protocolVersion,
         bridgeSchemaVersion: contract.bridgeSchemaVersion,
-        consumerId: 'background-r15',
+        consumerId: 'background-r16',
         lastRuntimePingAt: now,
         busyRequestId: activeRuntime?.ping.busyRequestId || null,
         busySince: activeRuntime?.ping.busySince || null,
@@ -171,7 +171,7 @@ async function ensureFreshGeminiConversation(tabId) {
           status: 'ready', transportAlive: true, runtimeAlive: true, runtimeStatus: 'ready', title: 'Google Gemini',
           url: 'https://gemini.google.com/app', extensionVersion: contract.extensionVersion, contentBuild: contract.runtimeBuild,
           buildId: contract.runtimeBuild, protocolVersion: contract.protocolVersion, bridgeSchemaVersion: contract.bridgeSchemaVersion,
-          consumerId: 'background-r15', lastRuntimePingAt: Date.now(), tabId, contentInstanceId: checkRes.contentInstanceId,
+          consumerId: 'background-r16', lastRuntimePingAt: Date.now(), tabId, contentInstanceId: checkRes.contentInstanceId,
           conversationEpoch: checkRes.conversationEpoch
         }, 5000);
       } catch (_) {}
@@ -209,7 +209,7 @@ async function ensureFreshGeminiConversation(tabId) {
           status: ping.status || 'ready', transportAlive: true, runtimeAlive: true, runtimeStatus: ping.status,
           title: ping.title || 'Google Gemini', url: ping.url || 'https://gemini.google.com/app', extensionVersion: contract.extensionVersion,
           contentBuild: contract.runtimeBuild, buildId: contract.runtimeBuild, protocolVersion: contract.protocolVersion,
-          bridgeSchemaVersion: contract.bridgeSchemaVersion, consumerId: 'background-r15', lastRuntimePingAt: Date.now(), tabId,
+          bridgeSchemaVersion: contract.bridgeSchemaVersion, consumerId: 'background-r16', lastRuntimePingAt: Date.now(), tabId,
           contentInstanceId: checkRes.contentInstanceId, conversationEpoch: checkRes.conversationEpoch
         }, 5000);
       } catch (_) {}
@@ -249,13 +249,51 @@ function resultEnvelope(message, fallbackMeta = null) {
   };
 }
 
+function computeResultFingerprint(body) {
+  const status = body?.status || '';
+  const postKey = body?.postKey || '';
+  const navVer = String(body?.navigationVersion || 0);
+  const text = body?.text || '';
+  const error = body?.error || '';
+  let hash = 0;
+  for (let i = 0; i < text.length; i++) {
+    hash = (Math.imul(31, hash) + text.charCodeAt(i)) | 0;
+  }
+  const textHash = (hash >>> 0).toString(16);
+  return `${body?.requestId || ''}|${postKey}|${navVer}|${status}|${textHash}:${text.length}|${error}`;
+}
+
+function pruneResultDeliveryRegistry() {
+  const now = Date.now();
+  const TTL_MS = 10 * 60 * 1000;
+  for (const [rid, entry] of resultDeliveryRegistry.entries()) {
+    if (entry?.lastAttemptAt && (now - entry.lastAttemptAt > TTL_MS)) {
+      resultDeliveryRegistry.delete(rid);
+    }
+  }
+  while (resultDeliveryRegistry.size > 200) {
+    const oldestKey = resultDeliveryRegistry.keys().next().value;
+    resultDeliveryRegistry.delete(oldestKey);
+  }
+}
+
 async function forwardResultToPython(message, fallbackMeta = null, timeoutMs = 3500) {
   const body = resultEnvelope(message, fallbackMeta);
   if (!body.requestId || !body.postKey || !Number.isInteger(Number(body.navigationVersion)) || Number(body.navigationVersion) <= 0) {
     return { ok: false, received: true, accepted: false, reason: 'invalid_result_identity' };
   }
+  const fingerprint = computeResultFingerprint(body);
   const existing = resultDeliveryRegistry.get(body.requestId);
   if (existing?.state === 'accepted') {
+    if (existing.fingerprint && existing.fingerprint !== fingerprint) {
+      console.warn('[GEMINI][BACKGROUND] Duplicate result conflict for accepted RID:', body.requestId);
+      return {
+        ok: false,
+        received: true,
+        accepted: false,
+        reason: 'duplicate_result_conflict'
+      };
+    }
     return {
       ok: true,
       received: true,
@@ -264,6 +302,15 @@ async function forwardResultToPython(message, fallbackMeta = null, timeoutMs = 3
     };
   }
   if (existing?.state === 'forwarding' && existing.promise) {
+    if (existing.fingerprint && existing.fingerprint !== fingerprint) {
+      console.warn('[GEMINI][BACKGROUND] Duplicate result conflict for in-flight RID:', body.requestId);
+      return {
+        ok: false,
+        received: true,
+        accepted: false,
+        reason: 'duplicate_result_conflict'
+      };
+    }
     return await existing.promise;
   }
 
@@ -274,12 +321,14 @@ async function forwardResultToPython(message, fallbackMeta = null, timeoutMs = 3
       if (accepted) {
         resultDeliveryRegistry.set(body.requestId, {
           state: 'accepted',
+          fingerprint,
           lastAttemptAt: Date.now(),
           reason: res?.reason || 'accepted'
         });
       } else {
         resultDeliveryRegistry.set(body.requestId, {
           state: 'failed',
+          fingerprint,
           lastAttemptAt: Date.now(),
           reason: res?.reason || 'python_rejected'
         });
@@ -288,6 +337,7 @@ async function forwardResultToPython(message, fallbackMeta = null, timeoutMs = 3
     } catch (error) {
       resultDeliveryRegistry.set(body.requestId, {
         state: 'failed',
+        fingerprint,
         lastAttemptAt: Date.now(),
         reason: String(error?.message || error)
       });
@@ -295,9 +345,11 @@ async function forwardResultToPython(message, fallbackMeta = null, timeoutMs = 3
     }
   })();
 
+  pruneResultDeliveryRegistry();
   resultDeliveryRegistry.set(body.requestId, {
     state: 'forwarding',
     promise,
+    fingerprint,
     lastAttemptAt: Date.now()
   });
 
@@ -378,7 +430,7 @@ async function runCommandCycle() {
       runtimeAlive: Boolean(postExecRuntime), runtimeStatus: postExecRuntime ? postExecRuntime.ping.status : 'disconnected',
       title: postExecRuntime?.ping.title || 'Google Gemini', url: postExecRuntime?.ping.url || 'https://gemini.google.com/app',
       extensionVersion: contract.extensionVersion, contentBuild: contract.runtimeBuild, buildId: contract.runtimeBuild,
-      protocolVersion: contract.protocolVersion, bridgeSchemaVersion: contract.bridgeSchemaVersion, consumerId: 'background-r15',
+      protocolVersion: contract.protocolVersion, bridgeSchemaVersion: contract.bridgeSchemaVersion, consumerId: 'background-r16',
       lastRuntimePingAt: now, busyRequestId: postExecRuntime?.ping.busyRequestId || null, busySince: postExecRuntime?.ping.busySince || null,
       busyDeadlineAt: postExecRuntime?.ping.busyDeadlineAt || null
     }, 5000);
@@ -470,6 +522,8 @@ globalThis.__NFA_BACKGROUND__ = {
   forwardResultToPython,
   resultDeliveryRegistry,
   resultEnvelope,
+  computeResultFingerprint,
+  pruneResultDeliveryRegistry,
   bridgeFetch,
   runCommandCycle
 };

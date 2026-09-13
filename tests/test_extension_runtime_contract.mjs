@@ -165,7 +165,7 @@ function loadRealBackgroundJs(customEnv = {}) {
         sendMessage: (tabId, msg, cb) => {
           tabMessages.push({ tabId, msg });
           if (customEnv.onTabSendMessage) return customEnv.onTabSendMessage(tabId, msg, cb);
-          if (typeof cb === 'function') cb({ ok: true, alive: true, build: '13.2.3-r15', status: 'ready' });
+          if (typeof cb === 'function') cb({ ok: true, alive: true, build: '13.2.3-r16', status: 'ready' });
         }
       }
     },
@@ -1890,7 +1890,7 @@ test('GEM-R15-JS-010: Background forwardResultToPython single-flight prevents du
   const { background } = loadRealBackgroundJs({
     onFetch: async (url, opts) => {
       if (url.endsWith('runtime_contract.json')) {
-        return { ok: true, json: async () => ({ extensionVersion: '13.2.3', runtimeBuild: '13.2.3-r15', protocolVersion: 3, bridgeSchemaVersion: 2 }) };
+        return { ok: true, json: async () => ({ extensionVersion: '13.2.3', runtimeBuild: '13.2.3-r16', protocolVersion: 3, bridgeSchemaVersion: 2 }) };
       }
       if (url.includes('/v1/result')) {
         postCount++;
@@ -1973,14 +1973,14 @@ test('GEM-R15-JS-011: deliverExecutionResult generates deliveryId and succeeds o
   assert.ok(postedDirect.body.deliveryId.startsWith('req_delivery_b:completed:'), 'Direct body must contain deliveryId');
 });
 
-test('GEM-R15-JS-012: Old r14 runtime with r15 contract triggers reinjection', () => {
-  const contract = { runtimeBuild: '13.2.3-r15' };
-  const pingResponse = { ok: true, build: '13.2.3-r14' };
+test('GEM-R16-JS-012: Old r15 runtime with r16 contract triggers reinjection', () => {
+  const contract = { runtimeBuild: '13.2.3-r16' };
+  const pingResponse = { ok: true, build: '13.2.3-r15' };
   let reinjected = false;
   if (!pingResponse.ok || pingResponse.build !== contract.runtimeBuild) {
     reinjected = true;
   }
-  assert.strictEqual(reinjected, true, 'r14 build must trigger reinjection under r15 contract');
+  assert.strictEqual(reinjected, true, 'r15 build must trigger reinjection under r16 contract');
 });
 
 test('GEM-R15-JS-013: execute() strictly validates contentInstanceId and conversationEpoch', async () => {
@@ -2004,5 +2004,270 @@ test('GEM-R15-JS-013: execute() strictly validates contentInstanceId and convers
   });
   assert.strictEqual(resMismatchEpoch.status, 'failed');
   assert.strictEqual(resMismatchEpoch.error, 'conversation_epoch_mismatch');
+});
+
+test('GEM-R16-JS-001: Nested primary roots (<user-query> wrapping <div data-message-author-role="user">) canonicalize to 1 turn and outermost container', () => {
+  const innerUserRole = {
+    tagName: 'DIV',
+    attributes: { 'data-message-author-role': 'user' },
+    getAttribute: (k) => k === 'data-message-author-role' ? 'user' : null,
+    isConnected: true,
+    getBoundingClientRect: () => ({ width: 180, height: 40 }),
+    computedStyle: { visibility: 'visible', display: 'block', opacity: '1' }
+  };
+  const rootUserQuery = {
+    tagName: 'USER-QUERY',
+    isConnected: true,
+    parentElement: null,
+    getBoundingClientRect: () => ({ width: 200, height: 50 }),
+    computedStyle: { visibility: 'visible', display: 'block', opacity: '1' }
+  };
+  innerUserRole.parentElement = rootUserQuery;
+
+  const childText = {
+    tagName: 'P',
+    className: 'query-text',
+    innerText: '질문 텍스트',
+    isConnected: true,
+    parentElement: innerUserRole
+  };
+
+  rootUserQuery.closest = (sel) => sel.includes('user-query') ? rootUserQuery : null;
+  innerUserRole.closest = (sel) => {
+    if (sel.includes('user-query')) return rootUserQuery;
+    if (sel.includes('data-message-author-role')) return innerUserRole;
+    return null;
+  };
+  childText.closest = (sel) => {
+    if (sel.includes('data-message-author-role')) return innerUserRole;
+    if (sel.includes('user-query')) return rootUserQuery;
+    return null;
+  };
+
+  const { runtime, context } = loadRealContentJs();
+
+  // canonicalizeRoots direct test
+  const canonical = runtime.canonicalizeRoots([rootUserQuery, innerUserRole]);
+  assert.strictEqual(canonical.length, 1);
+  assert.strictEqual(canonical[0], rootUserQuery, 'Inner nested primary root must be filtered out by canonicalizeRoots');
+
+  // getUserInventory DOM query test
+  context.document.querySelectorAll = (sel) => {
+    if (sel.includes('user-query') || sel.includes('data-message-author-role')) {
+      return [rootUserQuery, innerUserRole];
+    }
+    return [];
+  };
+
+  const inv = runtime.getUserInventory();
+  assert.strictEqual(inv.userSelectorMatches, 2, 'Raw query selector matches both elements');
+  assert.strictEqual(inv.userUniqueTurns, 1, 'Canonicalization guarantees userUniqueTurns === 1');
+  assert.strictEqual(inv.visibleUserNodes.length, 1);
+  assert.strictEqual(inv.visibleUserNodes[0], rootUserQuery);
+
+  // getUserTurnContainer test from innermost leaf child
+  const container = runtime.getUserTurnContainer(childText);
+  assert.strictEqual(container, rootUserQuery, 'getUserTurnContainer must resolve to outermost ancestor root');
+});
+
+test('GEM-R16-JS-002: Stale streaming watchdog is strictly suppressed when composer activeStopButton is present', () => {
+  const { runtime, context } = loadRealContentJs();
+
+  const stopBtn = {
+    tagName: 'BUTTON',
+    isConnected: true,
+    getAttribute: (k) => k === 'aria-label' ? '생성 중지' : null,
+    getBoundingClientRect: () => ({ width: 30, height: 30 }),
+    computedStyle: { visibility: 'visible', display: 'block', opacity: '1' }
+  };
+  const composer = {
+    tagName: 'DIV',
+    isConnected: true,
+    querySelectorAll: (sel) => (sel.includes('중지') || sel.includes('Stop')) ? [stopBtn] : []
+  };
+
+  const activeSpinner = {
+    isConnected: true,
+    getAttribute: () => null,
+    getBoundingClientRect: () => ({ width: 20, height: 20 }),
+    computedStyle: { visibility: 'visible', display: 'block', opacity: '1' }
+  };
+  const copyBtn = {
+    isConnected: true,
+    tagName: 'BUTTON',
+    getAttribute: (k) => k === 'aria-label' ? '복사' : null,
+    getBoundingClientRect: () => ({ width: 24, height: 24 }),
+    computedStyle: { visibility: 'visible', display: 'block', opacity: '1' }
+  };
+  const responseNode = {
+    isConnected: true,
+    tagName: 'MODEL-RESPONSE',
+    querySelectorAll: (sel) => {
+      if (sel.includes('.loading-dots') || sel.includes('.streaming')) return [activeSpinner];
+      if (sel.includes('button[aria-label*="복사"]') || sel.includes('.actions')) return [copyBtn];
+      return [];
+    },
+    getBoundingClientRect: () => ({ width: 200, height: 50 }),
+    computedStyle: { visibility: 'visible', display: 'block', opacity: '1' }
+  };
+
+  const editorEl = {
+    isConnected: true,
+    isContentEditable: true,
+    getAttribute: (k) => k === 'contenteditable' ? 'true' : null,
+    closest: (sel) => sel.includes('composer') ? composer : null,
+    getBoundingClientRect: () => ({ top: 500, width: 200, height: 50 }),
+    computedStyle: { visibility: 'visible', display: 'block', opacity: '1' }
+  };
+
+  context.document.querySelectorAll = (sel) => {
+    if (sel.includes('contenteditable')) return [editorEl];
+    return [];
+  };
+
+  const state = runtime.inspectGenerationState(responseNode);
+  assert.strictEqual(state.hasActiveStreamingIndicator, true);
+  assert.strictEqual(state.hasActiveStopButton, true);
+  assert.strictEqual(state.hasVisibleActionToolbar, true);
+
+  const evidence = runtime.detectGenerationEvidence(responseNode);
+  assert.notStrictEqual(evidence, 'idle');
+});
+
+test('GEM-R16-JS-003: findVisibleActionToolbar strictly verifies visibleAndActive (rejects display:none, opacity:0, aria-hidden)', () => {
+  const { runtime } = loadRealContentJs();
+
+  // Case 1: display: none
+  const hiddenBtn = {
+    isConnected: true,
+    tagName: 'BUTTON',
+    getAttribute: (k) => k === 'aria-label' ? '복사' : null,
+    getBoundingClientRect: () => ({ width: 20, height: 20 }),
+    computedStyle: { visibility: 'visible', display: 'none', opacity: '1' }
+  };
+  const nodeHidden = {
+    isConnected: true,
+    querySelectorAll: (sel) => sel.includes('button[aria-label*="복사"]') ? [hiddenBtn] : []
+  };
+  assert.strictEqual(runtime.findVisibleActionToolbar(nodeHidden), null, 'Must reject display: none toolbar');
+
+  // Case 2: opacity: 0
+  const zeroOpacityBtn = {
+    isConnected: true,
+    tagName: 'BUTTON',
+    getAttribute: (k) => k === 'aria-label' ? '복사' : null,
+    getBoundingClientRect: () => ({ width: 20, height: 20 }),
+    computedStyle: { visibility: 'visible', display: 'block', opacity: '0' }
+  };
+  const nodeZeroOp = {
+    isConnected: true,
+    querySelectorAll: (sel) => sel.includes('button[aria-label*="복사"]') ? [zeroOpacityBtn] : []
+  };
+  assert.strictEqual(runtime.findVisibleActionToolbar(nodeZeroOp), null, 'Must reject opacity: 0 toolbar');
+
+  // Case 3: aria-hidden: "true"
+  const ariaHiddenBtn = {
+    isConnected: true,
+    tagName: 'BUTTON',
+    getAttribute: (k) => k === 'aria-hidden' ? 'true' : (k === 'aria-label' ? '복사' : null),
+    getBoundingClientRect: () => ({ width: 20, height: 20 }),
+    computedStyle: { visibility: 'visible', display: 'block', opacity: '1' }
+  };
+  const nodeAriaHidden = {
+    isConnected: true,
+    querySelectorAll: (sel) => sel.includes('button[aria-label*="복사"]') ? [ariaHiddenBtn] : []
+  };
+  assert.strictEqual(runtime.findVisibleActionToolbar(nodeAriaHidden), null, 'Must reject aria-hidden toolbar');
+
+  // Case 4: genuinely visible
+  const visibleBtn = {
+    isConnected: true,
+    tagName: 'BUTTON',
+    getAttribute: (k) => k === 'aria-label' ? '복사' : null,
+    getBoundingClientRect: () => ({ width: 20, height: 20 }),
+    computedStyle: { visibility: 'visible', display: 'block', opacity: '1' }
+  };
+  const nodeVisible = {
+    isConnected: true,
+    querySelectorAll: (sel) => sel.includes('button[aria-label*="복사"]') ? [visibleBtn] : []
+  };
+  assert.strictEqual(runtime.findVisibleActionToolbar(nodeVisible), visibleBtn, 'Genuinely visible toolbar must be found');
+});
+
+test('GEM-R16-JS-004: Background forwardResultToPython detects duplicate result payload conflict', async () => {
+  let postCount = 0;
+  const { background } = loadRealBackgroundJs({
+    onFetch: async (url, opts) => {
+      if (url.includes('/v1/result')) {
+        postCount++;
+        return { ok: true, json: async () => ({ ok: true, accepted: true, reason: 'accepted' }) };
+      }
+      return { ok: true, json: async () => ({}) };
+    }
+  });
+
+  const rid = 'req_fingerprint_test_01';
+  const firstMsg = {
+    requestId: rid,
+    postKey: 'post_fp_1',
+    navigationVersion: 1,
+    status: 'timeout',
+    text: '',
+    error: 'response_stalled'
+  };
+
+  // First forward succeeds and registers accepted
+  const res1 = await background.forwardResultToPython(firstMsg, null, 2000);
+  assert.strictEqual(res1.accepted, true);
+  assert.strictEqual(postCount, 1);
+
+  // Duplicate with EXACT same payload returns fast already_accepted
+  const resSame = await background.forwardResultToPython(firstMsg, null, 2000);
+  assert.strictEqual(resSame.accepted, true);
+  assert.strictEqual(resSame.reason, 'accepted');
+  assert.strictEqual(postCount, 1, 'No new POST for identical payload');
+
+  // Duplicate with CONFLICTING payload returns duplicate_result_conflict
+  const conflictMsg = {
+    requestId: rid,
+    postKey: 'post_fp_1',
+    navigationVersion: 1,
+    status: 'completed',
+    text: '뒤늦게 도착한 다른 내용의 답변',
+    error: ''
+  };
+  const resConflict = await background.forwardResultToPython(conflictMsg, null, 2000);
+  assert.strictEqual(resConflict.accepted, false);
+  assert.strictEqual(resConflict.reason, 'duplicate_result_conflict', 'Conflicting payload must be rejected as duplicate_result_conflict');
+  assert.strictEqual(postCount, 1, 'Conflict must not reach Python HTTP endpoint');
+});
+
+test('GEM-R16-JS-005: Result delivery registry prunes entries older than 10m TTL and caps size at 200', () => {
+  const { background } = loadRealBackgroundJs();
+  const registry = background.resultDeliveryRegistry;
+  registry.clear();
+
+  const now = Date.now();
+  // Add an expired entry (>10 min ago)
+  registry.set('old_req_01', {
+    state: 'accepted',
+    lastAttemptAt: now - (15 * 60 * 1000),
+    fingerprint: 'fp_old'
+  });
+
+  // Add 205 recent entries
+  for (let i = 0; i < 205; i++) {
+    registry.set(`recent_req_${i}`, {
+      state: 'accepted',
+      lastAttemptAt: now - 1000,
+      fingerprint: `fp_${i}`
+    });
+  }
+
+  assert.strictEqual(registry.size, 206);
+  background.pruneResultDeliveryRegistry();
+
+  assert.ok(!registry.has('old_req_01'), 'Expired entry must be pruned');
+  assert.ok(registry.size <= 200, `Registry size must be capped at 200, actual: ${registry.size}`);
 });
 
