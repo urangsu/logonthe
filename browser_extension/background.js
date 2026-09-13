@@ -254,20 +254,54 @@ async function forwardResultToPython(message, fallbackMeta = null, timeoutMs = 3
   if (!body.requestId || !body.postKey || !Number.isInteger(Number(body.navigationVersion)) || Number(body.navigationVersion) <= 0) {
     return { ok: false, received: true, accepted: false, reason: 'invalid_result_identity' };
   }
-  resultDeliveryRegistry.set(body.requestId, { state: 'forwarding', lastAttemptAt: Date.now() });
-  try {
-    const res = await bridgeFetch('/v1/result', 'POST', body, timeoutMs);
-    const accepted = Boolean(res && (res.accepted === true || res.reason === 'already_accepted'));
-    if (accepted) {
-      resultDeliveryRegistry.set(body.requestId, { state: 'accepted', lastAttemptAt: Date.now(), reason: res?.reason || 'accepted' });
-    } else {
-      resultDeliveryRegistry.set(body.requestId, { state: 'failed', lastAttemptAt: Date.now(), reason: res?.reason || 'python_rejected' });
-    }
-    return { ok: accepted, received: true, accepted, reason: res?.reason || (accepted ? 'accepted' : 'python_rejected') };
-  } catch (error) {
-    resultDeliveryRegistry.set(body.requestId, { state: 'failed', lastAttemptAt: Date.now(), reason: String(error?.message || error) });
-    return { ok: false, received: true, accepted: false, reason: String(error?.message || error) };
+  const existing = resultDeliveryRegistry.get(body.requestId);
+  if (existing?.state === 'accepted') {
+    return {
+      ok: true,
+      received: true,
+      accepted: true,
+      reason: existing.reason || 'already_accepted'
+    };
   }
+  if (existing?.state === 'forwarding' && existing.promise) {
+    return await existing.promise;
+  }
+
+  const promise = (async () => {
+    try {
+      const res = await bridgeFetch('/v1/result', 'POST', body, timeoutMs);
+      const accepted = Boolean(res && (res.accepted === true || res.reason === 'already_accepted'));
+      if (accepted) {
+        resultDeliveryRegistry.set(body.requestId, {
+          state: 'accepted',
+          lastAttemptAt: Date.now(),
+          reason: res?.reason || 'accepted'
+        });
+      } else {
+        resultDeliveryRegistry.set(body.requestId, {
+          state: 'failed',
+          lastAttemptAt: Date.now(),
+          reason: res?.reason || 'python_rejected'
+        });
+      }
+      return { ok: accepted, received: true, accepted, reason: res?.reason || (accepted ? 'accepted' : 'python_rejected') };
+    } catch (error) {
+      resultDeliveryRegistry.set(body.requestId, {
+        state: 'failed',
+        lastAttemptAt: Date.now(),
+        reason: String(error?.message || error)
+      });
+      return { ok: false, received: true, accepted: false, reason: String(error?.message || error) };
+    }
+  })();
+
+  resultDeliveryRegistry.set(body.requestId, {
+    state: 'forwarding',
+    promise,
+    lastAttemptAt: Date.now()
+  });
+
+  return await promise;
 }
 
 async function runCommandCycle() {
@@ -317,38 +351,23 @@ async function runCommandCycle() {
   });
   try { execResult = await dispatchPromise; } catch (e) { execResult = { status: 'failed', text: '', error: String(e?.message || e) }; }
   const existingDelivery = resultDeliveryRegistry.get(command.requestId);
-  if (existingDelivery && (existingDelivery.state === 'accepted' || existingDelivery.state === 'forwarding')) {
-    console.log('[GEMINI][BACKGROUND] Result delivery handled by primary handler:', command.requestId, existingDelivery.state);
+  if (existingDelivery && existingDelivery.state === 'accepted') {
+    console.log('[GEMINI][BACKGROUND] Result delivery already accepted:', command.requestId);
+  } else if (existingDelivery && existingDelivery.state === 'forwarding' && existingDelivery.promise) {
+    console.log('[GEMINI][BACKGROUND] Result delivery handled by primary handler (in-flight):', command.requestId);
+    try { await existingDelivery.promise; } catch (_) {}
   } else {
-    resultDeliveryRegistry.set(command.requestId, { state: 'forwarding', lastAttemptAt: Date.now() });
-    let resultDelivered = false;
-    for (let attempt = 0; attempt < 3; attempt++) {
-      try {
-        const body = {
-          requestId: command.requestId,
-          postKey: command.postKey,
-          navigationVersion: command.navigationVersion,
-          status: execResult?.status || 'failed',
-          text: execResult?.text || '',
-          error: execResult?.error || '',
-          deliveryId: `${command.requestId}:cycle:${attempt}`
-        };
-        const res = await bridgeFetch('/v1/result', 'POST', body, 10000);
-        if (res && (res.accepted === true || res.reason === 'already_accepted')) {
-          resultDelivered = true;
-          resultDeliveryRegistry.set(command.requestId, { state: 'accepted', lastAttemptAt: Date.now(), reason: res.reason || 'accepted' });
-          console.log('[GEMINI][BACKGROUND][RESULT_ACCEPTED]', command.requestId, res.reason || 'accepted');
-          break;
-        }
-        if (res) console.warn(`[GEMINI][BACKGROUND] result submit attempt ${attempt + 1} unaccepted:`, res.reason);
-      } catch (resErr) {
-        console.debug(`[GEMINI][BACKGROUND] result submit attempt ${attempt + 1} fail:`, resErr);
-        await new Promise(r => setTimeout(r, 500));
-      }
-    }
-    if (!resultDelivered) {
-      resultDeliveryRegistry.set(command.requestId, { state: 'failed', lastAttemptAt: Date.now() });
-      console.warn('[GEMINI][BACKGROUND][RESULT_DELIVERY_UNCONFIRMED]', command.requestId);
+    const fwdResult = await forwardResultToPython({
+      requestId: command.requestId,
+      postKey: command.postKey,
+      navigationVersion: command.navigationVersion,
+      result: execResult,
+      deliveryId: `${command.requestId}:cycle:0`
+    }, null, 10000);
+    if (fwdResult.accepted) {
+      console.log('[GEMINI][BACKGROUND][RESULT_ACCEPTED]', command.requestId, fwdResult.reason || 'accepted');
+    } else {
+      console.warn('[GEMINI][BACKGROUND][RESULT_DELIVERY_UNCONFIRMED]', command.requestId, fwdResult.reason);
     }
   }
   try {
@@ -390,7 +409,9 @@ chrome.tabs.onUpdated.addListener((tabId, changeInfo, tab) => {
   const url = changeInfo.url || tab.url || '';
   if ((changeInfo.status === 'complete' || changeInfo.url) && /^https:\/\/gemini\.google\.com\//.test(url)) ensureGeminiRuntime(tabId).catch(() => {});
 });
-startTransportEngine().catch(() => {});
+if (!globalThis.__NFA_SKIP_AUTO_START__) {
+  startTransportEngine().catch(() => {});
+}
 
 chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
   if (message?.type === 'getRuntimeContract') {
@@ -444,3 +465,11 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
   }
   return false;
 });
+
+globalThis.__NFA_BACKGROUND__ = {
+  forwardResultToPython,
+  resultDeliveryRegistry,
+  resultEnvelope,
+  bridgeFetch,
+  runCommandCycle
+};

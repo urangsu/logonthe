@@ -10,10 +10,12 @@
   let isStopped = false;
   const eventCleanups = [];
 
-  const USER_TURN_ROOT_SELECTORS = [
-    '.user-message', 'user-query', '[data-test-id="user-query"]',
-    '.user-query-container', 'div[data-message-author-role="user"]'
+  const PRIMARY_USER_TURN_ROOT_SELECTORS = [
+    'user-query', 'div[data-message-author-role="user"]',
+    '[data-test-id="user-query"]', '.user-message'
   ].join(', ');
+  const FALLBACK_USER_TURN_ROOT_SELECTOR = '.user-query-container';
+  const USER_TURN_ROOT_SELECTORS = `${PRIMARY_USER_TURN_ROOT_SELECTORS}, ${FALLBACK_USER_TURN_ROOT_SELECTOR}`;
   const USER_TURN_TEXT_SELECTORS = [
     '.query-text', '.user-query-text', '.user-query-content', 'p', 'div'
   ].join(', ');
@@ -269,7 +271,10 @@
     return { ok: false, target: resolvedTarget, reason: 'readback_mismatch', surface: lastMatchedSurface || 'none', actualRaw: lastActualRaw, actualCanonical: lastActualCanonical };
   }
 
-  function getUserTurnContainer(el) { return !el || !el.isConnected ? null : (typeof el.closest === 'function' ? el.closest(USER_TURN_ROOT_SELECTORS) : null); }
+  function getUserTurnContainer(el) {
+    if (!el || !el.isConnected || typeof el.closest !== 'function') return null;
+    return el.closest(PRIMARY_USER_TURN_ROOT_SELECTORS) || el.closest(FALLBACK_USER_TURN_ROOT_SELECTOR);
+  }
   function getTurnContainer(el) { return !el || !el.isConnected ? null : (el.closest('model-response, div[data-message-author-role="model"], div.model-response, [data-test-id="model-response"]') || el); }
 
   const EXCLUDED_STATUS_SELECTORS = [
@@ -377,6 +382,7 @@
 
     const isFreshChatEligible = Boolean(
       options.freshChatVerified &&
+      (options.conversationEpoch === undefined || options.conversationEpoch === conversationEpoch) &&
       initialResponseSet.size === 0 &&
       baselineResponseFingerprints.size === 0 &&
       uniqueTurnNodes.length === 1
@@ -441,7 +447,10 @@
   }
 
   function getUserInventory() {
-    const roots = [...document.querySelectorAll(USER_TURN_ROOT_SELECTORS)];
+    let roots = [...document.querySelectorAll(PRIMARY_USER_TURN_ROOT_SELECTORS)];
+    if (!roots.length) {
+      roots = [...document.querySelectorAll(FALLBACK_USER_TURN_ROOT_SELECTOR)];
+    }
     const uniqueRoots = [...new Set(roots)];
     return {
       userSelectorMatches: roots.length,
@@ -635,10 +644,18 @@
           if(!staleStreamingLogged){
             staleStreamingLogged=true;
             console.log('[GEMINI][STREAMING_STALE_SUSPECTED]',JSON.stringify({rid:command.requestId,mutationAge,chars:current.length}));
+            try{chrome.runtime.sendMessage({type:'NFA_EVENT',event:{type:'STREAMING_STALE_SUSPECTED',rid:command.requestId,stableMs:mutationAge,chars:current.length}});}catch(_){}
           }
           const indicators=targetResponseNode.querySelectorAll('.loading-dots, .streaming, [aria-busy="true"], mat-progress-bar, [data-is-generating="true"]');
           const genuinelyActive=[...indicators].some(el=>visibleAndActive(el));
-          if(!genuinelyActive) localEvidence='idle';
+          const hasActionToolbar=Boolean(
+            targetResponseNode.querySelector('.actions, .response-actions, .model-response-actions, [data-test-id*="action"], [data-test-id*="copy"], button[aria-label*="복사"], button[aria-label*="Copy"], button[aria-label*="좋아요"], button[aria-label*="Good response"], button[aria-label*="Bad response"]') ||
+            targetResponseNode.parentElement?.querySelector('.actions, .response-actions, .model-response-actions')
+          );
+          if(!genuinelyActive||hasActionToolbar){
+            localEvidence='idle';
+            console.log('[GEMINI][STREAMING_STALE_CLEARED]',JSON.stringify({rid:command.requestId,mutationAge,chars:current.length,reason:!genuinelyActive?'indicators_inactive':'action_toolbar_present'}));
+          }
         }
         const isGenerating=localEvidence==='local_streaming'||localEvidence==='composer_stop_button';
         if(mutationAge>=1800&&!isGenerating){
@@ -660,6 +677,14 @@
     if(isStopped)return{status:'failed',text:'',error:'runtime_stopped'};
     const currentReqId=command?.requestId||Math.random().toString(36).slice(2,10);
     if(cancelledRequestIds.has(currentReqId))return{status:'failed',text:'',error:'cancelled'};
+    if(command?.contentInstanceId&&command.contentInstanceId!==INSTANCE_ID){
+      console.warn('[GEMINI][EXEC_REJECTED]',JSON.stringify({rid:currentReqId,reason:'content_instance_mismatch',expected:INSTANCE_ID,actual:command.contentInstanceId}));
+      return{status:'failed',text:'',error:'content_instance_mismatch'};
+    }
+    if(Number.isInteger(command?.conversationEpoch)&&command.conversationEpoch!==conversationEpoch){
+      console.warn('[GEMINI][EXEC_REJECTED]',JSON.stringify({rid:currentReqId,reason:'conversation_epoch_mismatch',expected:conversationEpoch,actual:command.conversationEpoch}));
+      return{status:'failed',text:'',error:'conversation_epoch_mismatch'};
+    }
     if(activeExecution){
       if(Date.now()>(activeExecution.overallDeadlineAtMs||activeExecution.deadlineAtMs))cancelExecution(activeExecution.requestId,'command_deadline_exceeded');
       else return{status:'busy',text:'',error:'runtime_busy'};
@@ -781,5 +806,5 @@
     return false;
   };
   chrome.runtime.onMessage.addListener(messageListener);eventCleanups.push(()=>{try{chrome.runtime.onMessage.removeListener(messageListener);}catch(_){}});
-  globalThis.__NFA_GEMINI_RUNTIME__={build:runtimeContract.runtimeBuild,instanceId:INSTANCE_ID,stop:stopRuntime,cancel:cancelExecution,ping:()=>({alive:!isStopped,build:runtimeContract.runtimeBuild,instanceId:INSTANCE_ID,busyRequestId:activeExecution?.requestId||null}),resolveTurnCandidate,extractCleanText,extractResponseText,deliverExecutionResult,execute,executeCore,getActiveExecution:()=>activeExecution,setupResponseObserver,visible,visibleAndActive,getUserInventory,getUserTurnContainer,getCandidateInventory,detectGenerationEvidence};
+  globalThis.__NFA_GEMINI_RUNTIME__={build:runtimeContract.runtimeBuild,instanceId:INSTANCE_ID,getConversationEpoch:()=>conversationEpoch,stop:stopRuntime,cancel:cancelExecution,ping:()=>({alive:!isStopped,build:runtimeContract.runtimeBuild,instanceId:INSTANCE_ID,busyRequestId:activeExecution?.requestId||null}),resolveTurnCandidate,extractCleanText,extractResponseText,deliverExecutionResult,execute,executeCore,getActiveExecution:()=>activeExecution,setupResponseObserver,visible,visibleAndActive,getUserInventory,getUserTurnContainer,getCandidateInventory,detectGenerationEvidence,PRIMARY_USER_TURN_ROOT_SELECTORS,FALLBACK_USER_TURN_ROOT_SELECTOR};
 })();

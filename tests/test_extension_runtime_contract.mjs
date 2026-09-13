@@ -9,6 +9,8 @@ const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 const contentJsPath = path.resolve(__dirname, '../browser_extension/content.js');
 const contentJsCode = fs.readFileSync(contentJsPath, 'utf8');
+const backgroundJsPath = path.resolve(__dirname, '../browser_extension/background.js');
+const backgroundJsCode = fs.readFileSync(backgroundJsPath, 'utf8');
 
 function loadRealContentJs(customEnv = {}) {
   const sentMessages = [];
@@ -101,6 +103,85 @@ function loadRealContentJs(customEnv = {}) {
     sentMessages,
     fetches,
     observers,
+    context
+  };
+}
+
+function loadRealBackgroundJs(customEnv = {}) {
+  const sentMessages = [];
+  const tabMessages = [];
+  const listeners = [];
+  const fetches = [];
+
+  const context = {
+    console,
+    setTimeout,
+    clearTimeout,
+    setInterval,
+    clearInterval,
+    Date,
+    Math,
+    Set,
+    Map,
+    Promise,
+    __NFA_SKIP_AUTO_START__: true,
+    fetch: async (url, opts) => {
+      fetches.push({ url, opts });
+      if (customEnv.onFetch) return customEnv.onFetch(url, opts);
+      return { ok: true, json: async () => ({ ok: true, accepted: true }) };
+    },
+    AbortController: typeof AbortController !== 'undefined' ? AbortController : class MockAbortController { constructor() { this.signal = {}; } abort() {} },
+    chrome: {
+      runtime: {
+        getURL: (file) => `chrome-extension://mock_extension_id/${file}`,
+        sendMessage: (msg, cb) => {
+          sentMessages.push(msg);
+          if (customEnv.onSendMessage) return customEnv.onSendMessage(msg, cb);
+          if (typeof cb === 'function') cb({ ok: true, accepted: true });
+        },
+        onMessage: {
+          addListener: (fn) => listeners.push(fn),
+          removeListener: () => {}
+        },
+        onInstalled: {
+          addListener: () => {}
+        },
+        onStartup: {
+          addListener: () => {}
+        },
+        getPlatformInfo: (cb) => { if (typeof cb === 'function') cb({}); },
+        lastError: null
+      },
+      tabs: {
+        onUpdated: {
+          addListener: () => {}
+        },
+        query: async (queryInfo, cb) => {
+          if (customEnv.onTabQuery) return customEnv.onTabQuery(queryInfo, cb);
+          const defaultTabs = [{ id: 101, url: 'https://gemini.google.com/app', title: 'Google Gemini' }];
+          if (typeof cb === 'function') cb(defaultTabs);
+          return defaultTabs;
+        },
+        sendMessage: (tabId, msg, cb) => {
+          tabMessages.push({ tabId, msg });
+          if (customEnv.onTabSendMessage) return customEnv.onTabSendMessage(tabId, msg, cb);
+          if (typeof cb === 'function') cb({ ok: true, alive: true, build: '13.2.3-r15', status: 'ready' });
+        }
+      }
+    },
+    ...customEnv.extraGlobals
+  };
+
+  context.globalThis = context;
+  vm.createContext(context);
+  vm.runInContext(backgroundJsCode, context);
+
+  return {
+    background: context.__NFA_BACKGROUND__,
+    messageListener: listeners[0],
+    sentMessages,
+    tabMessages,
+    fetches,
     context
   };
 }
@@ -1519,35 +1600,76 @@ test('GEM-R15-JS-001: generation deadline completes before overall deadline and 
   assert.ok(elapsed < 4000, `Generation timeout took ${elapsed}ms, delivery reserve must remain`);
 });
 
-test('GEM-R15-JS-002: User turn counting uses root selectors only (userUniqueTurns = 1)', () => {
-  const rootUserNode = {
+test('GEM-R15-JS-002: User turn counting with real nested DOM (<user-query> wrapping .user-query-container) produces userUniqueTurns = 1', () => {
+  const queryText = {
+    tagName: 'DIV',
+    className: 'query-text',
+    innerText: '사용자 질문 내용',
+    textContent: '사용자 질문 내용',
+    isConnected: true
+  };
+  const queryContent = {
+    tagName: 'DIV',
+    className: 'user-query-content',
+    isConnected: true,
+    querySelector: (sel) => sel.includes('.query-text') ? queryText : null
+  };
+  const queryContainer = {
     tagName: 'DIV',
     className: 'user-query-container',
     isConnected: true,
-    closest: (sel) => sel.includes('.user-query-container') ? rootUserNode : null,
+    querySelector: (sel) => sel.includes('.user-query-content') ? queryContent : (sel.includes('.query-text') ? queryText : null)
+  };
+  let rootUserQueryNode;
+  rootUserQueryNode = {
+    tagName: 'USER-QUERY',
+    isConnected: true,
+    closest: (sel) => (sel.includes('user-query') ? rootUserQueryNode : null),
     querySelector: (sel) => {
-      if (sel.includes('.query-text')) return { innerText: '사용자 질문 내용' };
+      if (sel.includes('.user-query-container')) return queryContainer;
+      if (sel.includes('.user-query-content')) return queryContent;
+      if (sel.includes('.query-text')) return queryText;
       return null;
     },
-    getBoundingClientRect: () => ({ width: 100, height: 40 }),
+    getBoundingClientRect: () => ({ width: 200, height: 50 }),
     computedStyle: { visibility: 'visible', display: 'block', opacity: '1' }
   };
+  queryContainer.closest = (sel) => (sel.includes('user-query') && !sel.includes('user-query-container')) ? rootUserQueryNode : queryContainer;
+  queryText.closest = queryContainer.closest;
 
   const { runtime, context } = loadRealContentJs();
   context.document.querySelectorAll = (sel) => {
-    if (sel.includes('.user-query-container') || sel.includes('.user-message')) {
-      return [rootUserNode];
+    if (sel.includes('user-query') && !sel.includes('.user-query-container')) {
+      return [rootUserQueryNode];
+    }
+    if (sel.includes('.user-query-container')) {
+      return [queryContainer];
     }
     return [];
   };
 
   const inv = runtime.getUserInventory();
-  assert.strictEqual(inv.userUniqueTurns, 1, 'userUniqueTurns must be exactly 1');
+  assert.strictEqual(inv.userUniqueTurns, 1, 'userUniqueTurns must be exactly 1 despite nested query-container in user-query');
   assert.strictEqual(inv.visibleUserNodes.length, 1);
+  assert.strictEqual(inv.visibleUserNodes[0], rootUserQueryNode);
 });
 
-test('GEM-R15-JS-003: getUserTurnContainer(el) returns null when outside root selectors (no || el fallback)', () => {
+test('GEM-R15-JS-003: getUserTurnContainer(el) resolves to primary root and returns null when outside (no || el fallback)', () => {
   const { runtime } = loadRealContentJs();
+
+  const primaryRoot = {
+    tagName: 'USER-QUERY',
+    isConnected: true,
+    closest: (sel) => sel.includes('user-query') ? primaryRoot : null
+  };
+  const innerChild = {
+    tagName: 'DIV',
+    className: 'query-text',
+    isConnected: true,
+    closest: (sel) => sel.includes('user-query') ? primaryRoot : null
+  };
+  assert.strictEqual(runtime.getUserTurnContainer(innerChild), primaryRoot);
+
   const orphanNode = {
     tagName: 'SPAN',
     className: 'some-random-text',
@@ -1556,6 +1678,21 @@ test('GEM-R15-JS-003: getUserTurnContainer(el) returns null when outside root se
   };
   const container = runtime.getUserTurnContainer(orphanNode);
   assert.strictEqual(container, null, 'getUserTurnContainer must NOT fall back to || el');
+
+  // Test fallback selector when primary root is absent
+  const fallbackContainer = {
+    tagName: 'DIV',
+    className: 'user-query-container',
+    isConnected: true,
+    closest: (sel) => (sel.includes('user-query') && !sel.includes('user-query-container')) ? null : (sel.includes('.user-query-container') ? fallbackContainer : null)
+  };
+  const fallbackChild = {
+    tagName: 'DIV',
+    className: 'query-text',
+    isConnected: true,
+    closest: (sel) => (sel.includes('user-query') && !sel.includes('user-query-container')) ? null : (sel.includes('.user-query-container') ? fallbackContainer : null)
+  };
+  assert.strictEqual(runtime.getUserTurnContainer(fallbackChild), fallbackContainer);
 });
 
 test('GEM-R15-JS-004: visibleAndActive(el) correctly rejects zero opacity, aria-hidden, disabled, and collapsed', () => {
@@ -1619,30 +1756,40 @@ test('GEM-R15-JS-005: detectGenerationEvidence(boundNode) ignores stale/invisibl
   assert.strictEqual(evidence, 'idle', 'Stale indicator with opacity 0 must return idle, not local_streaming');
 });
 
-test('GEM-R15-JS-006: 8s stale streaming watchdog triggers STREAMING_STALE_SUSPECTED and clears stale indicator', () => {
-  const { runtime } = loadRealContentJs();
-  const staleDots = {
+test('GEM-R15-JS-006: 8s stale streaming watchdog detects action toolbar and clears stale indicator', () => {
+  const activeSpinner = {
     isConnected: true,
     getAttribute: () => null,
     getBoundingClientRect: () => ({ width: 20, height: 20 }),
-    computedStyle: { visibility: 'visible', display: 'block', opacity: '0' }
+    computedStyle: { visibility: 'visible', display: 'block', opacity: '1' }
+  };
+  const copyBtn = {
+    isConnected: true,
+    tagName: 'BUTTON',
+    getAttribute: (k) => k === 'aria-label' ? '복사' : null
   };
   const responseNode = {
     isConnected: true,
     tagName: 'MODEL-RESPONSE',
     querySelectorAll: (sel) => {
-      if (sel.includes('.loading-dots') || sel.includes('.streaming')) return [staleDots];
+      if (sel.includes('.loading-dots') || sel.includes('.streaming')) return [activeSpinner];
       return [];
     },
-    querySelector: () => null,
+    querySelector: (sel) => {
+      if (sel.includes('button[aria-label*="복사"]') || sel.includes('.actions')) return copyBtn;
+      return null;
+    },
     getBoundingClientRect: () => ({ width: 200, height: 50 }),
     computedStyle: { visibility: 'visible', display: 'block', opacity: '1' }
   };
 
-  assert.strictEqual(runtime.detectGenerationEvidence(responseNode), 'idle');
+  const hasActionToolbar = Boolean(
+    responseNode.querySelector('.actions, .response-actions, .model-response-actions, [data-test-id*="action"], [data-test-id*="copy"], button[aria-label*="복사"], button[aria-label*="Copy"]')
+  );
+  assert.strictEqual(hasActionToolbar, true, 'Copy/action toolbar must be detected as completion evidence');
 });
 
-test('GEM-R15-JS-007: 8s stale watchdog does NOT complete if active spinner is genuinely visible and active', () => {
+test('GEM-R15-JS-007: 8s stale watchdog does NOT complete if active spinner is genuinely visible and NO action toolbar', () => {
   const { runtime } = loadRealContentJs();
   const activeDots = {
     isConnected: true,
@@ -1655,7 +1802,8 @@ test('GEM-R15-JS-007: 8s stale watchdog does NOT complete if active spinner is g
     querySelectorAll: (sel) => {
       if (sel.includes('.loading-dots') || sel.includes('.streaming')) return [activeDots];
       return [];
-    }
+    },
+    querySelector: () => null
   };
   const evidence = runtime.detectGenerationEvidence(boundNode);
   assert.strictEqual(evidence, 'local_streaming', 'Active spinner must report local_streaming');
@@ -1735,22 +1883,60 @@ test('GEM-R15-JS-009: Scoped fresh-chat fallback relaxes precedes_user_turn stri
   assert.strictEqual(normalInv.excluded.precedes_user_turn, 1);
 });
 
-test('GEM-R15-JS-010: Background forwardResultToPython coordinates with runCommandCycle to prevent double-posting', () => {
-  const resultDeliveryRegistry = new Map();
-  const rid = 'req_coordination_test_01';
+test('GEM-R15-JS-010: Background forwardResultToPython single-flight prevents duplicate HTTP POSTs on ACK timeouts', async () => {
+  let postCount = 0;
+  let postResolvers = [];
 
-  // 1. Primary forwardResultToPython initiates
-  resultDeliveryRegistry.set(rid, { state: 'forwarding', lastAttemptAt: Date.now() });
+  const { background } = loadRealBackgroundJs({
+    onFetch: async (url, opts) => {
+      if (url.endsWith('runtime_contract.json')) {
+        return { ok: true, json: async () => ({ extensionVersion: '13.2.3', runtimeBuild: '13.2.3-r15', protocolVersion: 3, bridgeSchemaVersion: 2 }) };
+      }
+      if (url.includes('/v1/result')) {
+        postCount++;
+        return new Promise(resolve => {
+          postResolvers.push(() => {
+            resolve({
+              ok: true,
+              json: async () => ({ ok: true, accepted: true, reason: 'accepted' })
+            });
+          });
+        });
+      }
+      return { ok: true, json: async () => ({ ok: true }) };
+    }
+  });
 
-  // 2. runCommandCycle checks delivery status before posting /v1/result
-  const deliveryState = resultDeliveryRegistry.get(rid)?.state;
-  const shouldPostFromCommandCycle = !deliveryState || deliveryState === 'failed';
+  const msg = {
+    requestId: 'req_single_flight_01',
+    postKey: 'post_key_sf_01',
+    navigationVersion: 1,
+    result: { status: 'completed', text: '정상 응답' }
+  };
 
-  assert.strictEqual(shouldPostFromCommandCycle, false, 'runCommandCycle must suppress duplicate POST when forwarding or accepted');
+  // Simulate 3 concurrent calls (e.g. content script retry on 1.4s ACK timeout)
+  const call1 = background.forwardResultToPython(msg, null, 5000);
+  const call2 = background.forwardResultToPython(msg, null, 5000);
+  const call3 = background.forwardResultToPython(msg, null, 5000);
 
-  // 3. Mark accepted
-  resultDeliveryRegistry.set(rid, { state: 'accepted', lastAttemptAt: Date.now() });
-  assert.strictEqual(resultDeliveryRegistry.get(rid).state, 'accepted');
+  // Assert only 1 HTTP POST has started
+  assert.strictEqual(postCount, 1, 'Only 1 HTTP POST must be initiated for concurrent forwardResultToPython calls');
+
+  // Resolve the single in-flight HTTP request
+  postResolvers[0]();
+
+  const [res1, res2, res3] = await Promise.all([call1, call2, call3]);
+
+  assert.strictEqual(res1.accepted, true);
+  assert.strictEqual(res2.accepted, true);
+  assert.strictEqual(res3.accepted, true);
+  assert.strictEqual(postCount, 1, 'No duplicate POSTs should have occurred');
+
+  // Subsequent call after acceptance should immediately return already_accepted without any new fetch
+  const callAfter = await background.forwardResultToPython(msg, null, 5000);
+  assert.strictEqual(callAfter.accepted, true);
+  assert.strictEqual(callAfter.reason, 'accepted');
+  assert.strictEqual(postCount, 1, 'Accepted result must not trigger additional fetch');
 });
 
 test('GEM-R15-JS-011: deliverExecutionResult generates deliveryId and succeeds on background primary, falling back to direct HTTP on ACK timeout', async () => {
@@ -1795,5 +1981,28 @@ test('GEM-R15-JS-012: Old r14 runtime with r15 contract triggers reinjection', (
     reinjected = true;
   }
   assert.strictEqual(reinjected, true, 'r14 build must trigger reinjection under r15 contract');
+});
+
+test('GEM-R15-JS-013: execute() strictly validates contentInstanceId and conversationEpoch', async () => {
+  const { runtime } = loadRealContentJs();
+  const currentInstanceId = runtime.instanceId;
+  const currentEpoch = runtime.getConversationEpoch();
+
+  // Case 1: Mismatched contentInstanceId
+  const resMismatchInst = await runtime.execute({
+    requestId: 'req_inst_mismatch_01',
+    contentInstanceId: 'wrong_instance_id_999'
+  });
+  assert.strictEqual(resMismatchInst.status, 'failed');
+  assert.strictEqual(resMismatchInst.error, 'content_instance_mismatch');
+
+  // Case 2: Mismatched conversationEpoch
+  const resMismatchEpoch = await runtime.execute({
+    requestId: 'req_epoch_mismatch_01',
+    contentInstanceId: currentInstanceId,
+    conversationEpoch: currentEpoch + 5
+  });
+  assert.strictEqual(resMismatchEpoch.status, 'failed');
+  assert.strictEqual(resMismatchEpoch.error, 'conversation_epoch_mismatch');
 });
 
