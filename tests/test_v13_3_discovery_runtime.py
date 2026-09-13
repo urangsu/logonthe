@@ -44,12 +44,10 @@ class TestV133DiscoveryAndRuntime(unittest.TestCase):
         rotator._current_query_post_count = 0
 
         self.assertEqual(rotator.current_query, "쿼리1")
-        # 1st post found -> stays on 쿼리1
         should_switch = rotator.record_post_found()
         self.assertFalse(should_switch)
         self.assertEqual(rotator.current_query, "쿼리1")
 
-        # 2nd post found -> advances exactly to 쿼리2, NEVER to 쿼리3!
         should_switch = rotator.record_post_found()
         self.assertTrue(should_switch)
         self.assertEqual(rotator.current_query, "쿼리2")
@@ -71,7 +69,6 @@ class TestV133DiscoveryAndRuntime(unittest.TestCase):
         source = TargetedSearchFeedSource(page, rotator=rotator)
         source._get_card_fingerprints = MagicMock(return_value={"https://m.blog.naver.com/user/1"})
 
-        # load_more executes scroll but fingerprints are identical (no new cards)
         with patch.object(source, "_switch_to_next_query") as mock_switch:
             source.load_more()
             mock_switch.assert_called_once()
@@ -112,9 +109,9 @@ class TestV133DiscoveryAndRuntime(unittest.TestCase):
             "comment_enabled": True,
             "topic_filter_enabled": True,
             "direct_urls": [
-                "https://m.blog.naver.com/user1/1",  # Will be idempotent
-                "https://m.blog.naver.com/user2/2",  # Will be processed
-                "https://m.blog.naver.com/user3/3",  # Will be processed
+                "https://m.blog.naver.com/user1/1",
+                "https://m.blog.naver.com/user2/2",
+                "https://m.blog.naver.com/user3/3",
             ]
         }.get(k, default)
 
@@ -124,13 +121,11 @@ class TestV133DiscoveryAndRuntime(unittest.TestCase):
 
         state_mgr = MagicMock()
         stop_event = threading.Event()
-
         controller = FeedController(config, history, state_mgr, stop_event)
 
         with patch("app.controller.BrowserSession") as mock_session_cls, \
              patch("app.controller.NaverAuthGuard.check_login_cookies", return_value=(True, [])), \
              patch("app.controller.PostProcessor") as mock_proc_cls:
-
             mock_session = mock_session_cls.return_value
             mock_session.context = MagicMock()
             mock_processor = mock_proc_cls.return_value
@@ -139,14 +134,10 @@ class TestV133DiscoveryAndRuntime(unittest.TestCase):
             mock_res.like_result.error = ""
             mock_res.comment_result.status = CommentSubmitState.SUBMITTED
             mock_processor.process.return_value = mock_res
-
             controller.run()
-
-            # user1:1 was skipped, so user2:2 and user3:3 were processed (total 2 processed)
             self.assertEqual(mock_processor.process.call_count, 2)
 
     def test_disc_005_expected_category_without_weak_positive_is_blocked(self):
-        """FOOD 검색어 결과에 전혀 엉뚱한 패션 선글라스 글이 삽입된 경우 차단 검증"""
         decision = DiscoveryTopicFilter.evaluate(
             "명품 선글라스 신상품 착용 후기",
             "백화점에서 직접 사서 써봤어요",
@@ -157,7 +148,6 @@ class TestV133DiscoveryAndRuntime(unittest.TestCase):
         self.assertEqual(decision.reason_code, "not_target_category")
 
     def test_disc_006_expected_category_with_weak_positive_is_allowed(self):
-        """FOOD 검색어 결과에 약한 음식 관련 단서가 있는 경우 통과"""
         decision = DiscoveryTopicFilter.evaluate(
             "광화문 직장인 점심 기록",
             "오늘 점심 메뉴로 든든한 밥 한끼 먹었습니다",
@@ -171,7 +161,7 @@ class TestV133DiscoveryAndRuntime(unittest.TestCase):
         """runtime_contract.json과 manifest.json 및 Python loader 일치 검증"""
         contract = load_runtime_contract()
         self.assertEqual(contract.extension_version, "13.2.3")
-        self.assertEqual(contract.runtime_build, "13.2.3-r12")
+        self.assertEqual(contract.runtime_build, "13.2.3-r13")
         self.assertEqual(contract.protocol_version, 3)
         self.assertEqual(contract.bridge_schema_version, 2)
 
@@ -181,17 +171,14 @@ class TestV133DiscoveryAndRuntime(unittest.TestCase):
         self.assertEqual(manifest["version"], contract.extension_version)
 
     def test_disc_008_runtime_contract_fail_closed_on_missing(self):
-        """runtime_contract.json 파일 누락시 RuntimeContractError 발생 검증 (Fail-Closed)"""
         with patch("os.path.exists", return_value=False):
             with self.assertRaises(RuntimeContractError):
                 load_runtime_contract()
 
     def test_disc_009_popup_direct_foreground_probe_static_check(self):
-        """popup.js가 background를 거치지 않고 foreground에서 직접 /v1/status를 fetch하는지 정적 검증"""
         popup_js_path = os.path.join(WORKSPACE_DIR, "browser_extension", "popup.js")
         with open(popup_js_path, "r", encoding="utf-8") as f:
             content = f.read()
-
         self.assertIn("fetch(`${BASE}/v1/status`", content)
         self.assertIn("directForegroundProbe()", content)
         self.assertIn("btnRecover", content)
@@ -202,7 +189,6 @@ class TestV133DiscoveryAndRuntime(unittest.TestCase):
         page.is_closed.return_value = True
         context = MagicMock()
         context.pages = [MagicMock()]
-
         kind = classify_playwright_failure(exc, page=page, context=context)
         self.assertEqual(kind, BrowserFailureKind.PAGE_CLOSED)
 
@@ -211,7 +197,6 @@ class TestV133DiscoveryAndRuntime(unittest.TestCase):
         page = MagicMock()
         context = MagicMock()
         type(context).pages = PropertyMock(side_effect=Exception("Context closed"))
-
         kind = classify_playwright_failure(exc, page=page, context=context)
         self.assertEqual(kind, BrowserFailureKind.CONTEXT_CLOSED)
 
@@ -226,40 +211,30 @@ class TestV133DiscoveryAndRuntime(unittest.TestCase):
                 "https://m.blog.naver.com/user3/3",
             ]
         }.get(k, default)
-
         history = MagicMock()
         history.is_liked.return_value = False
         history.is_comment_submitted.return_value = False
         state_mgr = MagicMock()
         stop_event = threading.Event()
-
         controller = FeedController(config, history, state_mgr, stop_event)
 
         with patch("app.controller.BrowserSession") as mock_session_cls, \
              patch("app.controller.NaverAuthGuard.check_login_cookies", return_value=(True, [])), \
              patch("app.controller.PostProcessor") as mock_proc_cls:
-
             mock_session = mock_session_cls.return_value
             mock_session.context = MagicMock()
             mock_processor = mock_proc_cls.return_value
-
-            # First post encounters BrowserDisconnectedError (context crash)
             mock_processor.process.side_effect = BrowserDisconnectedError("Browser crashed")
-
             controller.run()
-
-            # Process should be called ONLY ONCE and immediately stop, not looping through remaining 2 posts!
             self.assertEqual(mock_processor.process.call_count, 1)
             mock_session.close.assert_called_with(reason="fatal_error")
 
     def test_disc_010_recommendation_source_gourmet_priority_and_fallback(self):
         page = MagicMock()
-
-        # Case 1: 맛집 tab found & verified -> category=맛집
         page.evaluate.side_effect = [
-            ["card1", "card2"],  # before_cards
-            {"status": "clicked", "text": "맛집"},  # click_result for 맛집
-            {"active": True, "cardsChanged": True, "verified": True},  # verification for 맛집
+            ["card1", "card2"],
+            {"status": "clicked", "text": "맛집"},
+            {"active": True, "cardsChanged": True, "verified": True},
         ]
         source = RecommendationFeedSource(page, max_items=5)
         self.assertEqual(source.preferred_category, "맛집")
@@ -267,22 +242,20 @@ class TestV133DiscoveryAndRuntime(unittest.TestCase):
         source.open()
         self.assertFalse(source.is_exhausted())
 
-        # Case 2: 맛집 not found -> fallback to 푸드 -> verified
         page.evaluate.side_effect = [
-            ["card1", "card2"],  # before_cards
-            {"status": "not_found"},  # click_result for 맛집
-            {"status": "clicked", "text": "푸드"},  # click_result for 푸드
-            {"active": True, "cardsChanged": True, "verified": True},  # verification for 푸드
+            ["card1", "card2"],
+            {"status": "not_found"},
+            {"status": "clicked", "text": "푸드"},
+            {"active": True, "cardsChanged": True, "verified": True},
         ]
         source_fallback = RecommendationFeedSource(page, max_items=5)
         source_fallback.open()
         self.assertFalse(source_fallback.is_exhausted())
 
-        # Case 3: Neither 맛집 nor 푸드 found -> fail closed exhausted
         page.evaluate.side_effect = [
-            ["card1", "card2"],  # before_cards
-            {"status": "not_found"},  # click_result for 맛집
-            {"status": "not_found"},  # click_result for 푸드
+            ["card1", "card2"],
+            {"status": "not_found"},
+            {"status": "not_found"},
         ]
         source_fail = RecommendationFeedSource(page, max_items=5)
         source_fail.open()
