@@ -619,24 +619,161 @@ class MobileDOMResolver:
 
     @staticmethod
     def get_comment_submit_context(page: Page, preferred_frame=None):
-        frames = [preferred_frame] if preferred_frame else MobileDOMResolver._safe_get_frames(page)
-        selectors = [
+        """
+        댓글 등록 버튼 후보 인벤토리를 수집하고 우선순위에 따라 최적 후보 반환.
+        후보 정보:
+          frame, selector, index, visible, enabled, bbox, text, aria-label, editorSameFrame
+        우선순위:
+          1. editor와 동일 frame (preferred_frame)
+          2. visible
+          3. enabled
+          4. bbox > 0 (width > 0 and height > 0)
+          5. button.u_cbox_btn_upload / data-action=comment#upload
+          6. text == '등록'
+          Generic button:has-text('등록')은 마지막 fallback
+        """
+        if not page:
+            return None
+
+        frames = MobileDOMResolver._safe_get_frames(page)
+        if preferred_frame:
+            if preferred_frame in frames:
+                frames = [preferred_frame] + [f for f in frames if f != preferred_frame]
+            else:
+                frames = [preferred_frame] + frames
+
+        specific_selectors = [
             "button[data-action='comment#upload']",
             "button.u_cbox_btn_upload",
-            "button:has-text('등록')",
             "input[type='submit'].u_cbox_btn_upload",
+            "button:text-is('등록')",
+            ".u_cbox_upload_box button",
         ]
+        fallback_selectors = [
+            "button:has-text('등록')",
+            "a.u_cbox_btn_upload",
+            "[role='button']:has-text('등록')",
+        ]
+        selectors = specific_selectors + fallback_selectors
+
+        candidates = []
         for frame in frames:
-            if frame is None:
+            if not frame:
                 continue
-            for selector in selectors:
+            is_same_frame = (frame == preferred_frame) if preferred_frame else True
+            for sel in selectors:
                 try:
-                    loc = frame.locator(selector).first
-                    if loc.count() > 0 and loc.is_visible():
-                        return {"frame": frame, "button": loc, "selector": selector, "frame_name": getattr(frame, "name", ""), "frame_url": getattr(frame, "url", "")}
+                    loc = frame.locator(sel)
+                    cnt = loc.count() if hasattr(loc, "count") else 0
+                    for idx in range(cnt):
+                        try:
+                            cand_loc = loc.nth(idx) if hasattr(loc, "nth") else loc
+                            is_vis = False
+                            is_en = True
+                            bbox = None
+                            txt = ""
+                            aria = ""
+                            try:
+                                is_vis = cand_loc.is_visible() if hasattr(cand_loc, "is_visible") else False
+                            except Exception:
+                                is_vis = False
+                            try:
+                                is_en = cand_loc.is_enabled() if hasattr(cand_loc, "is_enabled") else True
+                            except Exception:
+                                is_en = True
+                            if is_vis:
+                                try:
+                                    bbox = cand_loc.bounding_box() if hasattr(cand_loc, "bounding_box") else None
+                                except Exception:
+                                    bbox = None
+                            try:
+                                txt = (cand_loc.inner_text() or "").strip() if hasattr(cand_loc, "inner_text") else ""
+                            except Exception:
+                                txt = ""
+                            try:
+                                aria = (cand_loc.get_attribute("aria-label") or "") if hasattr(cand_loc, "get_attribute") else ""
+                            except Exception:
+                                aria = ""
+
+                            has_pos_bbox = False
+                            if bbox and isinstance(bbox, dict):
+                                has_pos_bbox = (bbox.get("width", 0) > 0 and bbox.get("height", 0) > 0)
+
+                            is_specific = sel in specific_selectors
+                            is_exact_text = (txt == "등록" or "등록" in aria)
+
+                            score = 0
+                            if is_same_frame:
+                                score += 1000
+                            if is_vis:
+                                score += 500
+                            if is_en:
+                                score += 250
+                            if has_pos_bbox:
+                                score += 200
+                            if is_specific:
+                                score += 150
+                            if is_exact_text:
+                                score += 100
+
+                            candidates.append({
+                                "frame": frame,
+                                "button": cand_loc,
+                                "selector": sel,
+                                "index": idx,
+                                "frame_name": getattr(frame, "name", ""),
+                                "frame_url": getattr(frame, "url", ""),
+                                "visible": bool(is_vis),
+                                "enabled": bool(is_en),
+                                "bbox": bbox,
+                                "has_pos_bbox": has_pos_bbox,
+                                "text": txt,
+                                "aria_label": aria,
+                                "editorSameFrame": is_same_frame,
+                                "score": score,
+                            })
+                        except Exception:
+                            continue
                 except Exception:
                     continue
-        return None
+
+        if not candidates:
+            for frame in frames:
+                if not frame:
+                    continue
+                for sel in selectors:
+                    try:
+                        loc = frame.locator(sel).first
+                        cnt = loc.count() if hasattr(loc, "count") else 1
+                        if cnt > 0:
+                            is_vis = loc.is_visible() if hasattr(loc, "is_visible") else True
+                            if is_vis:
+                                return {
+                                    "frame": frame,
+                                    "button": loc,
+                                    "selector": sel,
+                                    "index": 0,
+                                    "frame_name": getattr(frame, "name", ""),
+                                    "frame_url": getattr(frame, "url", ""),
+                                    "visible": True,
+                                    "enabled": True,
+                                    "bbox": None,
+                                    "has_pos_bbox": False,
+                                    "text": "등록",
+                                    "aria_label": "",
+                                    "editorSameFrame": True,
+                                    "score": 1000,
+                                }
+                    except Exception:
+                        continue
+            return None
+
+        candidates.sort(key=lambda c: c["score"], reverse=True)
+        visible_candidates = [c for c in candidates if c["visible"]]
+        if visible_candidates:
+            return visible_candidates[0]
+
+        return candidates[0]
 
     @staticmethod
     def get_comment_placeholder_context(page: Page, preferred_frame=None):

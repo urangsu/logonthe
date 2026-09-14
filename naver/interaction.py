@@ -671,6 +671,58 @@ class CommentInteractionService:
         except Exception:
             return False
 
+    @staticmethod
+    def _was_submit_permit_consumed(frame, permit_id: str) -> bool:
+        """
+        DOM에 등록 버튼 클릭 이벤트가 전달되어 __NAVER_FEED_CLICK_HANDLER__에 의해
+        단일 제출 권한(permit)이 실제로 소비되었는지 확인.
+        """
+        if not frame or not permit_id:
+            return False
+        try:
+            res = frame.evaluate(
+                "(p) => window.__NAVER_LAST_CONSUMED_PERMIT__ === p",
+                permit_id,
+            )
+            return res is True or res == "true"
+        except Exception:
+            return False
+
+    @staticmethod
+    def _get_editor_state(frame) -> dict:
+        """
+        현재 댓글 에디터의 가시성, 입력 텍스트, 제출 락 상태 조회.
+        """
+        if not frame:
+            return {"visible": False, "text": "", "lockHeld": False}
+        try:
+            res = frame.evaluate("""() => {
+                const el = document.querySelector(
+                    '#naverComment__write_textarea, div.u_cbox_text[contenteditable="true"], textarea.u_cbox_text'
+                );
+                const rect = el ? el.getBoundingClientRect() : null;
+                const isVis = !!(el && rect && rect.width > 0 && rect.height > 0 && window.getComputedStyle(el).display !== 'none');
+                const txt = el ? (el.innerText || el.value || '').trim() : '';
+                const lock = !!(window.__NAVER_SUBMIT_LOCK_ACQUIRED__ || window.__NAVER_COMMENT_STATE__ === 'SUBMITTING');
+                return { visible: isVis, text: txt, lockHeld: lock, dirty: window.__NAVER_COMMENT_USER_DIRTY__ === true };
+            }""")
+            if isinstance(res, dict):
+                vis = res.get("visible")
+                txt = str(res.get("text") or res.get("currentText") or "")
+                if vis is None:
+                    vis = bool(txt)
+                lock = res.get("lockHeld")
+                if lock is None:
+                    lock = True
+                return {
+                    "visible": bool(vis),
+                    "text": txt,
+                    "lockHeld": bool(lock),
+                }
+        except Exception:
+            pass
+        return {"visible": False, "text": "", "lockHeld": False}
+
     @classmethod
     def submit_and_verify(
         cls,
@@ -681,6 +733,7 @@ class CommentInteractionService:
         click: Optional[bool] = None,
         is_auto_submit: Optional[bool] = None,
         origin: Optional[SubmitOrigin] = None,
+        post_key: str = "",
     ) -> CommentSubmitOutcome:
         """
         댓글 등록 버튼 클릭 및 Fail-closed 검증 (에디터 클리어 및 서버 목록 내 댓글 등장 확인)
@@ -712,6 +765,10 @@ class CommentInteractionService:
         comment_frame = editor_context.get("frame") if editor_context else page.main_frame
 
         click_to_dispatch = (origin in (SubmitOrigin.USER_ENTER, SubmitOrigin.AUTO_TIMER))
+        last_click_error = ""
+        click_event_confirmed = False
+        click_dispatched = False
+
         if click_to_dispatch:
             submit_context = MobileDOMResolver.get_comment_submit_context(page, editor_context["frame"] if editor_context else None)
             if not submit_context:
@@ -759,35 +816,160 @@ class CommentInteractionService:
                 logger.log(f"  ⚠️ [COMMENT] 클릭 직전 에디터 검증 예외: {chk_err}", "WARNING")
 
             baseline = ServerCommentDuplicateGuard.capture_submission_baseline(comment_frame)
-            click_dispatched = False
-            permit_id = f"permit_{uuid.uuid4().hex}"
-            try:
-                if btn.is_disabled():
-                    interruptible_wait(stop_event, 0.3)
-                if btn.is_disabled():
-                    logger.log("  ❌ [COMMENT] 등록 버튼이 비활성 상태입니다.", "ERROR")
-                    return CommentSubmitOutcome(state=CommentSubmitState.PRECLICK_BLOCKED, reason="button_disabled", click_dispatched=False, retryable_same_post=True)
-                btn.scroll_into_view_if_needed(timeout=1000)
+            click_returned = False
+
+            for attempt in (1, 2):
+                if attempt == 2:
+                    logger.log(f"  🔄 [COMMENT][CLICK_RETRY_RESOLVE] attempt=2 post={post_key or ''}")
+                    submit_context = MobileDOMResolver.get_comment_submit_context(
+                        page, editor_context["frame"] if editor_context else None
+                    )
+                    if not submit_context:
+                        logger.log("  ❌ [COMMENT] 재시도용 등록 버튼을 찾지 못했습니다.", "ERROR")
+                        last_click_error = "retry_submit_button_not_found"
+                        break
+                    btn = submit_context["button"]
+                    comment_frame = submit_context.get("frame") or comment_frame
+
+                logger.log(
+                    f"  🎯 [COMMENT][SUBMIT_CANDIDATE] attempt={attempt} "
+                    f"frame={submit_context.get('frame_name', '')} "
+                    f"selector={submit_context.get('selector', '')} "
+                    f"visible={submit_context.get('visible', False)} "
+                    f"enabled={submit_context.get('enabled', True)} "
+                    f"score={submit_context.get('score', 0)}"
+                )
+
+                # 등록 버튼 활성화 검사
                 try:
-                    comment_frame.evaluate("(p) => { window.__NAVER_SUBMIT_PERMIT__ = p; }", permit_id)
+                    if hasattr(btn, "is_disabled") and btn.is_disabled():
+                        interruptible_wait(stop_event, 0.3)
+                    if hasattr(btn, "is_disabled") and btn.is_disabled():
+                        logger.log(f"  ❌ [COMMENT] 등록 버튼이 비활성 상태입니다 (attempt={attempt}).", "ERROR")
+                        last_click_error = "button_disabled"
+                        if attempt == 1:
+                            editor_info = cls._get_editor_state(comment_frame)
+                            if (editor_info.get("visible") and
+                                editor_info.get("text") == final_text.strip() and
+                                editor_info.get("lockHeld")):
+                                interruptible_wait(stop_event, 0.4)
+                                continue
+                        break
                 except Exception:
                     pass
-                click_dispatched = True
-                btn.click(timeout=1000)
-                logger.log("  🚀 [COMMENT][CLICK_DISPATCHED] 등록 버튼 클릭 완료")
-            except Exception as exc:
-                logger.log(f"  ❌ [COMMENT] 등록 버튼 클릭 실패: {exc} (click_dispatched={click_dispatched})", "ERROR")
-                if click_dispatched:
-                    return CommentSubmitOutcome(state=CommentSubmitState.SUBMISSION_UNKNOWN, reason=str(exc), click_dispatched=True, retryable_same_post=False)
-                return CommentSubmitOutcome(state=CommentSubmitState.PRECLICK_BLOCKED, reason=str(exc), click_dispatched=False, retryable_same_post=True)
-            finally:
+
+                permit_id = f"permit_{uuid.uuid4().hex}"
                 try:
-                    comment_frame.evaluate("() => { delete window.__NAVER_SUBMIT_PERMIT__; }")
+                    comment_frame.evaluate("""(p) => {
+                        window.__NAVER_SUBMIT_PERMIT__ = p;
+                        window.__NAVER_LAST_CONSUMED_PERMIT__ = null;
+                    }""", permit_id)
                 except Exception:
                     pass
+
+                logger.log(f"  👉 [COMMENT][CLICK_ATTEMPT] attempt={attempt} permitId={permit_id}")
+
+                try:
+                    if hasattr(btn, "scroll_into_view_if_needed"):
+                        try:
+                            btn.scroll_into_view_if_needed(timeout=1000)
+                        except Exception:
+                            pass
+                    btn.click(timeout=2500)
+                    click_returned = True
+                    logger.log(f"  🚀 [COMMENT][CLICK_RETURNED] attempt={attempt}")
+                except Exception as exc:
+                    last_click_error = str(exc)
+                    logger.log(f"  ⚠️ [COMMENT][CLICK_EXCEPTION] attempt={attempt} error={exc}")
+                finally:
+                    try:
+                        comment_frame.evaluate("() => { delete window.__NAVER_SUBMIT_PERMIT__; }")
+                    except Exception:
+                        pass
+
+                # Permit 소비 확인
+                permit_consumed = cls._was_submit_permit_consumed(comment_frame, permit_id)
+                if permit_consumed:
+                    click_event_confirmed = True
+                    logger.log("  🎟️ [COMMENT][CLICK_EVENT_CONFIRMED] permitConsumed=true")
+                else:
+                    logger.log("  ⚠️ [COMMENT][CLICK_EVENT_NOT_CONFIRMED] permitConsumed=false")
+
+                # Step A: click이 정상 반환되었거나 permit이 소비된 경우 -> 버튼 도달 확정, 2회차 클릭 절대 금지
+                if click_returned or permit_consumed:
+                    break
+
+                # click 예외 발생 + permit 미소비 시 상태 확인 대기 (300~500ms)
+                interruptible_wait(stop_event, 0.4)
+
+                # 서버 사이드 확인 (이미 등록 완료 여부)
+                presence = ServerCommentDuplicateGuard.scan_page_for_my_comment(
+                    comment_frame,
+                    stop_event=stop_event,
+                    baseline=baseline,
+                    expected_text=final_text,
+                )
+                if presence.state == CommentPresenceState.PRESENT:
+                    logger.log("  ✅ [COMMENT][SERVER_VERIFIED] 본인 댓글이 서버 목록에 확인되었습니다")
+                    return CommentSubmitOutcome(
+                        state=CommentSubmitState.SUBMITTED,
+                        reason="server_verified",
+                        click_dispatched=True,
+                        retryable_same_post=False,
+                    )
+
+                # Step B: 에디터 상태 확인 (에디터 닫힘 또는 텍스트 비워짐 감지 시 2회차 클릭 금지)
+                editor_info = cls._get_editor_state(comment_frame)
+                is_editor_vis = editor_info.get("visible", False)
+                cur_editor_txt = editor_info.get("text", "")
+
+                if not is_editor_vis or not cur_editor_txt:
+                    logger.log(
+                        f"  ⚠️ [COMMENT][UI_STATE_CHANGED] editorVisible={is_editor_vis} textLen={len(cur_editor_txt)} "
+                        "- submission in progress, strictly forbidding second click"
+                    )
+                    break
+
+                # Step C: 확실한 사전 실패 조건 만족 시 정확히 1회 재시도 (attempt 1 -> 2)
+                if attempt == 1:
+                    lock_held = editor_info.get("lockHeld", False)
+                    is_exact_match = (cur_editor_txt == final_text.strip())
+                    if (not permit_consumed and
+                        presence.state == CommentPresenceState.ABSENT and
+                        is_editor_vis and
+                        is_exact_match and
+                        lock_held):
+                        logger.log(
+                            f"  🔍 [COMMENT][PRE_RETRY_SERVER_CHECK] presence={presence.state.value} "
+                            f"editorVisible={is_editor_vis} textMatch=true lockHeld={lock_held}"
+                        )
+                        logger.log("  🔄 [COMMENT][CLICK_RETRY_ATTEMPT] attempt=2")
+                        continue
+
+                # 그 외의 경우 추가 클릭 방지
+                break
+
+            # 클릭 루프 종료 후 실제 디스패치 여부 판정
+            editor_info_after = cls._get_editor_state(comment_frame)
+            editor_cleared_or_hidden = (not editor_info_after.get("visible", False)) or (not editor_info_after.get("text", ""))
+            click_dispatched = bool(click_returned or click_event_confirmed or editor_cleared_or_hidden)
+
+            if not click_dispatched:
+                # 확실한 사전 실패: 이벤트가 DOM에 도달하지 않음 -> 동일 글 재시도 허용
+                logger.log(
+                    f"  🛑 [COMMENT][PRECLICK_BLOCKED] reason={last_click_error or 'preclick_blocked'} "
+                    f"click_dispatched=False retryable_same_post=True"
+                )
+                return CommentSubmitOutcome(
+                    state=CommentSubmitState.PRECLICK_BLOCKED,
+                    reason=last_click_error or "preclick_blocked",
+                    click_dispatched=False,
+                    retryable_same_post=True,
+                )
         else:
             logger.log("  ℹ️ [COMMENT][SUBMIT_NATIVE_CLICK] 네이버 기본 등록 동작을 검증합니다")
             baseline = ServerCommentDuplicateGuard.capture_submission_baseline(comment_frame)
+            click_dispatched = False
 
         # 등록 후 서버 목록 확인
         try:
@@ -802,7 +984,12 @@ class CommentInteractionService:
                 )
                 if presence.state == CommentPresenceState.PRESENT:
                     logger.log("  ✅ [COMMENT][SERVER_VERIFIED] 본인 댓글이 서버 목록에 확인되었습니다")
-                    return CommentSubmitOutcome(state=CommentSubmitState.SUBMITTED, reason="server_verified", click_dispatched=click_to_dispatch, retryable_same_post=False)
+                    return CommentSubmitOutcome(
+                        state=CommentSubmitState.SUBMITTED,
+                        reason="server_verified",
+                        click_dispatched=click_to_dispatch,
+                        retryable_same_post=False,
+                    )
                 if presence.state == CommentPresenceState.UNKNOWN:
                     unknown_seen = True
                     logger.log(
@@ -811,10 +998,25 @@ class CommentInteractionService:
                     )
 
             logger.log(
-                "  ⚠️ [COMMENT] " + ("server_verification_unavailable" if unknown_seen else "server_comment_not_found") + ": 클릭 후 서버 목록에 본인 댓글이 즉시 확인되지 않아 SUBMISSION_UNKNOWN 처리합니다 (재등록 방지)",
+                f"  ⚠️ [COMMENT][SUBMISSION_UNKNOWN_DIAG] reason=server_unconfirmed unknownSeen={unknown_seen} "
+                f"lastClickError={last_click_error} permitConsumed={click_event_confirmed}",
                 "WARNING",
             )
-            return CommentSubmitOutcome(state=CommentSubmitState.SUBMISSION_UNKNOWN, reason="server_unconfirmed", click_dispatched=click_to_dispatch, retryable_same_post=False)
+            return CommentSubmitOutcome(
+                state=CommentSubmitState.SUBMISSION_UNKNOWN,
+                reason="server_unconfirmed",
+                click_dispatched=click_to_dispatch,
+                retryable_same_post=False,
+            )
         except Exception as e:
-            logger.log(f"  ⚠️ [COMMENT] 등록 검증 중 예외 발생 (클릭 이후이므로 SUBMISSION_UNKNOWN 처리): {e}", "WARNING")
-            return CommentSubmitOutcome(state=CommentSubmitState.SUBMISSION_UNKNOWN, reason=str(e), click_dispatched=click_to_dispatch, retryable_same_post=False)
+            logger.log(
+                f"  ⚠️ [COMMENT][SUBMISSION_UNKNOWN_DIAG] 등록 검증 중 예외 발생: {e} "
+                f"(클릭 이후이므로 SUBMISSION_UNKNOWN 처리)",
+                "WARNING",
+            )
+            return CommentSubmitOutcome(
+                state=CommentSubmitState.SUBMISSION_UNKNOWN,
+                reason=str(e),
+                click_dispatched=click_to_dispatch,
+                retryable_same_post=False,
+            )
