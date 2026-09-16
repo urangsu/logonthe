@@ -1154,6 +1154,26 @@ class PostProcessor:
                             draft_source_label = "Gemini 생성"
                             if self.state_mgr:
                                 self.state_mgr.update(inc_gen_success=True)
+                        elif gate_res.code in FinalQualityGate.AUTO_REPAIRABLE_CODES and not getattr(self, "_gemini_auto_repair_done", False):
+                            # 1-time mechanical auto-repair for minor style violations (laughter/tilde/slang)
+                            self._gemini_auto_repair_done = True
+                            repaired_text, repaired_gate = FinalQualityGate.auto_repair(
+                                cand_composed, gate_res, preset=preset, source="gemini"
+                            )
+                            if repaired_text and repaired_gate.valid:
+                                draft_text = repaired_text
+                                draft_source_label = "Gemini 생성 (자동수정)"
+                                logger.log(
+                                    f"[GEMINI][AUTO_REPAIRED] code={gate_res.code} matched={gate_res.matched!r} "
+                                    f"original_chars={len(cand_composed)} repaired_chars={len(repaired_text)}"
+                                )
+                                if self.state_mgr:
+                                    self.state_mgr.update(inc_gen_success=True)
+                            else:
+                                logger.log(
+                                    f"[GEMINI] 자동 수정 시도 후에도 품질 게이트 미통과 ([{gate_res.code}] {gate_res.reason}).",
+                                    "ERROR",
+                                )
                         else:
                             logger.log(f"[GEMINI] 생성된 텍스트가 품질 게이트를 통과하지 못했습니다 ([{gate_res.code}] {gate_res.reason}).", "ERROR")
 
@@ -1289,19 +1309,19 @@ class PostProcessor:
                                     SubmitOrigin.NATIVE_CLICK if action == UserAction.NATIVE_SUBMIT else SubmitOrigin.AUTO_TIMER
                                 )
 
-                                # 등록 직전 최종 read-back 텍스트 Gate 검증 (사용자 직접 수정본은 AI 문체 강제 면제)
-                                from services.comments.community_rhythm import ResponseContaminationGate
-                                contam_sub_gate = ResponseContaminationGate.validate(submitted_cand)
-                                if contam_sub_gate.is_contaminated:
-                                    logger.log(f"  ❌ [COMMENT] 등록 직전 댓글 UI 오염 통과 실패: [{contam_sub_gate.code}] {contam_sub_gate.reason} - 등록 보류", "WARNING")
-                                    CommentInteractionService.release_submit_lock(detail_page, source=origin.value)
-                                    auto_submit_timeout = None
-                                    msg = f"댓글 UI 오염({contam_sub_gate.code}) / 수정 후 Enter=등록 / Esc=건너뛰기"
-                                    if self.state_mgr:
-                                        self.state_mgr.update(new_state=FeedState.WAITING_USER, message=msg)
-                                    continue
-
+                                # 등록 직전 최종 read-back 텍스트 Gate 검증 (NATIVE_CLICK은 이미 클릭되었으므로 블로커로 사용하지 않음)
                                 if origin != SubmitOrigin.NATIVE_CLICK:
+                                    from services.comments.community_rhythm import ResponseContaminationGate
+                                    contam_sub_gate = ResponseContaminationGate.validate(submitted_cand)
+                                    if contam_sub_gate.is_contaminated:
+                                        logger.log(f"  ❌ [COMMENT] 등록 직전 댓글 UI 오염 통과 실패: [{contam_sub_gate.code}] {contam_sub_gate.reason} - 등록 보류", "WARNING")
+                                        CommentInteractionService.release_submit_lock(detail_page, source=origin.value)
+                                        auto_submit_timeout = None
+                                        msg = f"댓글 UI 오염({contam_sub_gate.code}) / 수정 후 Enter=등록 / Esc=건너뛰기"
+                                        if self.state_mgr:
+                                            self.state_mgr.update(new_state=FeedState.WAITING_USER, message=msg)
+                                        continue
+
                                     final_gate = FinalQualityGate.validate_final_text(submitted_cand, preset=preset, source=sub_source)
                                     if not final_gate.valid:
                                         logger.log(f"  ❌ [COMMENT] 등록 직전 댓글 품질 게이트 통과 실패: [{final_gate.code}] {final_gate.reason} (매칭: {final_gate.matched}) - 등록 보류", "WARNING")
@@ -1314,7 +1334,7 @@ class PostProcessor:
                                         continue
                                 else:
                                     logger.log(
-                                        "  ℹ️ [COMMENT][NATIVE_SUBMIT_VERIFY_ONLY] native click already occurred; final quality gate is not used as a blocker"
+                                        "  ℹ️ [COMMENT][NATIVE_SUBMIT_VERIFY_ONLY] native click already occurred; contamination/quality gates are not used as blockers"
                                     )
 
                                 cmt_res.submitted_text = submitted_cand
@@ -1323,13 +1343,19 @@ class PostProcessor:
                                     self.state_mgr.update(new_state=FeedState.SUBMITTING, message="댓글 등록 및 검증 중...")
 
                                 if self.history_store and hasattr(self.history_store, "record_pre_submit"):
-                                    try:
-                                        self.history_store.record_pre_submit(post.key, cmt_res.submitted_text, url=post.url)
-                                    except Exception as e:
-                                        logger.log(f"❌ [HISTORY] pre_submit 영속 저장 실패 -> 중복 등록 방지를 위해 제출을 중단합니다: {e}", "ERROR")
-                                        cmt_res.status = CommentSubmitState.FAILED
-                                        cmt_res.error = "pre_submit_persistence_failed"
-                                        break
+                                    if origin != SubmitOrigin.NATIVE_CLICK:
+                                        try:
+                                            self.history_store.record_pre_submit(post.key, cmt_res.submitted_text, url=post.url)
+                                        except Exception as e:
+                                            logger.log(f"❌ [HISTORY] pre_submit 영속 저장 실패 -> 중복 등록 방지를 위해 제출을 중단합니다: {e}", "ERROR")
+                                            cmt_res.status = CommentSubmitState.FAILED
+                                            cmt_res.error = "pre_submit_persistence_failed"
+                                            break
+                                    else:
+                                        try:
+                                            self.history_store.record_pre_submit(post.key, cmt_res.submitted_text, url=post.url)
+                                        except Exception as e:
+                                            logger.log(f"⚠️ [HISTORY] pre_submit 기록 실패 (네이티브 클릭 후, 서버 검증 계속 진행): {e}", "WARNING")
 
                                 outcome = CommentInteractionService.submit_and_verify(
                                     detail_page,

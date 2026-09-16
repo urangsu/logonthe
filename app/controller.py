@@ -274,16 +274,6 @@ class FeedController:
         auto_comment_delay_max = float(self.config.get("auto_comment_delay_max", 6.0))
         direct_urls = self.config.get("direct_urls", [])
 
-        neighbor_mutual_only = bool(self.config.get("neighbor_mutual_only", True))
-        neighbor_like_sweep_mode = bool(self.config.get("neighbor_like_sweep_mode", False))
-
-        if source_type == FeedSourceType.NEIGHBOR and neighbor_like_sweep_mode:
-            like_enabled = True
-            comment_enabled = False
-            auto_comment_submit_enabled = False
-            gemini_web_enabled = False
-            logger.log("  ⚡ [NEIGHBOR_SWEEP] 서로이웃 공감 훑기 모드 활성화: 댓글/Gemini 작업 비활성화 (Like-only)")
-
         ai_clipboard_enabled = bool(self.config.get("ai_clipboard_enabled", True))
         ai_context_max_chars = int(self.config.get("ai_context_max_chars", 700))
         ai_prompt_style = str(self.config.get("ai_prompt_style", "warm_short"))
@@ -292,8 +282,18 @@ class FeedController:
         gemini_web_enabled = bool(self.config.get("gemini_web_enabled", True))
         gemini_mode = str(self.config.get("gemini_mode", "new"))
         gemini_custom_url = str(self.config.get("gemini_custom_url", "https://gemini.google.com/app"))
-
         gemini_url = gemini_custom_url if (gemini_mode == "custom" and gemini_custom_url) else "https://gemini.google.com/app"
+
+        neighbor_mutual_only = bool(self.config.get("neighbor_mutual_only", True))
+        neighbor_like_sweep_mode = bool(self.config.get("neighbor_like_sweep_mode", False))
+
+        if source_type == FeedSourceType.NEIGHBOR and neighbor_like_sweep_mode:
+            neighbor_mutual_only = True
+            like_enabled = True
+            comment_enabled = False
+            auto_comment_submit_enabled = False
+            gemini_web_enabled = False
+            logger.log("  ⚡ [NEIGHBOR_SWEEP] 서로이웃 공감 훑기 모드 활성화: 서로이웃만 강제(mutual_only=True), 댓글/Gemini 작업 비활성화 (Like-only)")
 
         # [RUN_CONFIG] 실행 환경 스냅샷 로깅 (이웃 새글/직접입력일 때는 탐색 카테고리/토픽필터 n/a 표시)
         discovery_cats = self.config.get("discovery_categories", ["FOOD", "CAFE", "PARENTING", "LIVING", "TRAVEL", "LIFESTYLE"])
@@ -361,7 +361,11 @@ class FeedController:
 
             feed_page = self.session.get_feed_page()
             gemini_page = self.session.get_gemini_page() if (gemini_web_enabled and gemini_browser_mode == "managed_playwright") else None
-            stats_page = self.session.get_stats_page() if (like_enabled and self.config.get("daily_visitor_guard_enabled", True)) else None
+            stats_page = self.session.get_stats_page() if (
+                like_enabled and
+                not (source_type == FeedSourceType.NEIGHBOR and neighbor_like_sweep_mode) and
+                self.config.get("daily_visitor_guard_enabled", True)
+            ) else None
 
             self.state_mgr.update(new_state=FeedState.OPENING_SOURCE, message=f"피드 소스({source_type.value}) 접속 중...")
 
@@ -557,7 +561,10 @@ class FeedController:
                         except Exception as rec_err:
                             logger.log(f"  ⚠️ [RECOVERY] 미확정 상태 재확인 중 예외: {rec_err}", "WARNING")
 
-                    should_like = like_enabled and not is_local_liked
+                    if source_type == FeedSourceType.NEIGHBOR and neighbor_like_sweep_mode:
+                        should_like = True
+                    else:
+                        should_like = like_enabled and not is_local_liked
                     should_comment = comment_enabled and not is_local_commented and not is_local_unconfirmed
 
                     if not should_like and not should_comment:

@@ -605,6 +605,66 @@ class FinalQualityGate:
     def validate_candidate_text(cls, text: str, *, legacy: bool = False) -> FinalQualityResult:
         return cls.validate(text, legacy=legacy, allow_period=legacy)
 
+    # Auto-repair codes: problems in Gemini output that can be mechanically fixed
+    # without changing the semantic content of the comment.
+    AUTO_REPAIRABLE_CODES: ClassVar[Tuple[str, ...]] = (
+        "laughter_or_emoticon",
+        "excessive_tilde",
+        "excessive_slang",
+    )
+
+    @classmethod
+    def auto_repair(
+        cls,
+        text: str,
+        gate_result: "FinalQualityResult",
+        preset: PresetLike = CommunityRhythmPreset.COMMUNITY,
+        *,
+        source: Optional[str] = None,
+    ) -> "tuple[Optional[str], FinalQualityResult]":
+        """
+        1-time mechanical repair for AUTO_REPAIRABLE_CODES violations.
+
+        Returns:
+            (repaired_text, new_gate_result) if repair succeeded and new result is valid.
+            (None, original gate_result) if the code is not repairable or repair did not resolve the issue.
+
+        This is intentionally conservative:
+        - Only strips the exact matched offender, preserving all other text.
+        - Does NOT rephrase or rewrite the comment.
+        - If the repaired text still fails validation, we do NOT retry further.
+        """
+        if gate_result.valid or gate_result.code not in cls.AUTO_REPAIRABLE_CODES:
+            return None, gate_result
+
+        repaired = text
+
+        if gate_result.code == "laughter_or_emoticon":
+            # Remove all emoticon phrases
+            for phrase in cls.EMOTICON_PHRASES:
+                repaired = repaired.replace(phrase, "")
+            # Remove laughter markers (ㅋ, ㅎ, ㅠ, ㅜ sequences)
+            repaired = cls._LAUGHTER_RE.sub("", repaired)
+            repaired = repaired.strip()
+
+        elif gate_result.code == "excessive_tilde":
+            # Collapse runs of ~~~ down to a single ~
+            repaired = re.sub(r"~{2,}", "~", repaired).strip()
+
+        elif gate_result.code == "excessive_slang":
+            # Remove matched slang expression (matched field holds the offender)
+            if gate_result.matched:
+                repaired = repaired.replace(gate_result.matched, "", 1).strip()
+
+        if not repaired or repaired == text.strip():
+            # Nothing changed or empty result after repair — not useful
+            return None, gate_result
+
+        new_result = cls.validate_final_text(repaired, preset=preset, source=source)
+        if new_result.valid:
+            return repaired, new_result
+        return None, gate_result
+
 
 
 @dataclass(frozen=True)

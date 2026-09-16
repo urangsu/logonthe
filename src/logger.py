@@ -84,12 +84,6 @@ class BotLogger:
             except (OSError, IOError) as exc:
                 self.handle_file_error(exc)
 
-                if self.gui_callback:
-                    try:
-                        self.gui_callback(f"[{timestamp}] [ERROR] {err_text}")
-                    except Exception:
-                        pass
-
         print(formatted)
 
         if self.gui_callback:

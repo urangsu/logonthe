@@ -325,7 +325,7 @@ class BrowserSession:
                 ]
             )
 
-            def _on_context_close():
+            def _on_context_close(_context=None):
                 self._context_closed = True
                 logger.log(f"[SESSION][CONTEXT_CLOSED] reason={self._closing_reason} expected={self._is_closing}")
                 if not self._is_closing:
