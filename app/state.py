@@ -96,14 +96,17 @@ class StateManager:
         current_post_excerpt: Optional[str] = None,
         current_ai_prompt: Optional[str] = None,
         ai_clipboard_ready: Optional[bool] = None,
-        pause_reason: Optional[str] = None
+        pause_reason: Optional[str] = None,
+        clear_pause_reason: bool = False
     ):
         with self._lock:
             if new_state is not None:
                 self.state.current_state = new_state
                 if new_state != FeedState.PAUSED and pause_reason is None:
                     self.state.pause_reason = None
-            if pause_reason is not None:
+            if clear_pause_reason:
+                self.state.pause_reason = None
+            elif pause_reason is not None:
                 self.state.pause_reason = pause_reason
             if message is not None:
                 self.state.message = message

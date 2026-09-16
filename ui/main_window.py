@@ -745,18 +745,48 @@ class MainWindow(ctk.CTk):
         logger.log("  📚 [LEARNING] 개인화 문체 기준 및 코퍼스 통계를 새로고침했습니다.")
 
     def _update_ui_state(self, state: BotRuntimeState):
-        gemini_failed_pause = state.current_state == FeedState.PAUSED and (
-            "Gemini 실패" in (state.message or "") or getattr(state, "pause_reason", "") == "gemini_circuit_breaker"
+        is_paused = (state.current_state == FeedState.PAUSED)
+        pause_reason = getattr(state, "pause_reason", "") or ""
+
+        is_gemini_pause = is_paused and (
+            pause_reason in ("gemini_circuit_breaker", "gemini_quality_gate", "gemini_generation_failure")
+            or "Gemini" in (state.message or "")
         )
 
-        if gemini_failed_pause:
+        if is_gemini_pause:
+            if pause_reason == "gemini_circuit_breaker":
+                self.status_msg_lbl.configure(
+                    text="🚨 서킷 브레이커 작동: Gemini 3회 연속 실패 (확장 또는 브라우저 확인 필요)\n"
+                         "▶ 재개 방법: 브라우저 확인 후 아래 [재시도] 또는 [로컬초안] 버튼을 클릭하세요.",
+                    text_color="#F87171"
+                )
+            elif pause_reason == "gemini_quality_gate":
+                self.status_msg_lbl.configure(
+                    text=f"⚠️ Gemini 품질 기준 미달: {state.message}\n"
+                         "▶ 재개 방법: 아래 [재시도], [로컬초안], [스킵] 또는 [▶️ 작업 재개] 버튼을 클릭하세요.",
+                    text_color="#FBBF24"
+                )
+            else:
+                self.status_msg_lbl.configure(
+                    text=f"⚠️ Gemini 생성 실패: {state.message}\n"
+                         "▶ 재개 방법: 브라우저 확인 후 아래 [재시도], [로컬초안] 또는 [스킵] 버튼을 클릭하세요.",
+                    text_color="#F87171"
+                )
+        elif is_paused:
             self.status_msg_lbl.configure(
-                text="🚨 서킷 브레이커 작동: Gemini 3회 연속 실패 (확장 또는 브라우저 확인 필요)\n"
-                     "▶ 재개 방법: 브라우저 확인 후 아래 [재시도] 또는 [로컬초안] 버튼을 클릭하세요.",
-                text_color="#F87171"
+                text=f"⏸️ {state.message or '작업 일시정지됨'}\n"
+                     "▶ 재개 방법: [▶️ 작업 재개] 버튼을 클릭하면 이어서 진행합니다.",
+                text_color="#FBBF24"
             )
         else:
             self.status_msg_lbl.configure(text=f"상태: {state.message}", text_color="#E2E8F0")
+
+        # Sync btn_pause text & color if active
+        if hasattr(self, "btn_pause") and str(self.btn_pause.cget("state")) != "disabled":
+            if is_paused or (self.pause_event and self.pause_event.is_set()):
+                self.btn_pause.configure(text="▶️ 작업 재개", fg_color="#2563EB", hover_color="#1D4ED8")
+            else:
+                self.btn_pause.configure(text="⏸️ 일시정지", fg_color="#D97706", hover_color="#B45309")
 
         unknown_text = f" | ⚠️ 미확정: {state.submission_unknown_count}" if state.submission_unknown_count > 0 else ""
         sampled_text = f"선정 {state.sampled_in_count}·등록 {state.comments_count}" if state.sampled_in_count > 0 else f"{state.comments_count}"
@@ -773,7 +803,7 @@ class MainWindow(ctk.CTk):
         else:
             self.ai_post_excerpt_lbl.configure(text="본문 요약: -")
 
-        button_state = "normal" if gemini_failed_pause else "disabled"
+        button_state = "normal" if is_gemini_pause else "disabled"
         for button_name in ("btn_gemini_retry", "btn_gemini_local", "btn_gemini_skip"):
             button = getattr(self, button_name, None)
             if button:
@@ -1145,12 +1175,12 @@ class MainWindow(ctk.CTk):
             self.pause_event.set()
             self.btn_pause.configure(text="▶️ 작업 재개", fg_color="#2563EB", hover_color="#1D4ED8")
             logger.log("⏸️ 작업이 일시정지되었습니다. [▶️ 작업 재개] 버튼을 누르면 이어서 진행합니다.", "WARNING")
-            self.state_mgr.update(new_state=FeedState.PAUSED, message="작업 일시정지됨 (재개 대기 중)")
+            self.state_mgr.update(new_state=FeedState.PAUSED, message="작업 일시정지됨 (재개 대기 중)", pause_reason="user_manual_pause")
         else:
             self.pause_event.clear()
             self.btn_pause.configure(text="⏸️ 일시정지", fg_color="#D97706", hover_color="#B45309")
             logger.log("▶️ 작업을 다시 재개합니다.")
-            self.state_mgr.update(message="작업 재개됨")
+            self.state_mgr.update(message="작업 재개됨", clear_pause_reason=True)
 
     def _skip_to_next_post(self):
         """현재 글 처리를 즉시 건너뛰고 다음 글로 바로 이동"""
@@ -1165,6 +1195,7 @@ class MainWindow(ctk.CTk):
         if self.pause_event and self.pause_event.is_set():
             self.pause_event.clear()
             self.btn_pause.configure(text="⏸️ 일시정지", fg_color="#D97706", hover_color="#B45309")
+            self.state_mgr.update(clear_pause_reason=True)
 
     def _stop_task(self):
         if self.worker_thread and self.worker_thread.is_alive():

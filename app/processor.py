@@ -41,6 +41,47 @@ class StopRequestedException(UserStopRequestedError):
     pass
 
 
+def build_quality_rewrite_feedback(gate_res: Any) -> str:
+    """품질 검사(FinalQualityGate) 탈락 결과에 대한 1회 자동 재작성 피드백 생성"""
+    code = getattr(gate_res, "code", "")
+    matched = getattr(gate_res, "matched", None) or ""
+    reason = getattr(gate_res, "reason", "") or ""
+
+    if code == "laughter_or_emoticon":
+        return "초성 웃음(ㅎㅎ, ㅋㅋ 등)이나 문자 이모티콘(:), ^^ 등)을 사용하지 말고 자연스러운 문장으로 작성해 주세요."
+    elif code == "emoji":
+        return "그림 이모지나 특수 기호를 사용하지 말고 텍스트로만 자연스럽게 작성해 주세요."
+    elif code == "formal_register":
+        hint = f"('{matched}')" if matched else ""
+        return f"격식체/문어체{hint}를 쓰지 말고 친근하고 담백한 대화체(~네요, ~겠어요 등)로 작성해 주세요."
+    elif code == "banned_macro":
+        hint = f"('{matched}')" if matched else ""
+        return f"상투적인 매크로 표현{hint}을 사용하지 말고 본문 내용에 구체적으로 호응하는 문장으로 작성해 주세요."
+    elif code == "fake_experience":
+        hint = f"('{matched}')" if matched else ""
+        return f"가보지 않은 곳을 가본 척하거나 직접 해본 척하는 표현{hint} 대신, 포스팅을 본 소감으로 작성해 주세요."
+    elif code == "absolute_or_pressure":
+        hint = f"('{matched}')" if matched else ""
+        return f"강요하거나 단정적인 어휘{hint} 대신 부드럽고 가벼운 공감 어조로 작성해 주세요."
+    elif code == "forbidden_period":
+        return "문장 끝이나 중간에 마침표(.)를 사용하지 말고 물결(~)이나 여운을 주는 어미(~네요)로 마무리해 주세요."
+    elif code == "excessive_tilde":
+        return "물결표(~)는 문장 전체에서 최대 1개 이하로만 절제해서 사용해 주세요."
+    elif code == "excessive_slang":
+        return "과도한 감탄사/신조어 대신 자연스럽고 담백한 어조로 작성해 주세요."
+    elif code == "length_below_minimum":
+        return "글자 수가 너무 짧습니다. 20자 이상 40자 내외로 자연스러운 1~2문장으로 작성해 주세요."
+    elif code == "length_exceeded":
+        return "글자 수가 너무 깁니다. 40자 내외의 간결한 1~2문장으로 압축하여 작성해 주세요."
+    elif code == "rude_slang":
+        return "속어/은어를 배제하고 예의 바르고 따뜻한 이웃 댓글로 작성해 주세요."
+    elif code == "semantic_mismatch":
+        return "본문의 핵심 주제/맥락에 부합하는 자연스러운 반응으로 작성해 주세요."
+    else:
+        cause = reason or code or "품질 기준 미달"
+        return f"품질 기준 위반({cause})을 배제하고 담백하고 자연스러운 이웃 댓글로 다시 작성해 주세요."
+
+
 @dataclass
 class GenerationContext:
     """
@@ -316,6 +357,7 @@ class PostProcessor:
         self._draft_rewrite_done = False
         self._contamination_retry_done = False
         self._food_anchor_retry_done = False
+        self._quality_body_retry_done = False
         # TargetPostGuard: 대상 글 일치 여부 확인 (Fail-Open 원천 차단)
         TargetPostGuard.verify(detail_page, post)
 
@@ -837,6 +879,33 @@ class PostProcessor:
                                                 gemini_answer, preset=preset, source="gemini_body"
                                             )
                                             if not body_gate.valid:
+                                                if not getattr(self, "_quality_body_retry_done", False) and gen_ctx.attempt_count < gen_ctx.max_attempts:
+                                                    self._quality_body_retry_done = True
+                                                    feedback = build_quality_rewrite_feedback(body_gate)
+                                                    logger.log(
+                                                        f"🔄 [GEMINI/EXTENSION] 본문 품질 탈락({body_gate.code}) -> 1회 자동 재작성 피드백 반영: {feedback}",
+                                                        "WARNING",
+                                                    )
+                                                    if (self.stop_event and self.stop_event.is_set()) or (self.skip_event and self.skip_event.is_set()):
+                                                        if self.stop_event and self.stop_event.is_set():
+                                                            raise StopRequestedException("User stopped before Gemini retry")
+                                                        result.comment_result = CommentProcessResult(status=CommentSubmitState.SKIPPED, error="user_skipped")
+                                                        if self.state_mgr:
+                                                            self.state_mgr.update(new_state=FeedState.SKIPPING, inc_skip=True)
+                                                        return result
+                                                    request_id = uuid.uuid4().hex
+                                                    ai_prompt = gen_ctx.build_prompt(
+                                                        rewrite_feedback=feedback,
+                                                        recent_comments=gen_ctx.recent_comments,
+                                                        request_id=request_id,
+                                                    )
+                                                    if self.state_mgr:
+                                                        self.state_mgr.update(
+                                                            current_ai_prompt=ai_prompt,
+                                                            message=f"품질 보정 1회 재작성 중 ({body_gate.code})...",
+                                                        )
+                                                    gemini_answer = None
+                                                    continue
                                                 failure = f"quality_body:{body_gate.code}"
                                                 logger.log(
                                                     f"⚠️ [GEMINI/EXTENSION] 응답 수신 완료되었으나 본문 품질 검사에서 제외됨: "
@@ -851,6 +920,33 @@ class PostProcessor:
                                                     candidate_with_suffix, preset=preset, source="gemini_suffix"
                                                 )
                                                 if not combined_gate.valid:
+                                                    if not getattr(self, "_quality_body_retry_done", False) and gen_ctx.attempt_count < gen_ctx.max_attempts:
+                                                        self._quality_body_retry_done = True
+                                                        feedback = build_quality_rewrite_feedback(combined_gate)
+                                                        logger.log(
+                                                            f"🔄 [GEMINI/EXTENSION] 접미사 결합 품질 탈락({combined_gate.code}) -> 1회 자동 재작성 피드백 반영: {feedback}",
+                                                            "WARNING",
+                                                        )
+                                                        if (self.stop_event and self.stop_event.is_set()) or (self.skip_event and self.skip_event.is_set()):
+                                                            if self.stop_event and self.stop_event.is_set():
+                                                                raise StopRequestedException("User stopped before Gemini retry")
+                                                            result.comment_result = CommentProcessResult(status=CommentSubmitState.SKIPPED, error="user_skipped")
+                                                            if self.state_mgr:
+                                                                self.state_mgr.update(new_state=FeedState.SKIPPING, inc_skip=True)
+                                                            return result
+                                                        request_id = uuid.uuid4().hex
+                                                        ai_prompt = gen_ctx.build_prompt(
+                                                            rewrite_feedback=feedback,
+                                                            recent_comments=gen_ctx.recent_comments,
+                                                            request_id=request_id,
+                                                        )
+                                                        if self.state_mgr:
+                                                            self.state_mgr.update(
+                                                                current_ai_prompt=ai_prompt,
+                                                                message=f"품질 보정 1회 재작성 중 ({combined_gate.code})...",
+                                                            )
+                                                        gemini_answer = None
+                                                        continue
                                                     failure = f"quality_suffix:{combined_gate.code}"
                                                     logger.log(
                                                         f"⚠️ [GEMINI/EXTENSION] 응답 수신 완료되었으나 접미사 결합 품질 검사에서 제외됨: "
@@ -960,14 +1056,18 @@ class PostProcessor:
                                         error=f"gemini_failed:{failure}",
                                     )
                                     return result
+
+                                is_quality_pause = ("quality_" in failure)
+                                pause_reason = "gemini_quality_gate" if is_quality_pause else "gemini_generation_failure"
+                                if is_quality_pause:
+                                    msg = f"Gemini 품질 검사 제외 ({failure}) - 아래 [재시도], [로컬초안], [스킵] 또는 [▶️ 작업 재개]를 누르세요"
+                                else:
+                                    msg = f"Gemini 생성 실패 ({failure}) - 브라우저 확인 후 아래 [재시도], [로컬초안], [스킵]을 누르세요"
                                 if self.state_mgr:
-                                    if "quality_" in failure:
-                                        msg = f"Gemini 응답 수신 완료 / 품질검사 제외 ({failure}) - 연결 확인 후 작업 재개"
-                                    else:
-                                        msg = f"Gemini 실패로 일시정지됨 ({failure}) - 연결 복구 후 작업 재개를 누르세요"
                                     self.state_mgr.update(
                                         new_state=FeedState.PAUSED,
                                         message=msg,
+                                        pause_reason=pause_reason,
                                     )
                                 while self.pause_event is not None and self.pause_event.is_set():
                                     if self.stop_event and self.stop_event.is_set():
@@ -980,16 +1080,22 @@ class PostProcessor:
                                         )
                                         self.pause_event.clear()
                                         if self.state_mgr:
-                                            self.state_mgr.update(new_state=FeedState.SKIPPING, inc_skip=True)
+                                            self.state_mgr.update(new_state=FeedState.SKIPPING, inc_skip=True, clear_pause_reason=True)
                                         return result
                                     if cmd and cmd.kind == WorkerCommandType.GEMINI_USE_LOCAL_ONCE:
                                         use_local_requested = True
                                         self.pause_event.clear()
+                                        if self.state_mgr:
+                                            self.state_mgr.update(clear_pause_reason=True)
                                         break
                                     if cmd and cmd.kind == WorkerCommandType.GEMINI_RETRY:
                                         self.pause_event.clear()
+                                        if self.state_mgr:
+                                            self.state_mgr.update(clear_pause_reason=True)
                                         break
                                     time.sleep(0.2)
+                                if self.state_mgr:
+                                    self.state_mgr.update(clear_pause_reason=True)
                                 if use_local_requested:
                                     break
                                 request_id = uuid.uuid4().hex

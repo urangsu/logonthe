@@ -243,12 +243,12 @@ class FeedController:
     def pause(self):
         if self.pause_event:
             self.pause_event.set()
-        self.state_mgr.update(new_state=FeedState.PAUSED, message="작업이 일시정지되었습니다.")
+        self.state_mgr.update(new_state=FeedState.PAUSED, message="작업이 일시정지되었습니다.", pause_reason="user_manual_pause")
 
     def resume(self):
         if self.pause_event:
             self.pause_event.clear()
-        self.state_mgr.update(new_state=FeedState.RUNNING, message="작업을 재개합니다.")
+        self.state_mgr.update(message="작업을 재개합니다.", clear_pause_reason=True)
 
     def _run(self):
         if hasattr(self.config_service, "load") and callable(getattr(self.config_service, "load")):
