@@ -79,10 +79,11 @@ DEFAULT_CONFIG_V2: Dict[str, Any] = {
     "auto_prompt_learning_enabled": False,
     "auto_style_apply_enabled": False,
     "my_blog_id": "",
-    "engagement_audit_recent_posts": 10,
     # V1.2 keeps the main automated workflow as the default.  The manual
     # helper is an explicit opt-in and never silently replaces the baseline.
-    "workflow_mode": "assisted_auto"
+    "workflow_mode": "assisted_auto",
+    "neighbor_mutual_only": True,
+    "neighbor_like_sweep_mode": False
 }
 
 

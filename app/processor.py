@@ -284,6 +284,11 @@ class PostProcessor:
         effective_like = self.like_enabled and (action_plan.process_like if action_plan else True)
         effective_comment = self.comment_enabled and (action_plan.process_comment if action_plan else True)
 
+        is_sweep_mode = bool(self.config.get("neighbor_like_sweep_mode", False) and getattr(post, "source", None) == FeedSourceType.NEIGHBOR)
+        if is_sweep_mode:
+            effective_like = True
+            effective_comment = False
+
         if action_plan and action_plan.comment_sample_selected is False:
             result.comment_result = CommentProcessResult(
                 status=CommentSubmitState.SKIPPED,
@@ -412,16 +417,24 @@ class PostProcessor:
                 logger.log(f"  ⚠️ [LIKE] 리액션 상태 확신도 부족(state={like_state_res.state.value}, conf={like_state_res.confidence.value})으로 취소 방지 위해 스킵", "WARNING")
                 result.like_result = LikeProcessResult(state_before=like_state_res.state, action_taken=False, state_after=like_state_res.state, error="low_confidence_skip")
             else:
-                # 2-2. NOT_LIKED + HIGH인 경우에만 Popularity Guard 평가
-                elig = LikeEligibilityService.evaluate(
-                    detail_page=detail_page,
-                    stats_page=self.stats_page,
-                    post=post,
-                    config=self.config,
-                    stop_event=self.stop_event
-                )
+                # 2-2. NOT_LIKED + HIGH인 경우에만 Popularity Guard 평가 (공감 훑기 모드에서는 가드 면제)
+                if is_sweep_mode:
+                    elig_ok = True
+                    elig_like_cnt = None
+                    elig_daily_vis = None
+                else:
+                    elig = LikeEligibilityService.evaluate(
+                        detail_page=detail_page,
+                        stats_page=self.stats_page,
+                        post=post,
+                        config=self.config,
+                        stop_event=self.stop_event
+                    )
+                    elig_ok = elig.eligible
+                    elig_like_cnt = elig.like_count
+                    elig_daily_vis = elig.daily_visitors
 
-                if not elig.eligible:
+                if not elig_ok:
                     result.like_result = LikeProcessResult(
                         state_before=LikeState.NOT_LIKED,
                         action_taken=False,
@@ -433,8 +446,8 @@ class PostProcessor:
                 else:
                     # 2-3. 실제 공감 트랜잭션 실행 (2-Path 및 UI Settle 적용)
                     tx_res = LikeTransactionService.execute_like_transaction(detail_page, self.stop_event, post=post)
-                    tx_res.like_count = elig.like_count
-                    tx_res.daily_visitors = elig.daily_visitors
+                    tx_res.like_count = elig_like_cnt
+                    tx_res.daily_visitors = elig_daily_vis
                     result.like_result = tx_res
 
                     if tx_res.action_taken and tx_res.state_after == LikeState.LIKED:
@@ -1288,16 +1301,21 @@ class PostProcessor:
                                         self.state_mgr.update(new_state=FeedState.WAITING_USER, message=msg)
                                     continue
 
-                                final_gate = FinalQualityGate.validate_final_text(submitted_cand, preset=preset, source=sub_source)
-                                if not final_gate.valid:
-                                    logger.log(f"  ❌ [COMMENT] 등록 직전 댓글 품질 게이트 통과 실패: [{final_gate.code}] {final_gate.reason} (매칭: {final_gate.matched}) - 등록 보류", "WARNING")
-                                    CommentInteractionService.release_submit_lock(detail_page, source=origin.value)
-                                    auto_submit_timeout = None
-                                    msg = f"댓글 품질 요건 미충족({final_gate.code}) / 수정 후 Enter=등록 / Esc=건너뛰기"
-                                    if self.state_mgr:
-                                        self.state_mgr.update(new_state=FeedState.WAITING_USER, message=msg)
-                                    logger.log(f"[COMMENT][MANUAL_SUBMIT_PRECHECK_FAILED] reason={final_gate.code} retryable=true")
-                                    continue
+                                if origin != SubmitOrigin.NATIVE_CLICK:
+                                    final_gate = FinalQualityGate.validate_final_text(submitted_cand, preset=preset, source=sub_source)
+                                    if not final_gate.valid:
+                                        logger.log(f"  ❌ [COMMENT] 등록 직전 댓글 품질 게이트 통과 실패: [{final_gate.code}] {final_gate.reason} (매칭: {final_gate.matched}) - 등록 보류", "WARNING")
+                                        CommentInteractionService.release_submit_lock(detail_page, source=origin.value)
+                                        auto_submit_timeout = None
+                                        msg = f"댓글 품질 요건 미충족({final_gate.code}) / 수정 후 Enter=등록 / Esc=건너뛰기"
+                                        if self.state_mgr:
+                                            self.state_mgr.update(new_state=FeedState.WAITING_USER, message=msg)
+                                        logger.log(f"[COMMENT][MANUAL_SUBMIT_PRECHECK_FAILED] reason={final_gate.code} retryable=true")
+                                        continue
+                                else:
+                                    logger.log(
+                                        "  ℹ️ [COMMENT][NATIVE_SUBMIT_VERIFY_ONLY] native click already occurred; final quality gate is not used as a blocker"
+                                    )
 
                                 cmt_res.submitted_text = submitted_cand
 

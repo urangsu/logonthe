@@ -1,4 +1,5 @@
 import random
+import re
 import threading
 import traceback
 from typing import Optional, List, Set
@@ -273,6 +274,16 @@ class FeedController:
         auto_comment_delay_max = float(self.config.get("auto_comment_delay_max", 6.0))
         direct_urls = self.config.get("direct_urls", [])
 
+        neighbor_mutual_only = bool(self.config.get("neighbor_mutual_only", True))
+        neighbor_like_sweep_mode = bool(self.config.get("neighbor_like_sweep_mode", False))
+
+        if source_type == FeedSourceType.NEIGHBOR and neighbor_like_sweep_mode:
+            like_enabled = True
+            comment_enabled = False
+            auto_comment_submit_enabled = False
+            gemini_web_enabled = False
+            logger.log("  ⚡ [NEIGHBOR_SWEEP] 서로이웃 공감 훑기 모드 활성화: 댓글/Gemini 작업 비활성화 (Like-only)")
+
         ai_clipboard_enabled = bool(self.config.get("ai_clipboard_enabled", True))
         ai_context_max_chars = int(self.config.get("ai_context_max_chars", 700))
         ai_prompt_style = str(self.config.get("ai_prompt_style", "warm_short"))
@@ -330,7 +341,7 @@ class FeedController:
         self.state_mgr.reset(total_targets=max_items)
         self.state_mgr.update(new_state=FeedState.STARTING_BROWSER, message="브라우저 세션 시작 중...")
 
-        self.session = BrowserSession(headless=False)
+        self.session = BrowserSession(headless=False, stop_event=self.stop_event)
         final_close_reason = "completed"
 
         try:
@@ -356,7 +367,8 @@ class FeedController:
 
             source: FeedSource
             if source_type == FeedSourceType.NEIGHBOR:
-                source = NeighborFeedSource(feed_page, max_items=max_items, stop_event=self.stop_event)
+                scan_cap = max(max_items * 15, 100) if neighbor_mutual_only else max_items
+                source = NeighborFeedSource(feed_page, max_items=scan_cap, stop_event=self.stop_event)
             elif source_type == FeedSourceType.TARGETED_SEARCH:
                 source = TargetedSearchFeedSource(
                     feed_page,
@@ -405,6 +417,48 @@ class FeedController:
                 history_store=self.history,
             )
 
+            mutual_blog_ids: Set[str] = set()
+            if source_type == FeedSourceType.NEIGHBOR and neighbor_mutual_only:
+                from services.buddy_list_collector import BuddyListCollector
+                my_b_id = str(self.config.get("my_blog_id", "")).strip().lower()
+                relationship_page = self.session.get_detail_page()
+
+                if not my_b_id:
+                    try:
+                        relationship_page.goto("https://admin.blog.naver.com/BuddyListManage.naver", wait_until="domcontentloaded", timeout=15000)
+                        cur_url = relationship_page.url or ""
+                        match = re.search(r"[?&]blogId=([A-Za-z0-9_-]+)", cur_url, re.I)
+                        if match:
+                            my_b_id = match.group(1).lower()
+                            self.config["my_blog_id"] = my_b_id
+                            logger.log(f"  🔍 [NEIGHBOR_GUARD] 관리 페이지에서 내 blogId 감지: {my_b_id}")
+                    except Exception as e:
+                        logger.log(f"  ⚠️ [NEIGHBOR_GUARD] 내 blogId 자동 감지 실패: {e}", "WARNING")
+
+                if not my_b_id:
+                    logger.log("❌ [NEIGHBOR_GUARD] 서로이웃 목록을 수집할 blogId를 확인할 수 없습니다 (설정 또는 로그인 필요).", "ERROR")
+                    self.state_mgr.update(new_state=FeedState.ERROR, message="서로이웃 목록 확인 실패 (blogId 확인 불가)")
+                    return
+
+                self.state_mgr.update(message="서로이웃 목록 확인 중 (BuddyListManage)...")
+                buddy_result = BuddyListCollector.collect_all_buddies(
+                    page=relationship_page,
+                    blog_id=my_b_id,
+                    stop_event=self.stop_event,
+                )
+
+                if buddy_result.state == "failed":
+                    logger.log(f"❌ [NEIGHBOR_GUARD] 서로이웃 목록 수집 실패: state=failed, error={buddy_result.error}. 작업을 중단합니다.", "ERROR")
+                    self.state_mgr.update(new_state=FeedState.ERROR, message="서로이웃 목록 확인 실패")
+                    return
+
+                mutual_blog_ids = {
+                    b_id.lower()
+                    for b_id, info in buddy_result.buddies.items()
+                    if getattr(info, "buddy_type", "") == "서로이웃"
+                }
+                logger.log(f"✅ [NEIGHBOR_GUARD] 서로이웃 목록 수집 완료: 총 {len(mutual_blog_ids)}명 확보 (state={buddy_result.state}, total={buddy_result.collected_total})")
+
             seen_candidate_keys: Set[str] = set()
             attempted_post_keys: Set[str] = set()
             self.like_success_count = 0
@@ -413,7 +467,14 @@ class FeedController:
             self.failed_count = 0
             self.consecutive_gemini_failures = 0
             scroll_attempts = 0
-            max_candidate_scan = max_items * 5
+            max_candidate_scan = max(max_items * 15, 100) if (source_type == FeedSourceType.NEIGHBOR and neighbor_mutual_only) else max_items * 5
+
+            neighbor_cards_scanned = 0
+            neighbor_non_mutual_skipped = 0
+            neighbor_mutual_processed = 0
+            neighbor_already_liked = 0
+            neighbor_new_likes = 0
+            neighbor_unknown_state = 0
 
             logger.log("==================================================")
             logger.log(f"🤖 [ASSISTANT] 피드 작업 시작 (목표: 최대 {max_items}개)")
@@ -449,6 +510,20 @@ class FeedController:
 
                     seen_candidate_keys.add(post.key)
                     self.state_mgr.update(inc_candidate=True)
+
+                    # P0-7: 서로이웃이 아니면 상세 글에 들어가기 전에 즉시 스킵
+                    if source_type == FeedSourceType.NEIGHBOR and neighbor_mutual_only:
+                        neighbor_cards_scanned += 1
+                        post_b_id = (getattr(post, "blog_id", "") or "").strip().lower()
+                        if not post_b_id:
+                            neighbor_non_mutual_skipped += 1
+                            logger.log(f"  ⏭️ [NEIGHBOR_GUARD][SKIP_UNKNOWN] post={post.key} reason=relationship_unknown")
+                            continue
+                        if post_b_id not in mutual_blog_ids:
+                            neighbor_non_mutual_skipped += 1
+                            logger.log(f"  ⏭️ [NEIGHBOR_GUARD][SKIP_NON_MUTUAL] blog={post_b_id} post={post.key} reason=not_mutual")
+                            continue
+                        neighbor_mutual_processed += 1
 
                     # 컴포넌트 레벨 멱등성 검사 (Like와 Comment 독립 판단)
                     is_local_liked = (self.history.is_liked(post.key) is True)
@@ -565,6 +640,15 @@ class FeedController:
                         result = processor.process(detail_page, post, action_plan=action_plan)
                         self.history.record_result(result)
                         self._handle_post_result(result)
+
+                        if source_type == FeedSourceType.NEIGHBOR and neighbor_mutual_only:
+                            if hasattr(result, "like_result") and result.like_result:
+                                if result.like_result.state_before == LikeState.LIKED:
+                                    neighbor_already_liked += 1
+                                elif result.like_result.action_taken and result.like_result.state_after == LikeState.LIKED:
+                                    neighbor_new_likes += 1
+                                elif result.like_result.error == "low_confidence_skip" or result.like_result.state_after == LikeState.UNKNOWN:
+                                    neighbor_unknown_state += 1
                         while self.pause_event and self.pause_event.is_set() and not self.stop_event.is_set():
                             time.sleep(0.3)
                             cmd = self.command_bridge.pop_command() if self.command_bridge else None
@@ -673,6 +757,13 @@ class FeedController:
                     f"  - 건너뜀(스킵): {self.skipped_count}개 (결과불명 격리: {sub_unknown}개)\n"
                     f"  - 실패: {self.failed_count}개"
                 )
+                if source_type == FeedSourceType.NEIGHBOR and neighbor_mutual_only:
+                    logger.log(
+                        f"[NEIGHBOR_SWEEP_SUMMARY] scanned={neighbor_cards_scanned} "
+                        f"mutual={neighbor_mutual_processed} nonMutualSkipped={neighbor_non_mutual_skipped} "
+                        f"alreadyReacted={neighbor_already_liked} newLikes={neighbor_new_likes} "
+                        f"unknownState={neighbor_unknown_state}"
+                    )
                 final_close_reason = "completed"
 
         except StopRequestedException:

@@ -752,14 +752,19 @@ class CommentInteractionService:
             else:
                 origin = SubmitOrigin.USER_ENTER
 
-        from services.comments.community_rhythm import FinalQualityGate
-        sub_source = "user_edit" if origin == SubmitOrigin.USER_ENTER else "user_submission"
-        gate_res = FinalQualityGate.validate_final_text(final_text, preset=preset, source=sub_source)
-        if not gate_res.valid:
-            logger.log(f"  ❌ [COMMENT] 등록 직전 품질 게이트 실패로 제출을 중단합니다: [{gate_res.code}] {gate_res.reason} (매칭: {gate_res.matched})", "ERROR")
-            retryable = (origin in (SubmitOrigin.USER_ENTER, SubmitOrigin.AUTO_TIMER))
-            state = CommentSubmitState.PRECLICK_BLOCKED if retryable else CommentSubmitState.FAILED
-            return CommentSubmitOutcome(state=state, reason=gate_res.code, click_dispatched=False, retryable_same_post=retryable)
+        if origin != SubmitOrigin.NATIVE_CLICK:
+            from services.comments.community_rhythm import FinalQualityGate
+            sub_source = "user_edit" if origin == SubmitOrigin.USER_ENTER else "user_submission"
+            gate_res = FinalQualityGate.validate_final_text(final_text, preset=preset, source=sub_source)
+            if not gate_res.valid:
+                logger.log(f"  ❌ [COMMENT] 등록 직전 품질 게이트 실패로 제출을 중단합니다: [{gate_res.code}] {gate_res.reason} (매칭: {gate_res.matched})", "ERROR")
+                retryable = (origin in (SubmitOrigin.USER_ENTER, SubmitOrigin.AUTO_TIMER))
+                state = CommentSubmitState.PRECLICK_BLOCKED if retryable else CommentSubmitState.FAILED
+                return CommentSubmitOutcome(state=state, reason=gate_res.code, click_dispatched=False, retryable_same_post=retryable)
+        else:
+            logger.log(
+                "  ℹ️ [COMMENT][NATIVE_SUBMIT_VERIFY_ONLY] native click already occurred; final quality gate is not used as a blocker"
+            )
 
         editor_context = MobileDOMResolver.get_comment_editor_context(page)
         comment_frame = editor_context.get("frame") if editor_context else page.main_frame

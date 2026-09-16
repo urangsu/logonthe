@@ -255,12 +255,14 @@ class BrowserSession:
         user_data_dir: str = USER_DATA_DIR,
         viewport_width: int = 414,
         viewport_height: int = 680,
-        cdp_url: Optional[str] = None
+        cdp_url: Optional[str] = None,
+        stop_event: Optional[threading.Event] = None
     ):
         self.headless = headless
         self.user_data_dir = os.path.abspath(user_data_dir)
         self.viewport = {"width": viewport_width, "height": viewport_height}
         self.cdp_url = cdp_url
+        self.stop_event = stop_event
 
         self.playwright: Optional[Playwright] = None
         self.context: Optional[BrowserContext] = None
@@ -268,6 +270,13 @@ class BrowserSession:
         self.detail_page: Optional[Page] = None
         self.gemini_page: Optional[Page] = None
         self.stats_page: Optional[Page] = None
+        self._closed_fully: bool = False
+        self._is_closing: bool = False
+        self._closing_reason: str = "active"
+        self._context_closed: bool = False
+
+    def set_stop_event(self, stop_event: threading.Event):
+        self.stop_event = stop_event
 
     def start(self) -> BrowserContext:
         if self.cdp_url:
@@ -319,6 +328,21 @@ class BrowserSession:
             def _on_context_close():
                 self._context_closed = True
                 logger.log(f"[SESSION][CONTEXT_CLOSED] reason={self._closing_reason} expected={self._is_closing}")
+                if not self._is_closing:
+                    stop_req = bool(self.stop_event and self.stop_event.is_set())
+                    browser_conn = False
+                    try:
+                        browser_conn = bool(self.context and self.context.browser and self.context.browser.is_connected())
+                    except Exception:
+                        browser_conn = False
+                    feed_closed = bool(not self.feed_page or self.feed_page.is_closed())
+                    detail_closed = bool(not self.detail_page or self.detail_page.is_closed())
+                    logger.log(
+                        f"[SESSION][UNEXPECTED_CONTEXT_CLOSE] stop_requested={str(stop_req).lower()} "
+                        f"explicit_close=false browser_connected={str(browser_conn).lower()} "
+                        f"feed_closed={str(feed_closed).lower()} detail_closed={str(detail_closed).lower()}",
+                        "ERROR"
+                    )
 
             try:
                 self.context.on("close", _on_context_close)
@@ -467,8 +491,34 @@ class BrowserSession:
         return self.stats_page
 
     def close(self, reason: str = "completed"):
+        if getattr(self, "_closed_fully", False):
+            return
+        already_closed = bool(self._context_closed or not self.context or not self.is_context_alive())
         self._is_closing = True
         self._closing_reason = reason
+
+        if already_closed:
+            self.context = None
+            self.feed_page = None
+            self.detail_page = None
+            self.gemini_page = None
+            self.stats_page = None
+            try:
+                if self.playwright:
+                    self.playwright.stop()
+                    self.playwright = None
+            except Exception:
+                pass
+            deadline = time.time() + 2.0
+            while time.time() < deadline:
+                live_pid = ProfileLockManager.get_live_chromium_pid(self.user_data_dir)
+                if live_pid is None:
+                    break
+                time.sleep(0.2)
+            ProfileLockManager.release(self.user_data_dir)
+            self._closed_fully = True
+            logger.log(f"[SESSION][CLOSED] reason={reason} cleanup_only=true")
+            return
 
         try:
             if self.stats_page and not self.stats_page.is_closed():
@@ -499,4 +549,5 @@ class BrowserSession:
             time.sleep(0.2)
 
         ProfileLockManager.release(self.user_data_dir)
+        self._closed_fully = True
         logger.log(f"[SESSION][CLOSED] reason={reason}")

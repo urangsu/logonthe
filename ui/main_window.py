@@ -215,8 +215,34 @@ class MainWindow(ctk.CTk):
         self.direct_url_textbox.pack(fill="x", padx=6, pady=1)
         add_mac_clipboard_support(self.direct_url_textbox, self)
 
+        # 이웃 새글 전용 옵션 프레임
+        self.neighbor_options_frame = ctk.CTkFrame(tab_feed, fg_color="#1E293B", corner_radius=6)
+        n_opt_row = ctk.CTkFrame(self.neighbor_options_frame, fg_color="transparent")
+        n_opt_row.pack(fill="x", padx=6, pady=2)
+        ctk.CTkLabel(n_opt_row, text="이웃 옵션:", font=ctk.CTkFont(weight="bold", size=11), text_color="#38BDF8").pack(side="left", padx=(0, 4))
+
+        self.neighbor_mutual_only_var = ctk.BooleanVar(value=self.config_service.get("neighbor_mutual_only", True))
+        ctk.CTkCheckBox(n_opt_row, text="서로이웃만 처리", font=ctk.CTkFont(size=11), variable=self.neighbor_mutual_only_var).pack(side="left", padx=4)
+
+        self.neighbor_like_sweep_mode_var = ctk.BooleanVar(value=self.config_service.get("neighbor_like_sweep_mode", False))
+        self.chk_neighbor_sweep = ctk.CTkCheckBox(
+            n_opt_row, text="공감 훑기 모드 (댓글 미작성)", font=ctk.CTkFont(size=11),
+            variable=self.neighbor_like_sweep_mode_var,
+            command=self._on_neighbor_sweep_toggle
+        )
+        self.chk_neighbor_sweep.pack(side="left", padx=4)
+
+        self.lbl_neighbor_sweep_hint = ctk.CTkLabel(
+            self.neighbor_options_frame,
+            text="💡 서로이웃만 확인하여 미공감 새글에 공감하고 바로 다음 글로 이동합니다. 일반 이웃·관계 확인 불가 글은 즉시 건너뜁니다.",
+            font=ctk.CTkFont(size=10), text_color="#94A3B8"
+        )
+        self.lbl_neighbor_sweep_hint.pack(anchor="w", padx=8, pady=(0, 2))
+
         # 초기 뷰 상태 적용
-        if self.source_var.get() == FeedSourceType.TARGETED_SEARCH.value:
+        if self.source_var.get() == FeedSourceType.NEIGHBOR.value:
+            self.neighbor_options_frame.pack(fill="x", padx=4, pady=2)
+        elif self.source_var.get() == FeedSourceType.TARGETED_SEARCH.value:
             self.discovery_frame.pack(fill="x", padx=4, pady=2)
         elif self.source_var.get() == FeedSourceType.DIRECT.value:
             self.direct_url_frame.pack(fill="x", padx=4, pady=2)
@@ -719,15 +745,51 @@ class MainWindow(ctk.CTk):
             messagebox.showwarning("Gemini 연결 실패", msg)
             logger.log(f"[GEMINI/EXTENSION] 연결 실패: {diag.message}", "WARNING")
 
+    def _on_neighbor_sweep_toggle(self):
+        is_sweep = bool(self.neighbor_like_sweep_mode_var.get())
+        if is_sweep:
+            if not hasattr(self, "_saved_comment_mode"):
+                self._saved_comment_mode = self.comment_mode_var.get()
+            self.comment_mode_var.set("사용 안 함")
+            self.comment_enabled_var.set(False)
+            self.auto_comment_submit_var.set(False)
+            if hasattr(self, "comment_mode_seg"):
+                self.comment_mode_seg.configure(state="disabled")
+        else:
+            prev_mode = getattr(self, "_saved_comment_mode", "초안 검토")
+            self.comment_mode_var.set(prev_mode)
+            if prev_mode == "사용 안 함":
+                self.comment_enabled_var.set(False)
+                self.auto_comment_submit_var.set(False)
+            elif prev_mode == "초안 검토":
+                self.comment_enabled_var.set(True)
+                self.auto_comment_submit_var.set(False)
+            elif prev_mode == "자동 등록":
+                self.comment_enabled_var.set(True)
+                self.auto_comment_submit_var.set(True)
+            if hasattr(self, "comment_mode_seg"):
+                self.comment_mode_seg.configure(state="normal")
+
     def _on_source_change(self):
         val = self.source_var.get()
-        if val == FeedSourceType.TARGETED_SEARCH.value:
+        if val == FeedSourceType.NEIGHBOR.value:
+            if hasattr(self, "neighbor_options_frame"):
+                self.neighbor_options_frame.pack(fill="x", padx=4, pady=2)
+            self.discovery_frame.pack_forget()
+            self.direct_url_frame.pack_forget()
+        elif val == FeedSourceType.TARGETED_SEARCH.value:
+            if hasattr(self, "neighbor_options_frame"):
+                self.neighbor_options_frame.pack_forget()
             self.discovery_frame.pack(fill="x", padx=4, pady=2)
             self.direct_url_frame.pack_forget()
         elif val == FeedSourceType.DIRECT.value:
+            if hasattr(self, "neighbor_options_frame"):
+                self.neighbor_options_frame.pack_forget()
             self.discovery_frame.pack_forget()
             self.direct_url_frame.pack(fill="x", padx=4, pady=2)
         else:
+            if hasattr(self, "neighbor_options_frame"):
+                self.neighbor_options_frame.pack_forget()
             self.discovery_frame.pack_forget()
             self.direct_url_frame.pack_forget()
 
@@ -1098,6 +1160,8 @@ class MainWindow(ctk.CTk):
             "secret_comment": self.secret_comment_var.get(),
             "skip_on_comment_failure": self.skip_on_comment_failure_var.get(),
             "direct_urls": direct_urls,
+            "neighbor_mutual_only": self.neighbor_mutual_only_var.get() if hasattr(self, "neighbor_mutual_only_var") else True,
+            "neighbor_like_sweep_mode": self.neighbor_like_sweep_mode_var.get() if hasattr(self, "neighbor_like_sweep_mode_var") else False,
 
             "pacing_enabled": self.pacing_enabled_var.get(),
             "action_delay_min": act_min,
