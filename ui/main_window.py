@@ -5,7 +5,7 @@ import threading
 import webbrowser
 import tkinter as tk
 from tkinter import messagebox
-from typing import Optional
+from typing import Any, Optional
 import customtkinter as ctk
 
 from app.models import FeedSourceType, UserAction
@@ -17,7 +17,6 @@ from services.history import HistoryStore
 from services.draft import DraftService
 from services.contextual_draft import ContextualDraftEngine
 from services.clipboard_bridge import ClipboardCommandBridge
-from services.gemini_existing_chrome import ExistingChromeGeminiBridge
 from services.gemini_extension_bridge import GeminiExtensionBridge, GeminiBridgeHTTPServer
 from browser.session import ProfileLockManager, BrowserSession, USER_DATA_DIR
 from src.logger import logger
@@ -100,6 +99,8 @@ class MainWindow(ctk.CTk):
         self.pause_event = threading.Event()
         self.skip_event = threading.Event()
         self.worker_thread: Optional[threading.Thread] = None
+        self.reply_session: Optional[BrowserSession] = None
+        self.reply_page: Optional[Any] = None
 
         from services.runtime_contract import get_runtime_versions_summary
         cfg_dict = self.config_service.config.data if hasattr(self.config_service, "config") else {}
@@ -215,11 +216,12 @@ class MainWindow(ctk.CTk):
         self.direct_url_textbox.pack(fill="x", padx=6, pady=1)
         add_mac_clipboard_support(self.direct_url_textbox, self)
 
-        # 이웃 새글 전용 옵션 프레임
+        # 이웃 새글 전용 옵션 프레임 (항상 노출, 다른 소스에서는 비활성화 회색 상태)
         self.neighbor_options_frame = ctk.CTkFrame(tab_feed, fg_color="#1E293B", corner_radius=6)
         n_opt_row = ctk.CTkFrame(self.neighbor_options_frame, fg_color="transparent")
         n_opt_row.pack(fill="x", padx=6, pady=2)
-        ctk.CTkLabel(n_opt_row, text="이웃 옵션:", font=ctk.CTkFont(weight="bold", size=11), text_color="#38BDF8").pack(side="left", padx=(0, 4))
+        self.lbl_neighbor_opt_title = ctk.CTkLabel(n_opt_row, text="이웃 옵션:", font=ctk.CTkFont(weight="bold", size=11), text_color="#38BDF8")
+        self.lbl_neighbor_opt_title.pack(side="left", padx=(0, 4))
 
         self.neighbor_mutual_only_var = ctk.BooleanVar(value=self.config_service.get("neighbor_mutual_only", True))
         self.chk_neighbor_mutual = ctk.CTkCheckBox(n_opt_row, text="서로이웃만 처리", font=ctk.CTkFont(size=11), variable=self.neighbor_mutual_only_var)
@@ -241,14 +243,12 @@ class MainWindow(ctk.CTk):
         self.lbl_neighbor_sweep_hint.pack(anchor="w", padx=8, pady=(0, 2))
 
         # 초기 뷰 상태 적용
-        if self.source_var.get() == FeedSourceType.NEIGHBOR.value:
-            self.neighbor_options_frame.pack(fill="x", padx=4, pady=2)
-            if self.neighbor_like_sweep_mode_var.get():
-                self._apply_neighbor_sweep_ui(True)
-        elif self.source_var.get() == FeedSourceType.TARGETED_SEARCH.value:
+        if self.source_var.get() == FeedSourceType.TARGETED_SEARCH.value:
             self.discovery_frame.pack(fill="x", padx=4, pady=2)
         elif self.source_var.get() == FeedSourceType.DIRECT.value:
             self.direct_url_frame.pack(fill="x", padx=4, pady=2)
+
+        self.neighbor_options_frame.pack(fill="x", padx=4, pady=2)
 
         # 작업 옵션 행 (공감, 댓글, 비밀댓글, 실패 시 자동 스킵, 최대 글 수)
         opt_frame = ctk.CTkFrame(tab_feed, fg_color="transparent")
@@ -323,16 +323,8 @@ class MainWindow(ctk.CTk):
             variable=self.gemini_web_enabled_var, font=ctk.CTkFont(weight="bold", size=11), text_color="#38BDF8"
         ).pack(side="left", padx=2)
 
-        self.gemini_browser_mode_var = ctk.StringVar(value=self.config_service.get("gemini_browser_mode", "extension_existing_chrome"))
-        ctk.CTkRadioButton(
-            ai_head, text="일반 Chrome 확장 (권장)", font=ctk.CTkFont(size=10),
-            variable=self.gemini_browser_mode_var, value="extension_existing_chrome"
-        ).pack(side="left", padx=4)
-
-        ctk.CTkRadioButton(
-            ai_head, text="Apple Events", font=ctk.CTkFont(size=10),
-            variable=self.gemini_browser_mode_var, value="existing_chrome_mac"
-        ).pack(side="left", padx=4)
+        self.gemini_browser_mode_var = ctk.StringVar(value="extension_existing_chrome")
+        ctk.CTkLabel(ai_head, text="(Chrome 확장 연동)", font=ctk.CTkFont(size=10), text_color="#94A3B8").pack(side="left", padx=4)
 
         ctk.CTkButton(
             ai_head, text="확장 연결 테스트", height=20, font=ctk.CTkFont(size=10),
@@ -472,18 +464,11 @@ class MainWindow(ctk.CTk):
         suffix_box = ctk.CTkFrame(tmpl_frame, fg_color="transparent")
         suffix_box.pack(fill="x", padx=6, pady=(1, 2))
 
-        ctk.CTkLabel(suffix_box, text="일반 꼬리말:", font=ctk.CTkFont(size=11)).pack(side="left", padx=(0, 2))
-        self.general_suffix_entry = ctk.CTkEntry(suffix_box, font=ctk.CTkFont(size=11), width=240, height=20)
+        ctk.CTkLabel(suffix_box, text="꼬리말:", font=ctk.CTkFont(size=11)).pack(side="left", padx=(0, 2))
+        self.general_suffix_entry = ctk.CTkEntry(suffix_box, font=ctk.CTkFont(size=11), width=350, height=20)
         self.general_suffix_entry.pack(side="left", padx=2)
         self.general_suffix_entry.insert(0, self.config_service.get("general_suffix", self.config_service.get("fixed_suffix", "")))
         add_mac_clipboard_support(self.general_suffix_entry, self)
-
-        self.recom_suffix_chk_var = ctk.BooleanVar(value=self.config_service.get("recommendation_suffix_enabled", False))
-        ctk.CTkCheckBox(suffix_box, text="추천 피드 전용 꼬리말:", variable=self.recom_suffix_chk_var, font=ctk.CTkFont(size=11)).pack(side="left", padx=(8, 2))
-        self.recom_suffix_entry = ctk.CTkEntry(suffix_box, font=ctk.CTkFont(size=11), width=240, height=20)
-        self.recom_suffix_entry.pack(side="left", padx=2)
-        self.recom_suffix_entry.insert(0, self.config_service.get("recommendation_suffix", ""))
-        add_mac_clipboard_support(self.recom_suffix_entry, self)
 
         # 3. Pacing Settings
         pacing_frame = ctk.CTkFrame(tab_settings)
@@ -701,6 +686,9 @@ class MainWindow(ctk.CTk):
         self.log_textbox.pack(fill="both", expand=True, padx=6, pady=(1, 3))
         add_mac_clipboard_support(self.log_textbox, self)
 
+        # Apply dependent state only after all controls have been constructed.
+        self._update_neighbor_options_state(self.source_var.get() == FeedSourceType.NEIGHBOR.value)
+
     def _refine_current_comment(self, mode: str = "alternate"):
         """현재 글의 맥락을 기반으로 다른 스타일/길이의 댓글을 즉시 생성하여 에디터에 적용"""
         snapshot = self.state_mgr.get_snapshot()
@@ -764,8 +752,9 @@ class MainWindow(ctk.CTk):
             self.neighbor_mutual_only_var.set(True)
             if hasattr(self, "chk_neighbor_mutual"):
                 self.chk_neighbor_mutual.configure(state="disabled")
-        else:
-            prev_mode = getattr(self, "_saved_comment_mode", "초안 검토")
+        elif hasattr(self, "_saved_comment_mode"):
+            prev_mode = self._saved_comment_mode
+            del self._saved_comment_mode
             self.comment_mode_var.set(prev_mode)
             if prev_mode == "사용 안 함":
                 self.comment_enabled_var.set(False)
@@ -781,6 +770,8 @@ class MainWindow(ctk.CTk):
 
             # 서로이웃 잠금 해제 및 이전 설정 복원
             prev_mutual = getattr(self, "_saved_mutual_only", True)
+            if hasattr(self, "_saved_mutual_only"):
+                del self._saved_mutual_only
             self.neighbor_mutual_only_var.set(prev_mutual)
             if hasattr(self, "chk_neighbor_mutual"):
                 self.chk_neighbor_mutual.configure(state="normal")
@@ -789,29 +780,55 @@ class MainWindow(ctk.CTk):
         is_sweep = bool(self.neighbor_like_sweep_mode_var.get())
         self._apply_neighbor_sweep_ui(is_sweep)
 
-    def _on_source_change(self):
-        val = self.source_var.get()
-        if val == FeedSourceType.NEIGHBOR.value:
-            if hasattr(self, "neighbor_options_frame"):
-                self.neighbor_options_frame.pack(fill="x", padx=4, pady=2)
-            self.discovery_frame.pack_forget()
-            self.direct_url_frame.pack_forget()
-            if bool(self.neighbor_like_sweep_mode_var.get()):
+    def _update_neighbor_options_state(self, is_neighbor: bool):
+        if not hasattr(self, "neighbor_options_frame"):
+            return
+        if is_neighbor:
+            if hasattr(self, "lbl_neighbor_opt_title"):
+                self.lbl_neighbor_opt_title.configure(text_color="#38BDF8")
+            if hasattr(self, "chk_neighbor_sweep"):
+                self.chk_neighbor_sweep.configure(state="normal")
+            if hasattr(self, "lbl_neighbor_sweep_hint"):
+                self.lbl_neighbor_sweep_hint.configure(text_color="#94A3B8")
+            if hasattr(self, "chk_neighbor_mutual"):
+                is_sweep = bool(self.neighbor_like_sweep_mode_var.get()) if hasattr(self, "neighbor_like_sweep_mode_var") else False
+                if is_sweep:
+                    self.chk_neighbor_mutual.configure(state="disabled")
+                else:
+                    self.chk_neighbor_mutual.configure(state="normal")
+            if bool(self.neighbor_like_sweep_mode_var.get()) if hasattr(self, "neighbor_like_sweep_mode_var") else False:
                 self._apply_neighbor_sweep_ui(True)
         else:
-            # 이웃 새글이 아니면 sweep 잠금을 해제하여 기존 댓글 모드 복원
             self._apply_neighbor_sweep_ui(False)
+            if hasattr(self, "lbl_neighbor_opt_title"):
+                self.lbl_neighbor_opt_title.configure(text_color="#64748B")
+            if hasattr(self, "chk_neighbor_mutual"):
+                self.chk_neighbor_mutual.configure(state="disabled")
+            if hasattr(self, "chk_neighbor_sweep"):
+                self.chk_neighbor_sweep.configure(state="disabled")
+            if hasattr(self, "lbl_neighbor_sweep_hint"):
+                self.lbl_neighbor_sweep_hint.configure(text_color="#475569")
+
+    def _on_source_change(self):
+        val = self.source_var.get()
+        is_neighbor = (val == FeedSourceType.NEIGHBOR.value)
+        self._update_neighbor_options_state(is_neighbor)
+
+        if val == FeedSourceType.TARGETED_SEARCH.value:
             if hasattr(self, "neighbor_options_frame"):
-                self.neighbor_options_frame.pack_forget()
-            if val == FeedSourceType.TARGETED_SEARCH.value:
-                self.discovery_frame.pack(fill="x", padx=4, pady=2)
-                self.direct_url_frame.pack_forget()
-            elif val == FeedSourceType.DIRECT.value:
-                self.discovery_frame.pack_forget()
-                self.direct_url_frame.pack(fill="x", padx=4, pady=2)
+                self.discovery_frame.pack(fill="x", padx=4, pady=2, before=self.neighbor_options_frame)
             else:
-                self.discovery_frame.pack_forget()
-                self.direct_url_frame.pack_forget()
+                self.discovery_frame.pack(fill="x", padx=4, pady=2)
+            self.direct_url_frame.pack_forget()
+        elif val == FeedSourceType.DIRECT.value:
+            self.discovery_frame.pack_forget()
+            if hasattr(self, "neighbor_options_frame"):
+                self.direct_url_frame.pack(fill="x", padx=4, pady=2, before=self.neighbor_options_frame)
+            else:
+                self.direct_url_frame.pack(fill="x", padx=4, pady=2)
+        else:
+            self.discovery_frame.pack_forget()
+            self.direct_url_frame.pack_forget()
 
     def _get_learning_stats_text(self) -> str:
         try:
@@ -1174,8 +1191,6 @@ class MainWindow(ctk.CTk):
             "comment_template": self.tmpl_textbox.get("1.0", "end-1c").strip(),
             "general_suffix": self.general_suffix_entry.get().strip(),
             "fixed_suffix": self.general_suffix_entry.get().strip(),
-            "recommendation_suffix_enabled": self.recom_suffix_chk_var.get(),
-            "recommendation_suffix": self.recom_suffix_entry.get().strip(),
             "comment_style_preset": self.comment_style_preset_var.get(),
             "secret_comment": self.secret_comment_var.get(),
             "skip_on_comment_failure": self.skip_on_comment_failure_var.get(),
@@ -1360,49 +1375,55 @@ class MainWindow(ctk.CTk):
         loading_lbl.pack(pady=20)
 
         def worker():
-            from playwright.sync_api import sync_playwright
             from services.my_blog_comment_thread_collector import MyBlogCommentThreadCollector
-            from config import get_browser_user_data_dir
+            from browser.session import BrowserSession
 
             result = None
             post_excerpt = ""
             post_excerpt_expanded = ""
 
             try:
-                # P0-3: persistent user_data_dir 기반의 인증 세션 활용
-                user_data_dir = get_browser_user_data_dir()
-                with sync_playwright() as p:
-                    context = p.chromium.launch_persistent_context(
-                        user_data_dir=user_data_dir,
-                        headless=True,
-                        viewport={"width": 430, "height": 900},
-                        user_agent="Mozilla/5.0 (iPhone; CPU iPhone OS 16_5 like Mac OS X) AppleWebKit/605.1.15"
+                if self.reply_session is None or getattr(self.reply_session, "_closed_fully", False) or not getattr(self.reply_session, "context", None):
+                    self.reply_session = BrowserSession(
+                        headless=False,
+                        viewport_width=430,
+                        viewport_height=900,
+                        stop_event=self.stop_event
                     )
-                    page = context.new_page()
+                    self.reply_session.start()
 
-                    # P0-8: 실제 글 본문 수집 (1500자 기본 / 3000자 확장)
-                    post_url = f"https://m.blog.naver.com/{blog_id}/{log_no}"
-                    page.goto(post_url, wait_until="domcontentloaded", timeout=15000)
-                    page.wait_for_timeout(1000)
+                if not self.reply_page or getattr(self.reply_page, "is_closed", lambda: True)():
+                    if self.reply_session.context and self.reply_session.context.pages:
+                        self.reply_page = self.reply_session.context.pages[0]
+                    elif self.reply_session.context:
+                        self.reply_page = self.reply_session.context.new_page()
 
-                    try:
-                        raw_body = page.evaluate("""() => {
-                            const ct = document.querySelector(".se-main-container, #postViewArea, .post_ct, .se_component_wrap");
-                            return ct ? ct.innerText : document.body.innerText;
-                        }""")
-                        clean_body = re.sub(r"\s+", " ", raw_body or "").strip()
-                        post_excerpt = clean_body[:1600]
-                        post_excerpt_expanded = clean_body[:3200]
-                    except Exception as e:
-                        logger.log(f"[REPLY_UI] 본문 추출 참고: {e}", "INFO")
+                page = self.reply_page
+                if not page:
+                    raise RuntimeError("답글 브라우저 페이지를 열 수 없습니다.")
 
-                    # 댓글 스레드 수집
-                    result = MyBlogCommentThreadCollector.collect_threads(
-                        page, blog_id, log_no,
-                        stop_event=self.stop_event,
-                        expected_comment_count=post_item.get("comment_count")
-                    )
-                    context.close()
+                # P0-8: 실제 글 본문 수집 (1500자 기본 / 3000자 확장)
+                post_url = f"https://m.blog.naver.com/{blog_id}/{log_no}"
+                page.goto(post_url, wait_until="domcontentloaded", timeout=15000)
+                page.wait_for_timeout(1000)
+
+                try:
+                    raw_body = page.evaluate("""() => {
+                        const ct = document.querySelector(".se-main-container, #postViewArea, .post_ct, .se_component_wrap");
+                        return ct ? ct.innerText : document.body.innerText;
+                    }""")
+                    clean_body = re.sub(r"\s+", " ", raw_body or "").strip()
+                    post_excerpt = clean_body[:1600]
+                    post_excerpt_expanded = clean_body[:3200]
+                except Exception as e:
+                    logger.log(f"[REPLY_UI] 본문 추출 참고: {e}", "INFO")
+
+                # 댓글 스레드 수집
+                result = MyBlogCommentThreadCollector.collect_threads(
+                    page, blog_id, log_no,
+                    stop_event=self.stop_event,
+                    expected_comment_count=post_item.get("comment_count")
+                )
             except Exception as e:
                 logger.log(f"[REPLY_UI] 댓글 스레드 수집 실패: {e}", "ERROR")
 
@@ -1667,6 +1688,11 @@ class MainWindow(ctk.CTk):
 
     def _on_close(self):
         self.stop_event.set()
+        if getattr(self, "reply_session", None):
+            try:
+                self.reply_session.stop()
+            except Exception:
+                pass
         try:
             self.gemini_bridge_server.stop()
         finally:
@@ -1678,4 +1704,3 @@ if __name__ == "__main__":
     app = MainWindow()
     install_log_clipboard_support(app)
     app.mainloop()
-

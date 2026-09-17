@@ -43,19 +43,62 @@ def load_runtime_contract() -> RuntimeContract:
 
 
 def get_python_git_commit() -> str:
-    """현재 Python 코드의 Git 커밋 해시(단축 7자리) 반환"""
+    """현재 Python 코드의 Git 커밋 해시(단축 7자리) 반환 (Fail-Safe)"""
+    import shutil
+    import subprocess
+
+    candidate_bins = []
+    found_bin = shutil.which("git")
+    if found_bin:
+        candidate_bins.append(found_bin)
+    for p in ("/opt/homebrew/bin/git", "/usr/local/bin/git", "/usr/bin/git"):
+        if p not in candidate_bins and os.path.exists(p):
+            candidate_bins.append(p)
+
+    for git_bin in candidate_bins:
+        try:
+            out = subprocess.check_output(
+                [git_bin, "rev-parse", "--short", "HEAD"],
+                cwd=WORKSPACE_DIR,
+                stderr=subprocess.DEVNULL,
+                timeout=2.0,
+            ).decode("utf-8").strip()
+            if out and len(out) >= 7:
+                return out[:7]
+        except Exception:
+            continue
+
+    # Fallback: parse .git/HEAD directly without git binary
     try:
-        import subprocess
-        out = subprocess.check_output(
-            ["git", "rev-parse", "--short", "HEAD"],
-            cwd=WORKSPACE_DIR,
-            stderr=subprocess.DEVNULL
-        ).decode("utf-8").strip()
-        if out:
-            return out
+        git_dir = os.path.join(WORKSPACE_DIR, ".git")
+        head_file = os.path.join(git_dir, "HEAD")
+        if os.path.exists(head_file):
+            with open(head_file, "r", encoding="utf-8") as hf:
+                head_content = hf.read().strip()
+            if head_content.startswith("ref:"):
+                ref_path = head_content.split(":", 1)[1].strip()
+                ref_file = os.path.join(git_dir, ref_path)
+                if os.path.exists(ref_file):
+                    with open(ref_file, "r", encoding="utf-8") as rf:
+                        commit_hash = rf.read().strip()
+                    if commit_hash:
+                        return commit_hash[:7]
+                # Check packed-refs
+                packed_refs_file = os.path.join(git_dir, "packed-refs")
+                if os.path.exists(packed_refs_file):
+                    with open(packed_refs_file, "r", encoding="utf-8") as prf:
+                        for line in prf:
+                            line = line.strip()
+                            if line and not line.startswith("#") and not line.startswith("^"):
+                                parts = line.split()
+                                if len(parts) == 2 and parts[1] == ref_path:
+                                    return parts[0][:7]
+            elif len(head_content) >= 7:
+                return head_content[:7]
     except Exception:
         pass
-    return "a924dcf"
+
+    return "unknown"
 
 
 def get_runtime_versions_summary(config: Optional[dict] = None) -> dict[str, str]:

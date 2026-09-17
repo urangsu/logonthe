@@ -156,13 +156,15 @@ class MyBlogReplyService:
     @classmethod
     def generate_replies(
         cls,
-        gemini_bridge: Any,
-        post_title: str,
-        post_excerpt: str,
-        target_comments: List[Dict[str, str]],
+        gemini_bridge: Any = None,
+        post_title: str = "",
+        post_excerpt: str = "",
+        target_comments: Optional[List[Dict[str, str]]] = None,
         stop_event: Optional[Any] = None,
         batch_size: int = 12,
         expanded_post_excerpt: Optional[str] = None,
+        comments: Optional[List[Dict[str, str]]] = None,
+        bridge: Any = None,
     ) -> Dict[str, Dict[str, str]]:
         """
         미답글 대상 배치 추천 답글 생성:
@@ -171,18 +173,30 @@ class MyBlogReplyService:
         - 누락/실패 항목만 새 request_id로 선별 1회 retry
         - P0-8: NEED_MORE_CONTEXT 항목은 expanded_post_excerpt로 1회 재시도
         """
+        actual_bridge = bridge if bridge is not None else gemini_bridge
+        actual_comments = comments if comments is not None else (target_comments or [])
         final_replies: Dict[str, Dict[str, str]] = {}
-        if not target_comments or not gemini_bridge:
+        if not actual_comments or not actual_bridge:
             return final_replies
 
-        total_batches = (len(target_comments) + batch_size - 1) // batch_size
-        logger.log(f"[REPLY_SERVICE] 답글 생성 시작: 총 {len(target_comments)}개 댓글, {total_batches}개 배치")
+        # Preflight 점검 (Chrome 확장이 준비되지 않았으면 즉시 중단)
+        if hasattr(actual_bridge, "preflight_status"):
+            try:
+                preflight = actual_bridge.preflight_status()
+                if isinstance(preflight, dict) and not preflight.get("ready", True):
+                    logger.log(f"[REPLY_SERVICE] Gemini 브릿지 준비 안 됨: {preflight.get('reason')}", "WARNING")
+                    return final_replies
+            except Exception as e:
+                logger.log(f"[REPLY_SERVICE] 사전점검 확인 실패: {e}", "WARNING")
+
+        total_batches = (len(actual_comments) + batch_size - 1) // batch_size
+        logger.log(f"[REPLY_SERVICE] 답글 생성 시작: 총 {len(actual_comments)}개 댓글, {total_batches}개 배치")
 
         for b_idx in range(total_batches):
             if stop_event and stop_event.is_set():
                 break
 
-            batch_slice = target_comments[b_idx * batch_size : (b_idx + 1) * batch_size]
+            batch_slice = actual_comments[b_idx * batch_size : (b_idx + 1) * batch_size]
             prompt = cls.build_batch_prompt(post_title, post_excerpt, batch_slice)
             req_id = f"reply_{uuid.uuid4().hex[:8]}"
 
@@ -198,8 +212,12 @@ class MyBlogReplyService:
                     prompt=prompt,
                     request_id=req_id,
                 )
-                gemini_bridge.publish(cmd)
-                result = gemini_bridge.wait_for_result(cmd, stop_event=stop_event)
+                published = actual_bridge.publish(cmd)
+                if not published:
+                    logger.log(f"[REPLY_SERVICE] 명령 발행 실패 (rid={req_id})", "WARNING")
+                    break
+
+                result = actual_bridge.wait_for_result(cmd, stop_event=stop_event)
 
                 if result and result.status == GeminiResultStatus.COMPLETED:
                     items = cls.parse_batch_response(result.text)
@@ -242,7 +260,7 @@ class MyBlogReplyService:
         ]
         if need_context_ids and expanded_post_excerpt:
             logger.log(f"[REPLY_SERVICE] NEED_MORE_CONTEXT {len(need_context_ids)}건 감지 -> 본문 확장(길이 {len(expanded_post_excerpt)}자) 재시도")
-            retry_targets = [c for c in target_comments if str(c.get("comment_no", "")).strip() in need_context_ids]
+            retry_targets = [c for c in actual_comments if str(c.get("comment_no", "")).strip() in need_context_ids]
             retry_prompt = cls.build_batch_prompt(post_title, expanded_post_excerpt, retry_targets)
             retry_req_id = f"reply_ctx_expand_{uuid.uuid4().hex[:8]}"
             retry_cmd = GeminiCommand.create(
@@ -251,26 +269,18 @@ class MyBlogReplyService:
                 prompt=retry_prompt,
                 request_id=retry_req_id,
             )
-            gemini_bridge.publish(retry_cmd)
-            retry_res = gemini_bridge.wait_for_result(retry_cmd, stop_event=stop_event)
-            if retry_res and retry_res.status == GeminiResultStatus.COMPLETED:
-                retry_items = cls.parse_batch_response(retry_res.text)
-                for it in retry_items:
-                    c_no = str(it.get("comment_no", "")).strip()
-                    if c_no in need_context_ids and it.get("status") == "REPLY":
-                        final_replies[c_no] = {
-                            "status": "REPLY",
-                            "reply": it.get("reply", "")
-                        }
-                        logger.log(f"[REPLY_SERVICE] 본문 확장 후 답글 해결 성공: comment_no={c_no}")
-
-        # 미해결된 항목은 UNRESOLVED 처리
-        for c in target_comments:
-            c_no = str(c.get("comment_no", "")).strip()
-            if c_no not in final_replies:
-                final_replies[c_no] = {
-                    "status": "UNRESOLVED",
-                    "reply": ""
-                }
+            pub_ok = actual_bridge.publish(retry_cmd)
+            if pub_ok:
+                retry_res = actual_bridge.wait_for_result(retry_cmd, stop_event=stop_event)
+                if retry_res and retry_res.status == GeminiResultStatus.COMPLETED:
+                    retry_items = cls.parse_batch_response(retry_res.text)
+                    for it in retry_items:
+                        c_no = str(it.get("comment_no", "")).strip()
+                        if c_no in need_context_ids and it.get("status") == "REPLY":
+                            final_replies[c_no] = {
+                                "status": "REPLY",
+                                "reply": it.get("reply", "")
+                            }
+                            logger.log(f"[REPLY_SERVICE] 본문 확장 후 답글 해결 성공: comment_no={c_no}")
 
         return final_replies

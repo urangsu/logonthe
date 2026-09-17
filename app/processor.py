@@ -363,6 +363,7 @@ class PostProcessor:
         self._contamination_retry_done = False
         self._food_anchor_retry_done = False
         self._quality_body_retry_done = False
+        self._gemini_auto_repair_done = False
         # TargetPostGuard: 대상 글 일치 여부 확인 (Fail-Open 원천 차단)
         TargetPostGuard.verify(detail_page, post)
 
@@ -713,15 +714,13 @@ class PostProcessor:
                                             result.comment_result = CommentProcessResult(status=CommentSubmitState.SKIPPED, error="user_skipped")
                                             return result
 
-                                    command_created_at = time.time()
                                     gemini_timeout = float(self.config.get("gemini_response_timeout", 55.0))
-                                    command = GeminiCommand(
-                                        request_id=request_id,
+                                    command = GeminiCommand.create(
                                         post_key=post.key,
                                         navigation_version=navigation_version,
                                         prompt=ai_prompt,
-                                        created_at=command_created_at,
-                                        deadline_at=command_created_at + gemini_timeout,
+                                        request_id=request_id,
+                                        timeout_seconds=gemini_timeout,
                                     )
                                     if not self.gemini_extension_bridge.publish(command, stop_event=self.stop_event, skip_event=self.skip_event):
                                         if self.skip_event and self.skip_event.is_set():

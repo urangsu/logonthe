@@ -94,15 +94,13 @@ class DraftService:
         return text
 
     @classmethod
-    def resolve_suffix(cls, source: FeedSourceType, config) -> str:
-        """피드 소스 종류(이웃/추천/직접)에 따른 전용 꼬리말 반환 (V13.1 기본값은 빈 문자열)"""
-        if source == FeedSourceType.RECOMMENDATION:
-            if config.get("recommendation_suffix_enabled", False):
-                return config.get("recommendation_suffix", "").strip()
-            return ""
-
-        # 이웃 새글 및 직접 입력 피드
-        return config.get("general_suffix", config.get("fixed_suffix", "")).strip()
+    def resolve_suffix(cls, source=None, config=None, **kwargs) -> str:
+        """피드 소스 구분 없이 단일 꼬리말 반환 (general_suffix / fixed_suffix / suffix 통합)"""
+        cfg = config if config is not None else (source if isinstance(source, dict) else kwargs.get("config", {}))
+        if isinstance(cfg, dict) or hasattr(cfg, "get"):
+            val = cfg.get("general_suffix") or cfg.get("fixed_suffix") or cfg.get("suffix") or ""
+            return str(val)
+        return ""
 
     @classmethod
     def compose_body_and_suffix(cls, body: str, suffix: str = "") -> str:

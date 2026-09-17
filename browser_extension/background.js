@@ -382,22 +382,44 @@ async function runCommandCycle() {
       if (!inFlightCommandResolvers.has(command.requestId)) { clearInterval(keepAliveInterval); return; }
       try { chrome.runtime.getPlatformInfo(() => {}); } catch (_) {}
     }, 4500);
+    let cancelCheckInterval = null;
+    const cleanupAndResolve = (result) => {
+      if (cancelCheckInterval) { clearInterval(cancelCheckInterval); cancelCheckInterval = null; }
+      if (keepAliveInterval) { clearInterval(keepAliveInterval); }
+      if (timer) { clearTimeout(timer); }
+      inFlightCommandResolvers.delete(command.requestId);
+      resolve(result);
+    };
     const timer = setTimeout(() => {
       if (inFlightCommandResolvers.has(command.requestId)) {
-        clearInterval(keepAliveInterval); inFlightCommandResolvers.delete(command.requestId); trackCancelledRequestId(command.requestId);
+        trackCancelledRequestId(command.requestId);
         try { chrome.tabs.sendMessage(activeRuntime.tabId, { type: 'NFA_CANCEL_COMMAND', requestId: command.requestId }, () => {}); } catch (_) {}
-        resolve({ status: 'timeout', text: '', error: 'command_deadline_exceeded' });
+        cleanupAndResolve({ status: 'timeout', text: '', error: 'command_deadline_exceeded' });
       }
     }, timeoutMs);
-    inFlightCommandResolvers.set(command.requestId, { resolve, timer, keepAliveInterval, commandMetadata: { requestId: command.requestId, postKey: command.postKey, navigationVersion: command.navigationVersion } });
+    cancelCheckInterval = setInterval(async () => {
+      if (!inFlightCommandResolvers.has(command.requestId)) {
+        if (cancelCheckInterval) clearInterval(cancelCheckInterval);
+        return;
+      }
+      try {
+        const cancelCheck = await bridgeFetch(`/v1/cancel?requestId=${encodeURIComponent(command.requestId)}`, 'GET', null, 800);
+        if (cancelCheck?.cancelled && inFlightCommandResolvers.has(command.requestId)) {
+          trackCancelledRequestId(command.requestId);
+          try {
+            chrome.tabs.sendMessage(activeRuntime.tabId, { type: 'NFA_CANCEL_COMMAND', requestId: command.requestId }, () => {});
+          } catch (_) {}
+          cleanupAndResolve({ status: 'failed', text: '', error: 'cancelled' });
+        }
+      } catch (_) {}
+    }, 400);
+    inFlightCommandResolvers.set(command.requestId, { resolve: cleanupAndResolve, timer, keepAliveInterval, cancelCheckInterval, commandMetadata: { requestId: command.requestId, postKey: command.postKey, navigationVersion: command.navigationVersion } });
     command.tabId = freshCheck.tabId || activeRuntime.tabId;
     command.contentInstanceId = freshCheck.contentInstanceId;
     command.conversationEpoch = freshCheck.conversationEpoch;
     chrome.tabs.sendMessage(activeRuntime.tabId, { type: 'NFA_EXECUTE_COMMAND', command }, res => {
       if (chrome.runtime.lastError || !res?.ok) {
-        const inFlight = inFlightCommandResolvers.get(command.requestId);
-        if (inFlight) { if (inFlight.timer) clearTimeout(inFlight.timer); if (inFlight.keepAliveInterval) clearInterval(inFlight.keepAliveInterval); inFlightCommandResolvers.delete(command.requestId); }
-        resolve({ status: 'failed', text: '', error: chrome.runtime.lastError?.message || 'failed_to_start_command' });
+        cleanupAndResolve({ status: 'failed', text: '', error: chrome.runtime.lastError?.message || 'failed_to_start_command' });
       }
     });
   });
@@ -491,6 +513,7 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
     if (inFlight) {
       if (inFlight.timer) clearTimeout(inFlight.timer);
       if (inFlight.keepAliveInterval) clearInterval(inFlight.keepAliveInterval);
+      if (inFlight.cancelCheckInterval) clearInterval(inFlight.cancelCheckInterval);
       inFlightCommandResolvers.delete(message.requestId);
       inFlight.resolve(message.result);
     } else {

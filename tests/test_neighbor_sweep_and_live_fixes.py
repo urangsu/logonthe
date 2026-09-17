@@ -527,6 +527,7 @@ class TestNeighborSweepUI(unittest.TestCase):
                 # Bind actual methods
                 win._apply_neighbor_sweep_ui = MainWindow._apply_neighbor_sweep_ui.__get__(win)
                 win._on_neighbor_sweep_toggle = MainWindow._on_neighbor_sweep_toggle.__get__(win)
+                win._update_neighbor_options_state = MainWindow._update_neighbor_options_state.__get__(win)
                 win._on_source_change = MainWindow._on_source_change.__get__(win)
 
                 win.comment_mode_var.get.return_value = "초안 검토"
@@ -548,7 +549,7 @@ class TestNeighborSweepUI(unittest.TestCase):
 
                 win.comment_mode_var.set.assert_called_with("초안 검토")
                 win.comment_mode_seg.configure.assert_called_with(state="normal")
-                win.chk_neighbor_mutual.configure.assert_called_with(state="normal")
+                win.chk_neighbor_mutual.configure.assert_called_with(state="disabled")
 
                 # 3. Source changed back to neighbor -> re-locks because sweep mode var was True
                 win.source_var.get.return_value = FeedSourceType.NEIGHBOR.value

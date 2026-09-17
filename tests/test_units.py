@@ -204,7 +204,7 @@ class TestDraftServiceSuffix(unittest.TestCase):
         self.assertEqual(s_neigh, "오늘도 좋은 하루 보내세요 :)")
 
         s_recom = DraftService.resolve_suffix(FeedSourceType.RECOMMENDATION, cfg)
-        self.assertEqual(s_recom, "시간 되실 때 제 블로그에도 편하게 한 번 놀러 와주세요 :)")
+        self.assertEqual(s_recom, "오늘도 좋은 하루 보내세요 :)")
 
     def test_compose_body_and_suffix(self):
         res = DraftService.compose_body_and_suffix("사진이 너무 예쁘네요!", "오늘도 좋은 하루 보내세요 :)")
