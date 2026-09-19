@@ -27,6 +27,7 @@ from services.draft import DraftService
 from services.contextual_draft import ContextualDraftEngine
 from services.like_eligibility import LikeEligibilityService, LikeEligibility
 from services.like_transaction import LikeTransactionService, LikeConfidence, LikeCircuitBreaker
+from services.food_comment_focus import FoodCommentFocus
 from services.ai_prompt import AIPromptBuilder
 from services.clipboard_bridge import ClipboardCommandBridge
 from services.gemini_web import GeminiWebBridge
@@ -258,6 +259,77 @@ class PostProcessor:
         self.comment_enabled = bool(comment_enabled or self.auto_comment_submit_enabled)
         self._processed_post_keys: set[str] = set()
 
+    def _prepare_comment_generation_context(
+        self,
+        post: FeedPost,
+        action_plan: Optional[PostActionPlan] = None,
+        preset: Optional[str] = None,
+        request_id: Optional[str] = None
+    ) -> Tuple[GenerationContext, str, str, str, str]:
+        preset = preset or self.config.get("comment_style_preset", "community")
+        suffix = DraftService.resolve_suffix(post.source, self.config)
+
+        from services.food_comment_focus import FoodCommentFocus
+        food_focus_info = FoodCommentFocus.analyze(post.title or "", post.excerpt or "")
+        content_focus = food_focus_info["focus"]
+        food_anchors = food_focus_info["food_anchors"]
+        sec_anchors = food_focus_info.get("secondary_anchors", [])
+        if content_focus != "GENERAL":
+            logger.log(f"[FOOD_FOCUS] focus={content_focus} anchors={food_anchors[:3]} secondary={sec_anchors[:3]}")
+
+        recent_submits = []
+        if self.history_store and hasattr(self.history_store, "get_recent_submitted_comments"):
+            recent_submits = self.history_store.get_recent_submitted_comments(limit=5)
+
+        from services.user_learning_service import UserLearningService
+        corpus_examples, corpus_stats, style_profile = UserLearningService.get_learning_context(
+            category=content_focus,
+            anchors=food_anchors,
+            limit=2,
+        )
+
+        style_plan = (action_plan.style_plan if action_plan else None)
+        gen_ctx = GenerationContext(
+            title=post.title or "",
+            excerpt=post.excerpt or "",
+            preset=preset,
+            style=self.ai_prompt_style,
+            content_focus=content_focus,
+            verified_anchors=food_anchors,
+            secondary_anchors=sec_anchors,
+            style_plan=style_plan,
+            recent_comments=recent_submits,
+            corpus_examples=corpus_examples,
+            style_profile=style_profile,
+            corpus_stats=corpus_stats,
+            max_attempts=3,
+        )
+
+        req_id = request_id or uuid.uuid4().hex
+        ai_prompt = ""
+        if self.ai_clipboard_enabled or self.gemini_web_enabled:
+            ai_prompt = gen_ctx.build_prompt(request_id=req_id)
+            prompt_ver = getattr(AIPromptBuilder, "PROMPT_VERSION", "2.1.0-personalized")
+            stats = gen_ctx.corpus_stats or {}
+            logger.log(
+                f"  📝 [PROMPT] version={prompt_ver} "
+                f"raw_corpus_count={stats.get('total_raw', 0)} "
+                f"cleaned_corpus_count={stats.get('cleaned', 0)} "
+                f"user_edit_count={stats.get('user_edits', 0)} "
+                f"referenced_examples={stats.get('referenced', len(gen_ctx.corpus_examples))} "
+                f"recent_history_count={len(gen_ctx.recent_comments)}"
+            )
+
+        if self.state_mgr:
+            self.state_mgr.update(
+                current_post_title=post.title or "",
+                current_post_excerpt=post.excerpt or "",
+                current_ai_prompt=ai_prompt,
+                ai_clipboard_ready=bool(ai_prompt)
+            )
+
+        return gen_ctx, req_id, ai_prompt, suffix, preset
+
     def process(
         self,
         detail_page: Page,
@@ -430,6 +502,71 @@ class PostProcessor:
                 result.comment_result.error = f"topic_blocked:{topic_reason}"
                 return result
 
+        # [사전 전송 준비] 좋아요 누르기 전에 댓글 생성부터 제미나이에 사전 전송하여 지체 시간 최소화
+        early_gemini_command: Optional[GeminiCommand] = None
+        early_gen_ctx: Optional[GenerationContext] = None
+        early_suffix: Optional[str] = None
+        early_preset: Optional[str] = None
+        early_request_id: Optional[str] = None
+        early_ai_prompt: str = ""
+        sample_selected: bool = True
+
+        if effective_comment and self.auto_comment_submit_enabled:
+            if action_plan and action_plan.comment_sample_selected is not None:
+                sample_selected = action_plan.comment_sample_selected
+                roll = action_plan.comment_sample_roll if action_plan.comment_sample_roll is not None else 0.0
+            else:
+                roll = random.random()
+                sample_selected = roll <= self.auto_comment_chance
+
+            if not sample_selected:
+                logger.log(
+                    f"  🎲 [COMMENT] 이번 글은 랜덤 작성 비율({int(self.auto_comment_chance * 100)}%, roll={roll:.2f})에 따라 댓글 작성을 건너뜁니다 (댓글창 미오픈)."
+                )
+                result.comment_result = CommentProcessResult(
+                    status=CommentSubmitState.SKIPPED,
+                    error="random_chance_skipped",
+                )
+                effective_comment = False
+            else:
+                logger.log(
+                    f"  🎲 [COMMENT] 랜덤 댓글 작성 대상 선정 ({int(self.auto_comment_chance * 100)}%, roll={roll:.2f}) - Gemini 댓글 생성 및 자동 등록을 진행합니다."
+                )
+
+        if effective_comment and effective_like:
+            if detail_context is None:
+                detail_context = ContentContextExtractor.extract(detail_page, post, max_chars=self.ai_context_max_chars)
+                post.title = detail_context.title or post.title
+                post.excerpt = detail_context.excerpt
+            if (post.excerpt or "").strip():
+                if self.gemini_web_enabled and self.gemini_browser_mode == "extension_existing_chrome" and self.gemini_extension_bridge:
+                    if not (self.stop_event and self.stop_event.is_set()) and not (self.skip_event and self.skip_event.is_set()):
+                        preflight = self.gemini_extension_bridge.await_ready(
+                            timeout=3.0,
+                            stop_event=self.stop_event,
+                            skip_event=self.skip_event
+                        )
+                        if preflight and preflight.ready:
+                            early_gen_ctx, early_request_id, early_ai_prompt, early_suffix, early_preset = self._prepare_comment_generation_context(
+                                post=post, action_plan=action_plan
+                            )
+                            if early_ai_prompt:
+                                gemini_timeout = float(self.config.get("gemini_response_timeout", 55.0))
+                                early_cmd = GeminiCommand.create(
+                                    post_key=post.key,
+                                    navigation_version=navigation_version,
+                                    prompt=early_ai_prompt,
+                                    request_id=early_request_id,
+                                    timeout_seconds=gemini_timeout,
+                                )
+                                if hasattr(self, "run_control") and self.run_control:
+                                    self.run_control.checkpoint("before_gemini_publish")
+                                if self.gemini_extension_bridge.publish(early_cmd, stop_event=self.stop_event, skip_event=self.skip_event):
+                                    early_gemini_command = early_cmd
+                                    logger.log(f"  🚀 [GEMINI] 좋아요 누르기 전 댓글 생성 요청 사전 전송 완료 (rid={early_request_id}) - 공감/페이싱과 병행 생성")
+                                    if self.state_mgr:
+                                        self.state_mgr.update(message="Gemini 댓글 생성 중 (공감 병행)...")
+
         # 2. 공감(하트) 처리 (Re-ordered Like Pipeline: State -> Popularity Guard -> Transaction)
         if effective_like:
             # Keep the configured human pacing before the first mutating
@@ -438,9 +575,13 @@ class PostProcessor:
             if self.pacing:
                 p_res = self.pacing.wait_pre_like()
                 if p_res.stopped or (self.stop_event and self.stop_event.is_set()):
+                    if early_gemini_command and self.gemini_extension_bridge:
+                        self.gemini_extension_bridge.cancel_command(early_gemini_command.request_id)
                     raise StopRequestedException("작업 중지 요청됨")
                 if p_res.skipped or (self.skip_event and self.skip_event.is_set()):
                     logger.log("  ⏭️ [USER] 공감 대기 중 다음 글로 건너뛰기 요청됨 (스킵).")
+                    if early_gemini_command and self.gemini_extension_bridge:
+                        self.gemini_extension_bridge.cancel_command(early_gemini_command.request_id)
                     result.like_result.error = "user_skipped"
                     result.comment_result.status = CommentSubmitState.SKIPPED
                     result.comment_result.error = "user_skipped"
@@ -507,45 +648,31 @@ class PostProcessor:
                                 logger.log(f"  ⚠️ [CHECKPOINT] Like checkpoint 기록 실패: {cp_err}", "WARNING")
 
         if self.stop_event and self.stop_event.is_set():
+            if early_gemini_command and self.gemini_extension_bridge:
+                self.gemini_extension_bridge.cancel_command(early_gemini_command.request_id)
             raise StopRequestedException("작업 중지 요청됨")
 
         # 액션 사이 Pacing 대기
         if self.pacing:
             p_res = self.pacing.wait_post_like() if effective_like else self.pacing.wait_action()
             if p_res.stopped or (self.stop_event and self.stop_event.is_set()):
+                if early_gemini_command and self.gemini_extension_bridge:
+                    self.gemini_extension_bridge.cancel_command(early_gemini_command.request_id)
                 raise StopRequestedException("작업 중지 요청됨")
             if p_res.skipped or (self.skip_event and self.skip_event.is_set()):
                 logger.log("  ⏭️ [USER] 공감 후 대기 중 다음 글로 건너뛰기 요청됨 (댓글 단계 스킵).")
+                if early_gemini_command and self.gemini_extension_bridge:
+                    self.gemini_extension_bridge.cancel_command(early_gemini_command.request_id)
                 result.comment_result.status = CommentSubmitState.SKIPPED
                 result.comment_result.error = "user_skipped"
                 return result
 
-        # 3. 댓글 처리 (랜덤 표본 확인 -> 댓글창 오픈 -> 서버 중복 확인 -> 초안 생성 -> 입력 -> 승인)
-        if effective_comment and self.auto_comment_submit_enabled:
-            if action_plan and action_plan.comment_sample_selected is not None:
-                sample_selected = action_plan.comment_sample_selected
-                roll = action_plan.comment_sample_roll if action_plan.comment_sample_roll is not None else 0.0
-            else:
-                roll = random.random()
-                sample_selected = roll <= self.auto_comment_chance
-
-            if not sample_selected:
-                logger.log(
-                    f"  🎲 [COMMENT] 이번 글은 랜덤 작성 비율({int(self.auto_comment_chance * 100)}%, roll={roll:.2f})에 따라 댓글 작성을 건너뜁니다 (댓글창 미오픈)."
-                )
-                result.comment_result = CommentProcessResult(
-                    status=CommentSubmitState.SKIPPED,
-                    error="random_chance_skipped",
-                )
-                effective_comment = False
-            else:
-                logger.log(
-                    f"  🎲 [COMMENT] 랜덤 댓글 작성 대상 선정 ({int(self.auto_comment_chance * 100)}%, roll={roll:.2f}) - Gemini 댓글 생성 및 자동 등록을 진행합니다."
-                )
-
+        # 3. 댓글 처리 (댓글창 오픈 -> 서버 중복 확인 -> [사전 전송 결과 수신 또는 생성] -> 입력 -> 승인)
         if effective_comment:
             if self.skip_event and self.skip_event.is_set():
                 logger.log("  ⏭️ [USER] 댓글 단계 진입 전 다음 글로 건너뛰기 요청됨 (스킵).")
+                if early_gemini_command and self.gemini_extension_bridge:
+                    self.gemini_extension_bridge.cancel_command(early_gemini_command.request_id)
                 result.comment_result.status = CommentSubmitState.SKIPPED
                 result.comment_result.error = "user_skipped"
                 if self.state_mgr:
@@ -566,6 +693,8 @@ class PostProcessor:
             if hasattr(self, "run_control") and self.run_control:
                 self.run_control.checkpoint("after_comment_open")
             if not open_ok:
+                if early_gemini_command and self.gemini_extension_bridge:
+                    self.gemini_extension_bridge.cancel_command(early_gemini_command.request_id)
                 if open_reason == "user_skipped":
                     logger.log("  ⏭️ [USER] 댓글 레이어 준비 중 다음 글로 건너뛰기 요청됨 (스킵).")
                     result.comment_result.status = CommentSubmitState.SKIPPED
@@ -596,6 +725,8 @@ class PostProcessor:
                 presence_frame = comment_context["frame"] if comment_context else detail_page
                 presence = ServerCommentDuplicateGuard.scan_page_for_my_comment(presence_frame, stop_event=self.stop_event)
                 if presence.state == CommentPresenceState.PRESENT:
+                    if early_gemini_command and self.gemini_extension_bridge:
+                        self.gemini_extension_bridge.cancel_command(early_gemini_command.request_id)
                     logger.log("  🛑 [COMMENT] 서버 댓글 목록에 이미 내 댓글이 존재합니다! (AI 호출/입력 0, 동기화 완료)")
                     result.comment_result = CommentProcessResult(
                         status=CommentSubmitState.SUBMITTED,
@@ -607,6 +738,8 @@ class PostProcessor:
                         except Exception as cp_err:
                             logger.log(f"  ⚠️ [CHECKPOINT] Comment checkpoint 기록 실패: {cp_err}", "WARNING")
                 elif presence.state == CommentPresenceState.UNKNOWN:
+                    if early_gemini_command and self.gemini_extension_bridge:
+                        self.gemini_extension_bridge.cancel_command(early_gemini_command.request_id)
                     logger.log("  ⚠️ [COMMENT] 댓글 목록이 불완전하여 중복 방지를 위해 안전하게 작성을 스킵합니다.", "WARNING")
                     result.comment_result = CommentProcessResult(status=CommentSubmitState.SKIPPED, error="server_duplicate_check_unknown")
                 else:
@@ -615,6 +748,8 @@ class PostProcessor:
                     post.title = context.title or post.title
                     post.excerpt = context.excerpt
                     if not post.excerpt.strip():
+                        if early_gemini_command and self.gemini_extension_bridge:
+                            self.gemini_extension_bridge.cancel_command(early_gemini_command.request_id)
                         # Never manufacture a plausible reply from a title
                         # when the locked/changed page yielded no body.
                         logger.log("  ⚠️ [COMMENT] 본문을 확인하지 못해 제목만으로 댓글을 만들지 않았습니다. 페이지를 확인하거나 발췌문을 보완해 주세요.", "WARNING")
@@ -624,14 +759,11 @@ class PostProcessor:
                         )
                         if self.state_mgr:
                             self.state_mgr.update(current_post_title=post.title or "", current_post_excerpt="")
-                        # Like, if any, remains recorded; this post is
-                        # recoverable and the controller may continue.
                         return result
-                    preset = self.config.get("comment_style_preset", "community")
-                    suffix = DraftService.resolve_suffix(post.source, self.config)
 
-                    from services.food_comment_focus import FoodCommentFocus
                     if (self.stop_event and self.stop_event.is_set()) or (self.skip_event and self.skip_event.is_set()):
+                        if early_gemini_command and self.gemini_extension_bridge:
+                            self.gemini_extension_bridge.cancel_command(early_gemini_command.request_id)
                         if self.stop_event and self.stop_event.is_set():
                             logger.log("  ⏹️ [USER] Gemini 생성 시작 전 정지 요청 감지 -> 즉시 중단합니다.")
                             raise StopRequestedException("User stopped before Gemini generation")
@@ -645,63 +777,17 @@ class PostProcessor:
                                 self.state_mgr.update(new_state=FeedState.SKIPPING, inc_skip=True)
                             return result
 
-                    food_focus_info = FoodCommentFocus.analyze(post.title or "", post.excerpt or "")
-                    content_focus = food_focus_info["focus"]
-                    food_anchors = food_focus_info["food_anchors"]
-                    sec_anchors = food_focus_info.get("secondary_anchors", [])
-                    if content_focus != "GENERAL":
-                        logger.log(f"[FOOD_FOCUS] focus={content_focus} anchors={food_anchors[:3]} secondary={sec_anchors[:3]}")
-
-                    recent_submits = []
-                    if self.history_store and hasattr(self.history_store, "get_recent_submitted_comments"):
-                        recent_submits = self.history_store.get_recent_submitted_comments(limit=5)
-
-                    from services.user_learning_service import UserLearningService
-                    corpus_examples, corpus_stats, style_profile = UserLearningService.get_learning_context(
-                        category=content_focus,
-                        anchors=food_anchors,
-                        limit=2,
-                    )
-
-                    style_plan = (action_plan.style_plan if action_plan else None)
-                    gen_ctx = GenerationContext(
-                        title=post.title or "",
-                        excerpt=post.excerpt or "",
-                        preset=preset,
-                        style=self.ai_prompt_style,
-                        content_focus=content_focus,
-                        verified_anchors=food_anchors,
-                        secondary_anchors=sec_anchors,
-                        style_plan=style_plan,
-                        recent_comments=recent_submits,
-                        corpus_examples=corpus_examples,
-                        style_profile=style_profile,
-                        corpus_stats=corpus_stats,
-                        max_attempts=3,
-                    )
-
-                    request_id = uuid.uuid4().hex
-                    ai_prompt = ""
-                    if self.ai_clipboard_enabled or self.gemini_web_enabled:
-                        ai_prompt = gen_ctx.build_prompt(request_id=request_id)
-                        prompt_ver = getattr(AIPromptBuilder, "PROMPT_VERSION", "2.1.0-personalized")
-                        stats = gen_ctx.corpus_stats or {}
-                        logger.log(
-                            f"  📝 [PROMPT] version={prompt_ver} "
-                            f"raw_corpus_count={stats.get('total_raw', 0)} "
-                            f"cleaned_corpus_count={stats.get('cleaned', 0)} "
-                            f"user_edit_count={stats.get('user_edits', 0)} "
-                            f"referenced_examples={stats.get('referenced', len(gen_ctx.corpus_examples))} "
-                            f"recent_history_count={len(gen_ctx.recent_comments)}"
+                    if early_gen_ctx is not None:
+                        gen_ctx = early_gen_ctx
+                        request_id = early_request_id
+                        ai_prompt = early_ai_prompt
+                        suffix = early_suffix
+                        preset = early_preset
+                    else:
+                        gen_ctx, request_id, ai_prompt, suffix, preset = self._prepare_comment_generation_context(
+                            post=post, action_plan=action_plan
                         )
-
-                    if self.state_mgr:
-                        self.state_mgr.update(
-                            current_post_title=post.title or "",
-                            current_post_excerpt=post.excerpt or "",
-                            current_ai_prompt=ai_prompt,
-                            ai_clipboard_ready=bool(ai_prompt)
-                        )
+                    content_focus = gen_ctx.content_focus
 
                     draft_text = ""
                     draft_source_label = ""
@@ -714,6 +800,8 @@ class PostProcessor:
                     use_local_requested = False
                     if self.gemini_web_enabled and ai_prompt:
                         if (self.stop_event and self.stop_event.is_set()) or (self.skip_event and self.skip_event.is_set()):
+                            if early_gemini_command and self.gemini_extension_bridge:
+                                self.gemini_extension_bridge.cancel_command(early_gemini_command.request_id)
                             if self.stop_event and self.stop_event.is_set():
                                 logger.log("  ⏹️ [USER] Gemini 생성 시작 전 정지 요청 감지 -> 즉시 중단합니다.")
                                 raise StopRequestedException("User stopped before Gemini generation")
@@ -733,6 +821,8 @@ class PostProcessor:
                         if self.gemini_browser_mode == "extension_existing_chrome":
                             while not gemini_answer and not use_local_requested:
                                 if (self.stop_event and self.stop_event.is_set()) or (self.skip_event and self.skip_event.is_set()):
+                                    if early_gemini_command and self.gemini_extension_bridge:
+                                        self.gemini_extension_bridge.cancel_command(early_gemini_command.request_id)
                                     if self.stop_event and self.stop_event.is_set():
                                         logger.log("  ⏹️ [USER] Gemini 루프 시작 전 정지 요청 감지 -> 중단합니다.")
                                         raise StopRequestedException("User stopped before Gemini loop")
@@ -758,38 +848,45 @@ class PostProcessor:
                                 )
                                 if preflight and preflight.ready:
                                     if (self.stop_event and self.stop_event.is_set()) or (self.skip_event and self.skip_event.is_set()):
+                                        if early_gemini_command and self.gemini_extension_bridge:
+                                            self.gemini_extension_bridge.cancel_command(early_gemini_command.request_id)
                                         if self.stop_event and self.stop_event.is_set():
                                             raise StopRequestedException("User stopped before command creation")
                                         else:
                                             result.comment_result = CommentProcessResult(status=CommentSubmitState.SKIPPED, error="user_skipped")
                                             return result
 
-                                    gemini_timeout = float(self.config.get("gemini_response_timeout", 55.0))
-                                    command = GeminiCommand.create(
-                                        post_key=post.key,
-                                        navigation_version=navigation_version,
-                                        prompt=ai_prompt,
-                                        request_id=request_id,
-                                        timeout_seconds=gemini_timeout,
-                                    )
-                                    if hasattr(self, "run_control") and self.run_control:
-                                        self.run_control.checkpoint("before_gemini_publish")
-                                    if not self.gemini_extension_bridge.publish(command, stop_event=self.stop_event, skip_event=self.skip_event):
-                                        if self.skip_event and self.skip_event.is_set():
-                                            logger.log("  ⏭️ [USER] Gemini 발행 시점에 스킵 감지 -> 즉시 건너뜁니다.")
-                                            result.comment_result = CommentProcessResult(
-                                                status=CommentSubmitState.SKIPPED,
-                                                error="user_skipped",
-                                            )
-                                            if self.state_mgr:
-                                                self.state_mgr.update(new_state=FeedState.SKIPPING, inc_skip=True)
-                                            return result
-                                        if self.stop_event and self.stop_event.is_set():
-                                            logger.log("  ⏹️ [USER] Gemini 발행 시점에 정지 감지 -> 즉시 중단합니다.")
-                                            raise StopRequestedException("User stopped during publish")
-                                        failure = "publish_rejected"
-                                        logger.log(f"[GEMINI/EXTENSION] 명령 발행 거부: {failure}", "ERROR")
-                                        break
+                                    if early_gemini_command is not None:
+                                        command = early_gemini_command
+                                        early_gemini_command = None
+                                        logger.log(f"  ⚡ [GEMINI] 좋아요 누르기 전 사전 전송한 명령(rid={command.request_id}) 결과를 바로 대기합니다.")
+                                    else:
+                                        gemini_timeout = float(self.config.get("gemini_response_timeout", 55.0))
+                                        command = GeminiCommand.create(
+                                            post_key=post.key,
+                                            navigation_version=navigation_version,
+                                            prompt=ai_prompt,
+                                            request_id=request_id,
+                                            timeout_seconds=gemini_timeout,
+                                        )
+                                        if hasattr(self, "run_control") and self.run_control:
+                                            self.run_control.checkpoint("before_gemini_publish")
+                                        if not self.gemini_extension_bridge.publish(command, stop_event=self.stop_event, skip_event=self.skip_event):
+                                            if self.skip_event and self.skip_event.is_set():
+                                                logger.log("  ⏭️ [USER] Gemini 발행 시점에 스킵 감지 -> 즉시 건너뜁니다.")
+                                                result.comment_result = CommentProcessResult(
+                                                    status=CommentSubmitState.SKIPPED,
+                                                    error="user_skipped",
+                                                )
+                                                if self.state_mgr:
+                                                    self.state_mgr.update(new_state=FeedState.SKIPPING, inc_skip=True)
+                                                return result
+                                            if self.stop_event and self.stop_event.is_set():
+                                                logger.log("  ⏹️ [USER] Gemini 발행 시점에 정지 감지 -> 즉시 중단합니다.")
+                                                raise StopRequestedException("User stopped during publish")
+                                            failure = "publish_rejected"
+                                            logger.log(f"[GEMINI/EXTENSION] 명령 발행 거부: {failure}", "ERROR")
+                                            break
                                     extension_result = self.gemini_extension_bridge.wait_for_result(
                                         command,
                                         stop_event=self.stop_event,
