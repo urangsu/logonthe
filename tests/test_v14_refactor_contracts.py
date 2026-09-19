@@ -40,9 +40,10 @@ class TestV14RefactorContracts(unittest.TestCase):
         self.assertEqual(cmd.post_key, "test_post_1")
         self.assertEqual(cmd.navigation_version, 2)
         self.assertEqual(cmd.prompt, "Hello Gemini")
-        # Delivery reserve is 9.0s
-        self.assertAlmostEqual(cmd.deadline_at - cmd.created_at, 50.0 - 9.0, delta=1.0)
-        self.assertAlmostEqual(cmd.acceptance_deadline_at - cmd.created_at, 50.0, delta=1.0)
+        # Delivery reserve is 9.0s added to generation deadline (50.0s)
+        self.assertAlmostEqual(cmd.deadline_at - cmd.created_at, 50.0, delta=1.0)
+        self.assertAlmostEqual(cmd.generation_deadline_at - cmd.created_at, 50.0, delta=1.0)
+        self.assertAlmostEqual(cmd.acceptance_deadline_at - cmd.created_at, 50.0 + 9.0, delta=1.0)
 
     def test_gem_002_processor_uses_command_create_factory(self):
         """GEM-002: app/processor.py uses GeminiCommand.create factory."""

@@ -47,8 +47,8 @@ class GeminiCommand:
         now = time.time()
         timeout = max(10.0, float(timeout_seconds or 55.0))
         delivery_reserve = float(delivery_reserve_seconds) if delivery_reserve_seconds is not None else cls.DELIVERY_RESERVE_SECONDS
-        acceptance_deadline = now + timeout
-        generation_deadline = acceptance_deadline - delivery_reserve
+        generation_deadline = now + timeout
+        acceptance_deadline = generation_deadline + delivery_reserve
         return cls(
             request_id=request_id or uuid.uuid4().hex,
             post_key=post_key,
@@ -538,9 +538,18 @@ class GeminiExtensionBridge:
             if command.request_id in self._cancel_requests:
                 logger.log(f"[GEMINI][PUBLISH_REJECTED] Command was already cancelled (rid={command.request_id})", "WARNING")
                 return False
-            if self._command is not None and self._command.deadline_at > time.time() and self._command_state in ("pending", "claimed"):
-                logger.log(f"[GEMINI][PUBLISH_REJECTED] Active command still running (rid={self._command.request_id})", "WARNING")
-                return False
+            now = time.time()
+            if self._command is not None:
+                if self._command_state == "pending":
+                    active_until = self._command.generation_deadline_at or self._command.deadline_at
+                elif self._command_state == "claimed":
+                    active_until = self._command.acceptance_deadline_at or self._command.deadline_at
+                else:
+                    active_until = 0
+
+                if self._command_state in ("pending", "claimed") and now < active_until:
+                    logger.log(f"[GEMINI][PUBLISH_REJECTED] Active command still running (rid={self._command.request_id}, state={self._command_state})", "WARNING")
+                    return False
             if self._ever_seen_heartbeat and self._heartbeat_status in ("busy", "auth_required", "dom_unsupported", "captcha"):
                 now_t = time.time()
                 is_settling = bool(self._last_completed_request_id and (now_t - self._last_completed_at) < 2.5)
@@ -560,7 +569,15 @@ class GeminiExtensionBridge:
         with self._condition:
             if not self._command:
                 return None
-            if time.time() >= self._command.deadline_at or time.time() - self._command.created_at > self.COMMAND_TTL:
+            now = time.time()
+            if self._command_state == "pending":
+                active_until = self._command.generation_deadline_at or self._command.deadline_at
+            elif self._command_state == "claimed":
+                active_until = self._command.acceptance_deadline_at or self._command.deadline_at
+            else:
+                active_until = 0
+
+            if (active_until and now >= active_until) or (now - self._command.created_at > self.COMMAND_TTL):
                 self._command_state = "expired"
                 self._command = None
                 return None
@@ -602,7 +619,7 @@ class GeminiExtensionBridge:
                 return False
             if not self._command or self._command_state != "pending":
                 return False
-            if time.time() >= self._command.deadline_at:
+            if time.time() >= (self._command.acceptance_deadline_at or self._command.deadline_at):
                 self._command = None
                 self._command_state = "expired"
                 return False

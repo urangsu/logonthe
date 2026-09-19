@@ -6,7 +6,7 @@ and AI draft gate behavior in PostProcessor without regression.
 import unittest
 from unittest.mock import MagicMock, patch, call
 from app.models import (
-    FeedPost, FeedSourceType, CommentSubmitState, LikeState, PostActionPlan, UserAction
+    FeedPost, FeedSourceType, CommentSubmitState, LikeState, PostActionPlan, UserAction, LikeProcessResult
 )
 from app.processor import PostProcessor
 from naver.comment_guard import CommentPresenceState, CommentPresenceResult
@@ -123,10 +123,10 @@ class TestCommentPipelineContract(unittest.TestCase):
     @patch("app.processor.ServerCommentDuplicateGuard.scan_page_for_my_comment")
     @patch("app.processor.CommentInteractionService.wait_for_user_action")
     @patch("app.processor.CommentInteractionService.submit_and_verify")
-    def test_comment_004_duplicate_present_zero_gemini_zero_editor_submitted(
+    def test_comment_004_sequential_duplicate_present_zero_publish_zero_editor_submitted(
         self, mock_submit, mock_user_act, mock_dup_scan, mock_ctx, mock_open, mock_guard
     ):
-        """COMMENT-004: duplicate=PRESENT -> Gemini 0회 / editor 0회 / SUBMITTED 동기화"""
+        """COMMENT-004 (Sequential): duplicate=PRESENT -> Gemini publish 0회 / editor 0회 / SUBMITTED 동기화"""
         mock_ctx.return_value = {"frame": self.mock_page, "root": self.mock_page}
         mock_dup_scan.return_value = CommentPresenceResult(
             state=CommentPresenceState.PRESENT,
@@ -152,15 +152,66 @@ class TestCommentPipelineContract(unittest.TestCase):
         self.assertEqual(res.comment_result.submitted_text, "기존 등록된 내 댓글입니다.")
 
     @patch("app.processor.TargetPostGuard.verify")
+    @patch("app.processor.ContentContextExtractor.extract")
+    @patch("app.processor.LikeTransactionService.resolve_like_state")
+    @patch("app.processor.LikeEligibilityService.evaluate")
+    @patch("app.processor.LikeTransactionService.execute_like_transaction")
     @patch("app.processor.CommentInteractionService.open_comment_layer", return_value=(True, "ok"))
     @patch("app.processor.MobileDOMResolver.get_comment_editor_context")
     @patch("app.processor.ServerCommentDuplicateGuard.scan_page_for_my_comment")
     @patch("app.processor.CommentInteractionService.wait_for_user_action")
     @patch("app.processor.CommentInteractionService.submit_and_verify")
-    def test_comment_005_duplicate_unknown_zero_gemini_skipped(
+    def test_comment_004_speculative_duplicate_present_publish_once_cancel_once_zero_editor_submitted(
+        self, mock_submit, mock_user_act, mock_dup_scan, mock_ctx, mock_open, mock_tx, mock_elig, mock_like_state, mock_extract, mock_guard
+    ):
+        """COMMENT-004 (Speculative): like=True -> early publish 1회 -> duplicate=PRESENT 발견 -> cancel 1회 -> editor 0회 / SUBMITTED 동기화"""
+        from services.like_transaction import LikeStateResult, LikeConfidence
+        from services.like_eligibility import LikeEligibility, LikeEligibilityResult
+
+        mock_extract.return_value = MagicMock(title="테스트 포스팅", excerpt="제주 서귀포 맛집 다녀온 후기입니다.")
+        mock_like_state.return_value = LikeStateResult(state=LikeState.NOT_LIKED, confidence=LikeConfidence.HIGH)
+        mock_elig.return_value = LikeEligibilityResult(eligible=True, status=LikeEligibility.ELIGIBLE, reason="ok", like_count=10, daily_visitors=100)
+        mock_tx.return_value = LikeProcessResult(state_before=LikeState.NOT_LIKED, action_taken=True, state_after=LikeState.LIKED)
+
+        mock_ctx.return_value = {"frame": self.mock_page, "root": self.mock_page}
+        mock_dup_scan.return_value = CommentPresenceResult(
+            state=CommentPresenceState.PRESENT,
+            confidence="high",
+            comment_text="기존 등록된 내 댓글입니다."
+        )
+
+        mock_gemini_bridge = MagicMock()
+        mock_gemini_bridge.await_ready.return_value = MagicMock(ready=True)
+        mock_gemini_bridge.publish.return_value = True
+        mock_gemini_bridge.cancel_command.return_value = True
+
+        processor = PostProcessor(
+            self.config,
+            like_enabled=True,
+            comment_enabled=True,
+            gemini_web_enabled=True,
+            gemini_extension_bridge=mock_gemini_bridge
+        )
+        res = processor.process(self.mock_page, self.post)
+
+        # Speculative publish occurred, then cancelled upon duplicate detection
+        mock_gemini_bridge.publish.assert_called_once()
+        mock_gemini_bridge.cancel_command.assert_called_once()
+        mock_user_act.assert_not_called()
+        mock_submit.assert_not_called()
+        self.assertEqual(res.comment_result.status, CommentSubmitState.SUBMITTED)
+        self.assertEqual(res.comment_result.submitted_text, "기존 등록된 내 댓글입니다.")
+
+    @patch("app.processor.TargetPostGuard.verify")
+    @patch("app.processor.CommentInteractionService.open_comment_layer", return_value=(True, "ok"))
+    @patch("app.processor.MobileDOMResolver.get_comment_editor_context")
+    @patch("app.processor.ServerCommentDuplicateGuard.scan_page_for_my_comment")
+    @patch("app.processor.CommentInteractionService.wait_for_user_action")
+    @patch("app.processor.CommentInteractionService.submit_and_verify")
+    def test_comment_005_sequential_duplicate_unknown_zero_publish_zero_editor_skipped(
         self, mock_submit, mock_user_act, mock_dup_scan, mock_ctx, mock_open, mock_guard
     ):
-        """COMMENT-005: duplicate=UNKNOWN -> Gemini 0회 / SKIPPED"""
+        """COMMENT-005 (Sequential): duplicate=UNKNOWN -> Gemini publish 0회 / SKIPPED"""
         mock_ctx.return_value = {"frame": self.mock_page, "root": self.mock_page}
         mock_dup_scan.return_value = CommentPresenceResult(state=CommentPresenceState.UNKNOWN, confidence="low")
 
@@ -175,6 +226,52 @@ class TestCommentPipelineContract(unittest.TestCase):
         res = processor.process(self.mock_page, self.post)
 
         mock_gemini_bridge.publish.assert_not_called()
+        mock_user_act.assert_not_called()
+        mock_submit.assert_not_called()
+        self.assertEqual(res.comment_result.status, CommentSubmitState.SKIPPED)
+        self.assertEqual(res.comment_result.error, "server_duplicate_check_unknown")
+
+    @patch("app.processor.TargetPostGuard.verify")
+    @patch("app.processor.ContentContextExtractor.extract")
+    @patch("app.processor.LikeTransactionService.resolve_like_state")
+    @patch("app.processor.LikeEligibilityService.evaluate")
+    @patch("app.processor.LikeTransactionService.execute_like_transaction")
+    @patch("app.processor.CommentInteractionService.open_comment_layer", return_value=(True, "ok"))
+    @patch("app.processor.MobileDOMResolver.get_comment_editor_context")
+    @patch("app.processor.ServerCommentDuplicateGuard.scan_page_for_my_comment")
+    @patch("app.processor.CommentInteractionService.wait_for_user_action")
+    @patch("app.processor.CommentInteractionService.submit_and_verify")
+    def test_comment_005_speculative_duplicate_unknown_publish_once_cancel_once_zero_editor_skipped(
+        self, mock_submit, mock_user_act, mock_dup_scan, mock_ctx, mock_open, mock_tx, mock_elig, mock_like_state, mock_extract, mock_guard
+    ):
+        """COMMENT-005 (Speculative): like=True -> early publish 1회 -> duplicate=UNKNOWN -> cancel 1회 -> editor 0회 / SKIPPED"""
+        from services.like_transaction import LikeStateResult, LikeConfidence
+        from services.like_eligibility import LikeEligibility, LikeEligibilityResult
+
+        mock_extract.return_value = MagicMock(title="테스트 포스팅", excerpt="제주 서귀포 맛집 다녀온 후기입니다.")
+        mock_like_state.return_value = LikeStateResult(state=LikeState.NOT_LIKED, confidence=LikeConfidence.HIGH)
+        mock_elig.return_value = LikeEligibilityResult(eligible=True, status=LikeEligibility.ELIGIBLE, reason="ok", like_count=10, daily_visitors=100)
+        mock_tx.return_value = LikeProcessResult(state_before=LikeState.NOT_LIKED, action_taken=True, state_after=LikeState.LIKED)
+
+        mock_ctx.return_value = {"frame": self.mock_page, "root": self.mock_page}
+        mock_dup_scan.return_value = CommentPresenceResult(state=CommentPresenceState.UNKNOWN, confidence="low")
+
+        mock_gemini_bridge = MagicMock()
+        mock_gemini_bridge.await_ready.return_value = MagicMock(ready=True)
+        mock_gemini_bridge.publish.return_value = True
+        mock_gemini_bridge.cancel_command.return_value = True
+
+        processor = PostProcessor(
+            self.config,
+            like_enabled=True,
+            comment_enabled=True,
+            gemini_web_enabled=True,
+            gemini_extension_bridge=mock_gemini_bridge
+        )
+        res = processor.process(self.mock_page, self.post)
+
+        mock_gemini_bridge.publish.assert_called_once()
+        mock_gemini_bridge.cancel_command.assert_called_once()
         mock_user_act.assert_not_called()
         mock_submit.assert_not_called()
         self.assertEqual(res.comment_result.status, CommentSubmitState.SKIPPED)

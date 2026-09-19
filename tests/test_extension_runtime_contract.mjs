@@ -163,6 +163,11 @@ function loadRealBackgroundJs(customEnv = {}) {
           if (typeof cb === 'function') cb(defaultTabs);
           return defaultTabs;
         },
+        update: async (tabId, updateProps, cb) => {
+          const res = { id: tabId, ...updateProps };
+          if (typeof cb === 'function') cb(res);
+          return res;
+        },
         sendMessage: (tabId, msg, cb) => {
           tabMessages.push({ tabId, msg });
           if (customEnv.onTabSendMessage) return customEnv.onTabSendMessage(tabId, msg, cb);
@@ -2345,6 +2350,116 @@ test('GEM-R17-JS-004: triggerSubmission dispatches pointer/mouse click, native .
   assert.strictEqual(clickCalled, true, 'Native click() must be invoked');
   assert.strictEqual(mockBtn.disabled, false, 'Disabled property must be cleared');
   assert.ok(keyEvents.includes('Enter'), 'Keyboard Enter must be dispatched');
+});
+
+test('GEM-R17-JS-005: Python cancel discovered -> background /v1/cancel poll -> NFA_CANCEL_COMMAND dispatched -> inFlight removed -> late result dropped', async () => {
+  const rid = 'req_cancel_e2e_01';
+  let cancelPollCount = 0;
+  let resultPostCount = 0;
+  let isCancelledOnPython = false;
+
+  const { background, messageListener, tabMessages } = loadRealBackgroundJs({
+    onFetch: async (url, opts) => {
+      if (url.includes('/v1/contract')) {
+        return {
+          ok: true,
+          json: async () => ({
+            extensionVersion: '13.2.3',
+            runtimeBuild: '13.2.3-r17',
+            protocolVersion: 1,
+            bridgeSchemaVersion: 1
+          })
+        };
+      }
+      if (url.includes('/v1/command/wait')) {
+        return {
+          ok: true,
+          json: async () => ({
+            command: {
+              requestId: rid,
+              postKey: 'post_cancel_01',
+              navigationVersion: 1,
+              prompt: '테스트 취소 프롬프트',
+              deadlineAtMs: Date.now() + 30000
+            }
+          })
+        };
+      }
+      if (url.includes('/v1/claim')) {
+        return { ok: true, json: async () => ({ claimed: true }) };
+      }
+      if (url.includes('/v1/cancel')) {
+        cancelPollCount++;
+        return { ok: true, json: async () => ({ cancelled: isCancelledOnPython }) };
+      }
+      if (url.includes('/v1/result')) {
+        resultPostCount++;
+        return { ok: true, json: async () => ({ accepted: true, reason: 'accepted' }) };
+      }
+      if (url.includes('/v1/heartbeat')) {
+        return { ok: true, json: async () => ({ ok: true }) };
+      }
+      return { ok: true, json: async () => ({}) };
+    },
+    onTabSendMessage: (tabId, msg, cb) => {
+      if (msg.type === 'NFA_CHECK_FRESH_CHAT') {
+        cb({ ok: true, fresh: true, conversationEpoch: 1, contentInstanceId: 'inst_01' });
+      } else if (msg.type === 'NFA_RUNTIME_PING' || msg.type === 'NFA_PING_GEMINI_DOM') {
+        cb({ ok: true, alive: true, build: '13.2.3-r17', status: 'ready', conversationEpoch: 1, contentInstanceId: 'inst_01' });
+      } else if (msg.type === 'NFA_EXECUTE_COMMAND') {
+        cb({ ok: true, started: true });
+      } else if (msg.type === 'NFA_CANCEL_COMMAND') {
+        cb({ ok: true, cancelled: true });
+      } else {
+        cb({ ok: true, alive: true, build: '13.2.3-r17', status: 'ready' });
+      }
+    }
+  });
+
+  // Start one cycle
+  const cyclePromise = background.runCommandCycle();
+
+  // Wait briefly for command to be claimed and dispatch to start
+  await new Promise(r => setTimeout(r, 100));
+
+  // Now simulate Python discovering cancel state (e.g. duplicate detected or skip requested)
+  isCancelledOnPython = true;
+
+  // Wait for cancelCheckInterval (polls every 400ms) to detect cancellation
+  await new Promise(r => setTimeout(r, 600));
+
+  await cyclePromise;
+
+  // 1. Verify /v1/cancel was polled
+  assert.ok(cancelPollCount >= 1, `Expected /v1/cancel poll, got count: ${cancelPollCount}`);
+
+  // 2. Verify NFA_CANCEL_COMMAND was sent to content script exactly once
+  const cancelMsgs = tabMessages.filter(m => m.msg?.type === 'NFA_CANCEL_COMMAND' && m.msg?.requestId === rid);
+  assert.strictEqual(cancelMsgs.length, 1, `Expected 1 NFA_CANCEL_COMMAND message, got: ${cancelMsgs.length}`);
+
+  const postCountBeforeLate = resultPostCount;
+
+  // 3. Verify late result drop: simulate content script sending late result
+  let lateAck = null;
+  messageListener(
+    {
+      type: 'NFA_EXECUTION_RESULT',
+      requestId: rid,
+      postKey: 'post_cancel_01',
+      navigationVersion: 1,
+      status: 'completed',
+      text: '뒤늦게 도착한 생성 결과'
+    },
+    {},
+    (res) => { lateAck = res; }
+  );
+
+  assert.ok(lateAck !== null, 'Late result ACK should be sent');
+  assert.strictEqual(lateAck.accepted, false, 'Late result must NOT be accepted');
+  assert.strictEqual(lateAck.reason, 'request_cancelled', 'Late result reason must be request_cancelled');
+
+  // 4. Verify that late result was dropped and never forwarded to Python /v1/result
+  assert.strictEqual(resultPostCount, postCountBeforeLate, 'Cancelled late result must NOT trigger a POST to Python /v1/result');
 });
 
 
