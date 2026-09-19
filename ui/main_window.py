@@ -11,6 +11,8 @@ import customtkinter as ctk
 from app.models import FeedSourceType, UserAction
 from app.state import StateManager, BotRuntimeState, FeedState
 from app.controller import FeedController
+from app.run_control import RunControl, RunControlState
+from app.policy import enter_sweep_mode, exit_sweep_mode, ensure_comment_mode_consistency
 from naver.auth_guard import NaverAuthGuard
 from services.config import ConfigService
 from services.history import HistoryStore
@@ -98,6 +100,14 @@ class MainWindow(ctk.CTk):
         self.stop_event = threading.Event()
         self.pause_event = threading.Event()
         self.skip_event = threading.Event()
+        self.run_control = RunControl(
+            stop_event=self.stop_event,
+            pause_event=self.pause_event,
+            skip_event=self.skip_event,
+            state_manager=self.state_mgr,
+        )
+        self.run_control.on_state_change = lambda st, reason: self.after(0, self._sync_run_control_ui, st, reason)
+        ensure_comment_mode_consistency(self.config_service)
         self.worker_thread: Optional[threading.Thread] = None
         self.reply_session: Optional[BrowserSession] = None
         self.reply_page: Optional[Any] = None
@@ -737,7 +747,10 @@ class MainWindow(ctk.CTk):
             logger.log(f"[GEMINI/EXTENSION] 연결 실패: {diag.message}", "WARNING")
 
     def _apply_neighbor_sweep_ui(self, is_sweep: bool):
+        cfg_svc = getattr(self, "config_service", None)
         if is_sweep:
+            if cfg_svc:
+                enter_sweep_mode(cfg_svc)
             if not hasattr(self, "_saved_comment_mode"):
                 self._saved_comment_mode = self.comment_mode_var.get()
             self.comment_mode_var.set("사용 안 함")
@@ -752,27 +765,41 @@ class MainWindow(ctk.CTk):
             self.neighbor_mutual_only_var.set(True)
             if hasattr(self, "chk_neighbor_mutual"):
                 self.chk_neighbor_mutual.configure(state="disabled")
-        elif hasattr(self, "_saved_comment_mode"):
-            prev_mode = self._saved_comment_mode
-            del self._saved_comment_mode
-            self.comment_mode_var.set(prev_mode)
-            if prev_mode == "사용 안 함":
-                self.comment_enabled_var.set(False)
-                self.auto_comment_submit_var.set(False)
-            elif prev_mode == "초안 검토":
-                self.comment_enabled_var.set(True)
-                self.auto_comment_submit_var.set(False)
-            elif prev_mode == "자동 등록":
-                self.comment_enabled_var.set(True)
-                self.auto_comment_submit_var.set(True)
+        else:
+            if cfg_svc:
+                exit_sweep_mode(cfg_svc)
+                if hasattr(self, "_saved_comment_mode"):
+                    mode = self._saved_comment_mode
+                    del self._saved_comment_mode
+                    self.comment_mode_var.set(mode)
+                    self.comment_enabled_var.set(mode != "사용 안 함")
+                    self.auto_comment_submit_var.set(mode == "자동 등록")
+                else:
+                    cmt_en = bool(cfg_svc.get("comment_enabled", True))
+                    auto_en = bool(cfg_svc.get("auto_comment_submit_enabled", False))
+                    self.comment_enabled_var.set(cmt_en)
+                    self.auto_comment_submit_var.set(auto_en)
+                    if not cmt_en:
+                        mode = "사용 안 함"
+                    elif auto_en:
+                        mode = "자동 등록"
+                    else:
+                        mode = "초안 검토"
+                    self.comment_mode_var.set(mode)
+            elif hasattr(self, "_saved_comment_mode"):
+                mode = self._saved_comment_mode
+                del self._saved_comment_mode
+                self.comment_mode_var.set(mode)
+                self.comment_enabled_var.set(mode != "사용 안 함")
+                self.auto_comment_submit_var.set(mode == "자동 등록")
+
             if hasattr(self, "comment_mode_seg"):
                 self.comment_mode_seg.configure(state="normal")
 
             # 서로이웃 잠금 해제 및 이전 설정 복원
-            prev_mutual = getattr(self, "_saved_mutual_only", True)
             if hasattr(self, "_saved_mutual_only"):
+                self.neighbor_mutual_only_var.set(self._saved_mutual_only)
                 del self._saved_mutual_only
-            self.neighbor_mutual_only_var.set(prev_mutual)
             if hasattr(self, "chk_neighbor_mutual"):
                 self.chk_neighbor_mutual.configure(state="normal")
 
@@ -881,11 +908,21 @@ class MainWindow(ctk.CTk):
             self.status_msg_lbl.configure(text=f"상태: {state.message}", text_color="#E2E8F0")
 
         # Sync btn_pause text & color if active
-        if hasattr(self, "btn_pause") and str(self.btn_pause.cget("state")) != "disabled":
-            if is_paused or (self.pause_event and self.pause_event.is_set()):
-                self.btn_pause.configure(text="▶️ 작업 재개", fg_color="#2563EB", hover_color="#1D4ED8")
+        if hasattr(self, "btn_pause"):
+            r_ctrl = getattr(self, "run_control", None)
+            if r_ctrl:
+                if r_ctrl.state == RunControlState.PAUSE_REQUESTED:
+                    self.btn_pause.configure(state="disabled", text="⏳ 일시정지 요청 중...", fg_color="#D97706", hover_color="#B45309")
+                elif is_paused or r_ctrl.state == RunControlState.PAUSED:
+                    self.btn_pause.configure(state="normal", text="▶️ 작업 재개", fg_color="#2563EB", hover_color="#1D4ED8")
+                elif r_ctrl.state == RunControlState.RUNNING:
+                    self.btn_pause.configure(state="normal", text="⏸️ 일시정지", fg_color="#D97706", hover_color="#B45309")
             else:
-                self.btn_pause.configure(text="⏸️ 일시정지", fg_color="#D97706", hover_color="#B45309")
+                p_evt = getattr(self, "pause_event", None)
+                if is_paused or (p_evt and p_evt.is_set()):
+                    self.btn_pause.configure(text="▶️ 작업 재개", fg_color="#2563EB", hover_color="#1D4ED8")
+                else:
+                    self.btn_pause.configure(text="⏸️ 일시정지", fg_color="#D97706", hover_color="#B45309")
 
         unknown_text = f" | ⚠️ 미확정: {state.submission_unknown_count}" if state.submission_unknown_count > 0 else ""
         sampled_text = f"선정 {state.sampled_in_count}·등록 {state.comments_count}" if state.sampled_in_count > 0 else f"{state.comments_count}"
@@ -1244,6 +1281,7 @@ class MainWindow(ctk.CTk):
         self.stop_event.clear()
         self.pause_event.clear()
         self.skip_event.clear()
+        self.run_control.request_resume()
         self.command_bridge.clear()
 
         controller = FeedController(
@@ -1255,6 +1293,7 @@ class MainWindow(ctk.CTk):
             pause_event=self.pause_event,
             gemini_extension_bridge=self.gemini_extension_bridge,
             skip_event=self.skip_event,
+            run_control=self.run_control,
         )
         self.current_controller = controller
 
@@ -1267,39 +1306,40 @@ class MainWindow(ctk.CTk):
         self.worker_thread = threading.Thread(target=worker, daemon=True)
         self.worker_thread.start()
 
+    def _sync_run_control_ui(self, state: RunControlState, reason: str = ""):
+        if not hasattr(self, "btn_pause") or not self.worker_thread or not self.worker_thread.is_alive():
+            return
+        if state == RunControlState.PAUSE_REQUESTED:
+            self.btn_pause.configure(state="disabled", text="⏳ 일시정지 요청 중...", fg_color="#D97706", hover_color="#B45309")
+        elif state == RunControlState.PAUSED:
+            self.btn_pause.configure(state="normal", text="▶️ 작업 재개", fg_color="#2563EB", hover_color="#1D4ED8")
+        elif state == RunControlState.RUNNING:
+            self.btn_pause.configure(state="normal", text="⏸️ 일시정지", fg_color="#D97706", hover_color="#B45309")
+
     def _toggle_pause(self):
         if not self.worker_thread or not self.worker_thread.is_alive():
             return
-        if not self.pause_event.is_set():
-            self.pause_event.set()
-            self.btn_pause.configure(text="▶️ 작업 재개", fg_color="#2563EB", hover_color="#1D4ED8")
-            logger.log("⏸️ 작업이 일시정지되었습니다. [▶️ 작업 재개] 버튼을 누르면 이어서 진행합니다.", "WARNING")
-            self.state_mgr.update(new_state=FeedState.PAUSED, message="작업 일시정지됨 (재개 대기 중)", pause_reason="user_manual_pause")
-        else:
-            self.pause_event.clear()
-            self.btn_pause.configure(text="⏸️ 일시정지", fg_color="#D97706", hover_color="#B45309")
+        if self.run_control.state in (RunControlState.PAUSED, RunControlState.PAUSE_REQUESTED):
+            self.run_control.request_resume()
             logger.log("▶️ 작업을 다시 재개합니다.")
-            self.state_mgr.update(message="작업 재개됨", clear_pause_reason=True)
+        else:
+            self.run_control.request_pause("user_manual_pause")
+            logger.log("⏸️ 일시정지 요청됨 (외부 호출 직전 정지 대기)...", "WARNING")
 
     def _skip_to_next_post(self):
         """현재 글 처리를 즉시 건너뛰고 다음 글로 바로 이동"""
         if not self.worker_thread or not self.worker_thread.is_alive():
             return
         logger.log("⏭️ [USER] 다음 글로 바로 넘어가기 버튼 클릭됨 (현재 글 스킵)")
-        self.skip_event.set()
+        self.run_control.request_skip()
         if hasattr(self, "current_controller") and self.current_controller:
             self.current_controller.request_skip_current_post()
         else:
             self.command_bridge.send_skip_post()
-        if self.pause_event and self.pause_event.is_set():
-            self.pause_event.clear()
-            self.btn_pause.configure(text="⏸️ 일시정지", fg_color="#D97706", hover_color="#B45309")
-            self.state_mgr.update(clear_pause_reason=True)
 
     def _stop_task(self):
         if self.worker_thread and self.worker_thread.is_alive():
-            self.pause_event.clear()
-            self.stop_event.set()
+            self.run_control.request_stop("user_stop")
             logger.log("⏹ 작업 중지 신호 전송됨: 현재 단계 완료 즉시 안전하게 종료합니다...", "WARNING")
 
     def _on_task_finished(self):
@@ -1307,7 +1347,7 @@ class MainWindow(ctk.CTk):
         self.btn_pause.configure(state="disabled", text="⏸️ 일시정지", fg_color="#D97706", hover_color="#B45309")
         self.btn_skip_post.configure(state="disabled")
         self.btn_stop.configure(state="disabled")
-        self.pause_event.clear()
+        self.run_control.request_resume()
         self.current_controller = None
         if hasattr(self, "btn_batch_generate_replies"):
             eligible = [n for n in getattr(self, "_current_reply_nodes", []) if n.is_eligible_for_auto_reply]

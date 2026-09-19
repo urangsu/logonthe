@@ -28,10 +28,19 @@ class NeighborFeedSource(FeedSource):
     """모바일 이웃 새글 피드 소스"""
     URL = "https://m.blog.naver.com/FeedList.naver"
 
-    def __init__(self, page: Page, max_items: int = 20, stop_event: Optional[threading.Event] = None):
+    def __init__(
+        self,
+        page: Page,
+        max_items: int = 20,
+        stop_event: Optional[threading.Event] = None,
+        pause_event: Optional[threading.Event] = None,
+        run_control = None,
+    ):
         self.page = page
         self.max_items = max_items
-        self.stop_event = stop_event
+        self.run_control = run_control
+        self.stop_event = stop_event or getattr(run_control, "stop_event", None)
+        self.pause_event = pause_event or getattr(run_control, "pause_event", None)
         self.seen_keys: Set[str] = set()
         self._exhausted = False
 
@@ -39,7 +48,10 @@ class NeighborFeedSource(FeedSource):
         logger.log(f"[SOURCE] 이웃 새글 피드 접속: {self.URL}")
         try:
             self.page.goto(self.URL, wait_until="domcontentloaded", timeout=20000)
-            interruptible_wait(self.stop_event, 1.5)
+            if self.run_control and hasattr(self.run_control, "interruptible_wait"):
+                self.run_control.interruptible_wait(1.5, stage="open_neighbor_source")
+            else:
+                interruptible_wait(self.stop_event, 1.5, pause_event=self.pause_event)
         except Exception as e:
             kind = classify_playwright_failure(e, page=self.page, context=getattr(self.page, "context", None))
             if kind in (BrowserFailureKind.CONTEXT_CLOSED, BrowserFailureKind.BROWSER_DISCONNECTED):
@@ -48,6 +60,8 @@ class NeighborFeedSource(FeedSource):
 
     def discover_posts(self) -> List[FeedPost]:
         discovered = []
+        if self.run_control and hasattr(self.run_control, "checkpoint"):
+            self.run_control.checkpoint("before_feed_discovery")
         try:
             cards = MobileDOMResolver.get_feed_cards(self.page)
             card_count = cards.count()
@@ -91,9 +105,15 @@ class NeighborFeedSource(FeedSource):
         if self.is_exhausted():
             return False
 
+        if self.run_control and hasattr(self.run_control, "checkpoint"):
+            self.run_control.checkpoint("before_scroll")
+
         try:
             self.page.mouse.wheel(0, 900)
-            interruptible_wait(self.stop_event, 1.0)
+            if self.run_control and hasattr(self.run_control, "interruptible_wait"):
+                self.run_control.interruptible_wait(1.0, stage="after_scroll")
+            else:
+                interruptible_wait(self.stop_event, 1.0, pause_event=self.pause_event)
             return True
         except Exception as e:
             kind = classify_playwright_failure(e, page=self.page, context=getattr(self.page, "context", None))
@@ -116,10 +136,14 @@ class RecommendationFeedSource(FeedSource):
         stop_event: Optional[threading.Event] = None,
         preferred_category: str = "맛집",
         fallback_category: str = "푸드",
+        pause_event: Optional[threading.Event] = None,
+        run_control = None,
     ):
         self.page = page
         self.max_items = max_items
-        self.stop_event = stop_event
+        self.run_control = run_control
+        self.stop_event = stop_event or getattr(run_control, "stop_event", None)
+        self.pause_event = pause_event or getattr(run_control, "pause_event", None)
         self.preferred_category = preferred_category
         self.fallback_category = fallback_category
         self.seen_keys: Set[str] = set()
@@ -213,6 +237,8 @@ class RecommendationFeedSource(FeedSource):
 
     def discover_posts(self) -> List[FeedPost]:
         discovered = []
+        if self.run_control and hasattr(self.run_control, "checkpoint"):
+            self.run_control.checkpoint("before_feed_discovery")
         try:
             cards = MobileDOMResolver.get_feed_cards(self.page)
             card_count = cards.count()
@@ -295,15 +321,22 @@ class RecommendationFeedSource(FeedSource):
         if self.is_exhausted():
             return False
 
+        if self.run_control and hasattr(self.run_control, "checkpoint"):
+            self.run_control.checkpoint("before_scroll")
+
         try:
             self.page.mouse.wheel(0, 900)
-            interruptible_wait(self.stop_event, 1.0)
+            if self.run_control and hasattr(self.run_control, "interruptible_wait"):
+                self.run_control.interruptible_wait(1.0, stage="after_scroll")
+            else:
+                interruptible_wait(self.stop_event, 1.0, pause_event=self.pause_event)
             return True
         except Exception as e:
             kind = classify_playwright_failure(e, page=self.page, context=getattr(self.page, "context", None))
             if kind in (BrowserFailureKind.CONTEXT_CLOSED, BrowserFailureKind.BROWSER_DISCONNECTED):
                 raise BrowserDisconnectedError(f"추천 피드 스크롤 중 브라우저 종료 감지: {e}")
             return False
+
 
     def is_exhausted(self) -> bool:
         return self._exhausted or len(self.seen_keys) >= self.max_items

@@ -215,9 +215,8 @@ class TestTargetedDiscoveryV9(unittest.TestCase):
         self.assertNotIn("~더라구요!", prompt)
         self.assertNotIn("~못 참죠", prompt)
         self.assertNotIn("~취저예요", prompt)
-        self.assertIn("전체적으로", prompt)  # As a banned list item in prompt
-        self.assertIn("인상적이네요", prompt) # As a banned list item in prompt
-        self.assertIn("꼭", prompt)         # As a banned list item in prompt
+        self.assertIn("[말투 기준]", prompt)
+        self.assertIn("남해 독일마을 소세지 플래터 맛집 후기", prompt)
 
 
 if __name__ == "__main__":

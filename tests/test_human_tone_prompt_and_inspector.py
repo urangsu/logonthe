@@ -12,7 +12,7 @@ class TestHumanTonePromptAndInspector(unittest.TestCase):
     """실제 사람 말투 반영 프롬프트 및 5단계 검사기 단위 테스트"""
 
     def test_01_prompt_builder_structure_and_examples(self):
-        """프롬프트 구조가 사용자 지시서 표준과 대표 예시 3개를 정확히 포함하는지 확인"""
+        """프롬프트 구조가 사용자 지시서 표준과 대표 예시 2개를 정확히 포함하는지 확인"""
         prompt = AIPromptBuilder.build(
             title="수유 맛집 돈까스 방문기",
             excerpt="경양식 돈까스인데 스프와 밥이 무한리필입니다.",
@@ -25,10 +25,9 @@ class TestHumanTonePromptAndInspector(unittest.TestCase):
         self.assertIn("[데이터]", prompt)
         self.assertIn("[출력]", prompt)
 
-        # 2. 대표 예시 3개 확인
+        # 2. 대표 예시 2개 확인 (Prompt v3: 2개 제한)
         self.assertIn("스프랑 밥 무한리필이라니 경양식 돈까스 먹을 때 최고네요~", prompt)
         self.assertIn("텐동 튀김 비쥬얼 진짜 예술이네요~", prompt)
-        self.assertIn("올레시장 맛있는거 진짜 많죠 넘 좋네요~", prompt)
 
         # 3. 습관적 중복 덧붙임 방지 지침 확인
         self.assertIn("좋겠어요, 참고해야겠어요, 기억해둬야겠네요, 한번 가봐야겠어요, 도움이 될 것 같아요", prompt)

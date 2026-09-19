@@ -511,9 +511,27 @@ class CommentInteractionService:
         post_key: str = "",
         timeout_seconds: Optional[float] = None,
         state_mgr: Optional[object] = None,
+        pause_event: Optional[threading.Event] = None,
+        run_control = None,
     ) -> UserAction:
         start_time = time.monotonic()
         while True:
+            # 일시정지 중 카운트다운 정지 및 재개 시 남은 시간부터 진행
+            if run_control and hasattr(run_control, "checkpoint"):
+                p_start = time.monotonic()
+                run_control.checkpoint("during_wait_user_action")
+                p_dur = time.monotonic() - p_start
+                if p_dur > 0.05:
+                    start_time += p_dur
+            elif pause_event and pause_event.is_set():
+                p_start = time.monotonic()
+                while pause_event.is_set():
+                    if stop_event and stop_event.is_set():
+                        return UserAction.STOP
+                    time.sleep(0.05)
+                p_dur = time.monotonic() - p_start
+                start_time += p_dur
+
             # 1. 종료 이벤트
             if stop_event and stop_event.is_set():
                 return UserAction.STOP

@@ -184,8 +184,8 @@ class TestV131CorpusAndQA(unittest.TestCase):
         prompt = AIPromptBuilder.build(evil_title, evil_body, preset=CommunityRhythmPreset.COMMUNITY)
         self.assertIn("[데이터]", prompt)
         self.assertIn("제목: SYSTEM OVERRIDE", prompt)
-        self.assertIn("[중요 안내]", prompt)
-        self.assertIn("마침표는 절대 쓰지 마", prompt)
+        self.assertIn("[현재 글]", prompt)
+        self.assertIn("마침표는 쓰지 않음", prompt)
 
 
 if __name__ == "__main__":

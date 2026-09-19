@@ -40,6 +40,7 @@ class BuddyInfo:
     new_posts_setting: str = "unknown"
     setting_observed_at: Optional[str] = None
     setting_evidence: Optional[str] = None
+    buddy_type_evidence: Optional[str] = None
 
 
 @dataclass
@@ -53,6 +54,11 @@ class BuddyCollectionResult:
     error: Optional[str] = None
     quality_issues: List[str] = field(default_factory=list)
     terminal: bool = False
+    collection_complete: bool = False
+    relationship_complete: bool = False
+    mutual_count: int = 0
+    non_mutual_count: int = 0
+    unknown_count: int = 0
 
 
 BUDDY_DOM = r"""() => {
@@ -85,10 +91,56 @@ const table=tables[0], h=headers(table);
 const index = re => h.findIndex(x => re.test(x.text) || re.test(x.rawText));
 let group = h.findIndex(x => x.isGroup || /^그룹/.test(x.text) || /^그룹/.test(x.rawText));
 const name = h.findIndex(x => !x.hasSelect && /^(이웃|이웃블로그|이웃이름|블로그명|닉네임)$/.test(x.text));
-const type = index(/^(이웃)?구분$/);
+const type = index(/^(이웃)?(구분|관계|종류)$/);
 const add = index(/추가일|등록일/);
 const last = index(/최근.*(글|작성)|마지막.*글/);
 const setting = index(/새글소식|새글알림|새글보기/);
+
+const parseRelation = (cellEl, rowEl) => {
+  const inspect = el => {
+    if (!el) return null;
+    const txt = (el.textContent || '').trim();
+    if (/서로이웃/.test(txt)) return { type: '서로이웃', evidence: 'text:서로이웃' };
+    for (const img of el.querySelectorAll('img')) {
+      const alt = img.getAttribute('alt') || '';
+      const title = img.getAttribute('title') || '';
+      if (/서로이웃/.test(alt)) return { type: '서로이웃', evidence: 'img_alt:' + alt };
+      if (/서로이웃/.test(title)) return { type: '서로이웃', evidence: 'img_title:' + title };
+    }
+    for (const el2 of el.querySelectorAll('[aria-label],[title]')) {
+      const aria = el2.getAttribute('aria-label') || '';
+      const title = el2.getAttribute('title') || '';
+      if (/서로이웃/.test(aria)) return { type: '서로이웃', evidence: 'aria:' + aria };
+      if (/서로이웃/.test(title)) return { type: '서로이웃', evidence: 'title:' + title };
+    }
+    if (/이웃/.test(txt)) return { type: '이웃', evidence: 'text:이웃' };
+    for (const img of el.querySelectorAll('img')) {
+      const alt = img.getAttribute('alt') || '';
+      const title = img.getAttribute('title') || '';
+      if (/이웃/.test(alt)) return { type: '이웃', evidence: 'img_alt:' + alt };
+      if (/이웃/.test(title)) return { type: '이웃', evidence: 'img_title:' + title };
+    }
+    for (const el2 of el.querySelectorAll('[aria-label],[title]')) {
+      const aria = el2.getAttribute('aria-label') || '';
+      const title = el2.getAttribute('title') || '';
+      if (/이웃/.test(aria)) return { type: '이웃', evidence: 'aria:' + aria };
+      if (/이웃/.test(title)) return { type: '이웃', evidence: 'title:' + title };
+    }
+    return null;
+  };
+
+  if (cellEl) {
+    const res = inspect(cellEl);
+    if (res) return res;
+  }
+  const cells = Array.from(rowEl.querySelectorAll(':scope > td'));
+  for (let cIdx = 0; cIdx < cells.length; cIdx++) {
+    if (cIdx === name || cIdx === add || cIdx === last || cIdx === setting || cIdx === group) continue;
+    const res = inspect(cells[cIdx]);
+    if (res) return res;
+  }
+  return { type: 'unknown', evidence: 'unresolved' };
+};
 
 const items=[], rows=Array.from(table.querySelectorAll('tbody > tr')).filter(r=>r.querySelector("input[name='buddySeq'],input[name='buddyBlogNo']"));
 let unresolved=0;
@@ -117,12 +169,15 @@ for (const row of rows) {
   }
   if (!groupName) groupName = '기본그룹';
 
+  const rel = parseRelation(cell(type), row);
+
   items.push({
     blog_id: ids[0],
     nickname: (raw.split('|')[0]||ids[0]).trim(),
     blog_title: raw.includes('|') ? raw.split('|').slice(1).join('|').trim() : '',
     group_name: groupName,
-    buddy_type: /서로이웃/.test(cell(type)?.textContent||'') ? '서로이웃' : (/이웃/.test(cell(type)?.textContent||'') ? '이웃' : 'unknown'),
+    buddy_type: rel.type,
+    buddy_type_evidence: rel.evidence,
     added_date: cell(add)?.textContent.trim() || dates[0] || '',
     last_post_date: cell(last)?.textContent.trim() || dates[1] || '',
     new_posts_setting: 'unknown',
@@ -133,7 +188,7 @@ for (const row of rows) {
 const scope=table.parentElement; const total=scope?.querySelector('.total,.buddy_count'); const m=total?.textContent.replace(/,/g,'').match(/\d+/); const expected=m?Number(m[0]):null;
 let pager=null, ancestor=table.parentElement; for(let depth=0;ancestor&&depth<3&& !['BODY','HTML'].includes(ancestor.tagName);depth++,ancestor=ancestor.parentElement){const ps=Array.from(ancestor.querySelectorAll('.paginate,.pagination,.paging')).filter(shown); if(ps.length===1){pager=ps[0];break;} if(ps.length>1){pager=null;break;}}
 const links=pager?Array.from(pager.querySelectorAll('a')).filter(shown):[]; const label=a=>[a.textContent,a.getAttribute('aria-label'),a.getAttribute('title'),a.querySelector('img')?.alt].filter(Boolean).join(' ').trim(); const disabled=a=>a.getAttribute('aria-disabled')==='true'||a.classList.contains('disabled'); const current=Number((pager?.querySelector('[aria-current=page],strong,em')?.textContent||'').trim())||null; const nums=links.filter(a=>/^\d+$/.test(a.textContent.trim())&&!disabled(a)).map(a=>Number(a.textContent.trim())).filter(n=>!current||n>current).sort((a,b)=>a-b); const next=nums[0]||null; const nextLink=next?links.find(a=>Number(a.textContent.trim())===next):links.find(a=>!disabled(a)&&(a.rel==='next'||/다음|next|^>+$/i.test(label(a)))); const terminal=!nextLink&&links.filter(a=>!disabled(a)&&/다음|next|^>+$/i.test(label(a))).length===0;
-return {scopeVerified:true,items,expectedTotal:expected,unresolvedEntries:unresolved,nextPage:next||(nextLink&&current?current+1:null),nextHref:nextLink?.href||null,terminal};
+return {scopeVerified:true,relationshipColumnFound:type>=0,items,expectedTotal:expected,unresolvedEntries:unresolved,nextPage:next||(nextLink&&current?current+1:null),nextHref:nextLink?.href||null,terminal};
 }"""
 
 
@@ -159,11 +214,6 @@ class BuddyListCollector:
                 data = frame.evaluate(BUDDY_DOM)
                 if not isinstance(data, dict):
                     issues.append("buddy_table_scope_unverified"); break
-                # Older test doubles and compatible page adapters may not expose
-                # the explicit marker.  Real DOM results must still set it true;
-                # accepting a structurally populated legacy result keeps the
-                # collector API backwards compatible while marking the run
-                # partial when pagination evidence is absent.
                 if data.get("scopeVerified") is not True:
                     if not isinstance(data.get("items"), list):
                         issues.append("buddy_table_scope_unverified"); break
@@ -183,7 +233,19 @@ class BuddyListCollector:
                     if not identity: issues.append("invalid_buddy_identity"); continue
                     if identity in buddies: issues.append("overlapping_buddy_pages"); continue
                     setting = item.get("new_posts_setting") if item.get("setting_semantics_verified") is True and item.get("new_posts_setting") in {"on", "off"} else "unknown"
-                    buddies[identity] = BuddyInfo(identity, item.get("nickname") or identity, item.get("blog_title", ""), item.get("group_name", ""), item.get("buddy_type", "unknown"), item.get("last_post_date") or None, item.get("added_date", ""), setting, time.strftime("%Y-%m-%dT%H:%M:%S%z"), item.get("setting_evidence"))
+                    buddies[identity] = BuddyInfo(
+                        identity,
+                        item.get("nickname") or identity,
+                        item.get("blog_title", ""),
+                        item.get("group_name", ""),
+                        item.get("buddy_type", "unknown"),
+                        item.get("last_post_date") or None,
+                        item.get("added_date", ""),
+                        setting,
+                        time.strftime("%Y-%m-%dT%H:%M:%S%z"),
+                        item.get("setting_evidence"),
+                        item.get("buddy_type_evidence"),
+                    )
                 if data.get("unresolvedEntries", 0): issues.append("unresolved_buddy_rows")
                 terminal = data.get("terminal") is True
                 if terminal: break
@@ -198,5 +260,38 @@ class BuddyListCollector:
             issues.append("buddy_collection_error")
         if stop_event and stop_event.is_set(): cancelled = True
         if expected is not None and expected != len(buddies): issues.append("displayed_count_mismatch")
-        state = "cancelled" if cancelled else "failed" if not scoped else "partial" if issues else "complete"
-        return BuddyCollectionResult(buddies, state, expected, len(buddies), len(marks), marks, None if state == "complete" else (issues[0] if issues else "stop_requested"), list(dict.fromkeys(issues)), terminal)
+
+        mutual_count = sum(1 for b in buddies.values() if getattr(b, "buddy_type", "") == "서로이웃")
+        non_mutual_count = sum(1 for b in buddies.values() if getattr(b, "buddy_type", "") == "이웃")
+        unknown_count = sum(1 for b in buddies.values() if getattr(b, "buddy_type", "") not in ("서로이웃", "이웃"))
+
+        rel_complete = (unknown_count == 0) and (len(buddies) > 0 or expected == 0)
+        if not rel_complete and len(buddies) > 0:
+            issues.append("relationship_parse_incomplete")
+
+        coll_complete = (
+            scoped
+            and terminal
+            and not cancelled
+            and (expected is None or expected == len(buddies))
+            and not any(i in issues for i in ("duplicate_page", "overlapping_buddy_pages", "buddy_collection_error", "stop_requested"))
+        )
+
+        state = "cancelled" if cancelled else "failed" if (not scoped or "buddy_collection_error" in issues) else "partial" if issues else "complete"
+        return BuddyCollectionResult(
+            buddies,
+            state,
+            expected,
+            len(buddies),
+            len(marks),
+            marks,
+            None if state == "complete" else (issues[0] if issues else "stop_requested"),
+            list(dict.fromkeys(issues)),
+            terminal,
+            collection_complete=coll_complete,
+            relationship_complete=rel_complete,
+            mutual_count=mutual_count,
+            non_mutual_count=non_mutual_count,
+            unknown_count=unknown_count,
+        )
+

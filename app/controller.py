@@ -13,6 +13,9 @@ from app.errors import (
     PostNavigationMismatchError, PostDOMContractError, BrowserDisconnectedError
 )
 from app.processor import PostProcessor, StopRequestedException
+from app.run_control import RunControl, RunControlState
+from app.policy import resolve_run_policy, RunMode
+from app.feed_queue import FeedQueue
 from browser.session import BrowserSession, interruptible_wait
 from naver.sources import NeighborFeedSource, RecommendationFeedSource, DirectUrlSource, TargetedSearchFeedSource, FeedSource
 from naver.auth_guard import NaverAuthGuard
@@ -22,6 +25,8 @@ from services.pacing import PacingService
 from services.clipboard_bridge import ClipboardCommandBridge
 from services.blog_popularity import BlogPopularityService
 from services.like_transaction import LikeCircuitBreaker
+from services.buddy_list_collector import BuddyListCollector
+from services.relationship_resolver import RelationshipResolver, RelationshipType
 import time
 from naver.comment_guard import (
     ServerCommentDuplicateGuard,
@@ -58,6 +63,7 @@ class FeedController:
         pause_event: Optional[threading.Event] = None,
         gemini_extension_bridge: Optional[GeminiExtensionBridge] = None,
         skip_event: Optional[threading.Event] = None,
+        run_control: Optional[RunControl] = None,
     ):
         self.config_service = config
         if hasattr(config, "load") and callable(getattr(config, "load")):
@@ -72,12 +78,30 @@ class FeedController:
         self.command_bridge = command_bridge or ClipboardCommandBridge()
         self.gemini_extension_bridge = gemini_extension_bridge
         self.session: Optional[BrowserSession] = None
+
+        if run_control is not None:
+            self.run_control = run_control
+            self.stop_event = run_control.stop_event
+            self.pause_event = run_control.pause_event
+            self.skip_event = run_control.skip_event
+        else:
+            self.run_control = RunControl(
+                stop_event=self.stop_event,
+                pause_event=self.pause_event,
+                skip_event=self.skip_event,
+                state_manager=self.state_mgr,
+            )
+            self.stop_event = self.run_control.stop_event
+            self.pause_event = self.run_control.pause_event
+            self.skip_event = self.run_control.skip_event
+
         self.pacing = PacingService(
             self.config,
             stop_event=self.stop_event,
             state_manager=self.state_mgr,
             pause_event=self.pause_event,
             skip_event=self.skip_event,
+            run_control=self.run_control,
         )
         self.sampling_manager = SamplingHistoryManager()
         self.campaign_id = self.config.get("campaign_id") or f"camp_{int(time.time())}"
@@ -136,17 +160,17 @@ class FeedController:
             logger.log(f"  ⚠️ [CONTROLLER] Gemini 실패 카운트 증가: {self.consecutive_gemini_failures}/{self.gemini_consecutive_failure_limit} (오류: {cmt_err})")
             if self.consecutive_gemini_failures >= self.gemini_consecutive_failure_limit:
                 logger.log(f"🚨 [CONTROLLER] Gemini 연결/생성이 {self.consecutive_gemini_failures}회 연속 실패하여 작업을 일시 정지합니다.", "ERROR")
-                if self.pause_event:
-                    self.pause_event.set()
+                self.run_control.request_pause("gemini_circuit_breaker")
+                self.pause_event.set()
                 self.state_mgr.update(
                     new_state=FeedState.PAUSED,
                     pause_reason="gemini_circuit_breaker",
-                    message="Gemini 실패 (3회 연속) - 브라우저 확인 필요"
+                    message=f"Gemini {self.consecutive_gemini_failures}회 연속 실패로 일시 정지됨. 네트워크 또는 확장 프로그램 상태를 확인 후 재개하세요."
                 )
 
     def request_skip_current_post(self):
         """현재 처리 중인 글을 건너뛰고 다음 글로 즉시 이동"""
-        self.skip_event.set()
+        self.run_control.request_skip()
         self.pacing.interrupt()
         if hasattr(self, "processor") and self.processor and getattr(self.processor, "gemini_extension_bridge", None):
             self.processor.gemini_extension_bridge.cancel_command()
@@ -166,12 +190,10 @@ class FeedController:
         self._thread.start()
 
     def stop(self):
-        self.stop_event.set()
+        self.run_control.request_stop("user_stop")
         self.pacing.interrupt()
         if hasattr(self, "processor") and self.processor and getattr(self.processor, "gemini_extension_bridge", None):
             self.processor.gemini_extension_bridge.cancel_command()
-        if self.pause_event:
-            self.pause_event.clear()
         if self.session:
             self.session.close(reason="user_stop")
             self.session = None
@@ -241,15 +263,11 @@ class FeedController:
                     pass
         return resolved_count
 
-    def pause(self):
-        if self.pause_event:
-            self.pause_event.set()
-        self.state_mgr.update(new_state=FeedState.PAUSED, message="작업이 일시정지되었습니다.", pause_reason="user_manual_pause")
+    def pause(self, reason: str = "user_manual_pause"):
+        self.run_control.request_pause(reason)
 
     def resume(self):
-        if self.pause_event:
-            self.pause_event.clear()
-        self.state_mgr.update(message="작업을 재개합니다.", clear_pause_reason=True)
+        self.run_control.request_resume()
 
     def _run(self):
         if hasattr(self.config_service, "load") and callable(getattr(self.config_service, "load")):
@@ -258,15 +276,14 @@ class FeedController:
         else:
             self.config = self.config_service
 
-        raw_source = self.config.get("feed_source", FeedSourceType.TARGETED_SEARCH.value) if hasattr(self.config, "get") else FeedSourceType.TARGETED_SEARCH.value
-        source_type_str = str(raw_source.value if hasattr(raw_source, "value") else raw_source)
-        source_type = FeedSourceType(source_type_str)
+        policy = resolve_run_policy(self.config)
+        source_type = policy.source_type
         max_items = int(self.config.get("max_feed_items", 20))
-        like_enabled = bool(self.config.get("like_enabled", True))
+        like_enabled = policy.effective_like_enabled
         cfg_dict = self.config.data if hasattr(self.config, "data") else (self.config if isinstance(self.config, dict) else {})
         comment_workflow = resolve_comment_workflow(cfg_dict)
-        comment_enabled = comment_workflow.effective_comment_enabled
-        auto_comment_submit_enabled = comment_workflow.effective_auto_submit_enabled
+        comment_enabled = policy.effective_comment_enabled
+        auto_comment_submit_enabled = comment_workflow.effective_auto_submit_enabled if not policy.is_sweep_mode else False
         auto_comment_chance = comment_workflow.chance
         comment_template = str(self.config.get("comment_template", ""))
         secret_comment = bool(self.config.get("secret_comment", False))
@@ -279,20 +296,15 @@ class FeedController:
         ai_prompt_style = str(self.config.get("ai_prompt_style", "warm_short"))
 
         gemini_browser_mode = str(self.config.get("gemini_browser_mode", "extension_existing_chrome"))
-        gemini_web_enabled = bool(self.config.get("gemini_web_enabled", True))
+        gemini_web_enabled = bool(self.config.get("gemini_web_enabled", True)) if not policy.is_sweep_mode else False
         gemini_mode = str(self.config.get("gemini_mode", "new"))
         gemini_custom_url = str(self.config.get("gemini_custom_url", "https://gemini.google.com/app"))
         gemini_url = gemini_custom_url if (gemini_mode == "custom" and gemini_custom_url) else "https://gemini.google.com/app"
 
-        neighbor_mutual_only = bool(self.config.get("neighbor_mutual_only", True))
-        neighbor_like_sweep_mode = bool(self.config.get("neighbor_like_sweep_mode", False))
+        neighbor_mutual_only = policy.neighbor_mutual_only
+        neighbor_like_sweep_mode = policy.is_sweep_mode
 
-        if source_type == FeedSourceType.NEIGHBOR and neighbor_like_sweep_mode:
-            neighbor_mutual_only = True
-            like_enabled = True
-            comment_enabled = False
-            auto_comment_submit_enabled = False
-            gemini_web_enabled = False
+        if neighbor_like_sweep_mode:
             logger.log("  ⚡ [NEIGHBOR_SWEEP] 서로이웃 공감 훑기 모드 활성화: 서로이웃만 강제(mutual_only=True), 댓글/Gemini 작업 비활성화 (Like-only)")
 
         # [RUN_CONFIG] 실행 환경 스냅샷 로깅 (이웃 새글/직접입력일 때는 탐색 카테고리/토픽필터 n/a 표시)
@@ -419,11 +431,11 @@ class FeedController:
                 auto_comment_delay_min=auto_comment_delay_min,
                 auto_comment_delay_max=auto_comment_delay_max,
                 history_store=self.history,
+                run_control=self.run_control,
             )
 
             mutual_blog_ids: Set[str] = set()
             if source_type == FeedSourceType.NEIGHBOR and neighbor_mutual_only:
-                from services.buddy_list_collector import BuddyListCollector
                 my_b_id = str(self.config.get("my_blog_id", "")).strip().lower()
                 relationship_page = self.session.get_detail_page()
 
@@ -451,17 +463,22 @@ class FeedController:
                     stop_event=self.stop_event,
                 )
 
-                if buddy_result.state == "failed":
-                    logger.log(f"❌ [NEIGHBOR_GUARD] 서로이웃 목록 수집 실패: state=failed, error={buddy_result.error}. 작업을 중단합니다.", "ERROR")
-                    self.state_mgr.update(new_state=FeedState.ERROR, message="서로이웃 목록 확인 실패")
+                relationship_resolver = RelationshipResolver(buddy_result)
+
+                blocked, block_reason = relationship_resolver.is_execution_blocked()
+                if blocked:
+                    logger.log(f"❌ [NEIGHBOR_GUARD] 서로이웃 목록 판독 불완전/실패: reason={block_reason}. 작업을 중단합니다.", "ERROR")
+                    self.state_mgr.update(new_state=FeedState.ERROR, message=f"서로이웃 목록 확인 실패 ({block_reason})")
                     return
 
-                mutual_blog_ids = {
-                    b_id.lower()
-                    for b_id, info in buddy_result.buddies.items()
-                    if getattr(info, "buddy_type", "") == "서로이웃"
-                }
-                logger.log(f"✅ [NEIGHBOR_GUARD] 서로이웃 목록 수집 완료: 총 {len(mutual_blog_ids)}명 확보 (state={buddy_result.state}, total={buddy_result.collected_total})")
+                mutual_blog_ids = relationship_resolver.get_mutual_blog_ids()
+                summary = relationship_resolver.get_summary()
+                logger.log(f"✅ [NEIGHBOR_GUARD] 서로이웃 목록 수집 완료: 총 {len(mutual_blog_ids)}명 확보 (total={summary['total']}, mutual={summary['mutual']}, non_mutual={summary['non_mutual']}, unknown={summary['unknown']})")
+
+                if len(mutual_blog_ids) == 0:
+                    logger.log("ℹ️ [NEIGHBOR_GUARD] 판독된 서로이웃이 0명입니다 (NO_ELIGIBLE_MUTUAL_NEIGHBORS). 피드 작업을 정상 종료합니다.")
+                    self.state_mgr.update(new_state=FeedState.COMPLETED, message="서로이웃 0명 (NO_ELIGIBLE_MUTUAL_NEIGHBORS)")
+                    return
 
             seen_candidate_keys: Set[str] = set()
             attempted_post_keys: Set[str] = set()
@@ -479,53 +496,75 @@ class FeedController:
             neighbor_already_liked = 0
             neighbor_new_likes = 0
             neighbor_unknown_state = 0
+            sweep_consecutive_already_liked = 0
+
+            feed_queue = FeedQueue()
 
             logger.log("==================================================")
             logger.log(f"🤖 [ASSISTANT] 피드 작업 시작 (목표: 최대 {max_items}개)")
 
-            # 3. 디스커버리 및 처리 루프
+            # 3. 디스커버리 및 순차 큐 처리 루프
             while (
                 len(attempted_post_keys) < max_items
                 and len(seen_candidate_keys) < max_candidate_scan
                 and not self.stop_event.is_set()
             ):
-                self.state_mgr.update(new_state=FeedState.DISCOVERING, message="피드 목록에서 게시글 탐색 중...")
-                discovered = source.discover_posts()
+                if feed_queue.is_empty():
+                    self.run_control.checkpoint("before_feed_discovery")
+                    self.state_mgr.update(new_state=FeedState.DISCOVERING, message="피드 목록에서 게시글 탐색 중...")
+                    discovered = source.discover_posts()
 
-                new_posts = [p for p in discovered if p.key not in seen_candidate_keys]
+                    new_posts = [p for p in discovered if p.key not in seen_candidate_keys]
 
-                if not new_posts:
-                    if source.is_exhausted() or scroll_attempts > 6:
-                        logger.log("[ASSISTANT] 더 이상 로드할 새 게시글이 없습니다.")
-                        break
+                    if not new_posts:
+                        if source.is_exhausted() or scroll_attempts > 6:
+                            logger.log("[ASSISTANT] 더 이상 로드할 새 게시글이 없습니다.")
+                            break
 
-                    self.state_mgr.update(new_state=FeedState.LOADING_MORE, message="피드 스크롤하여 추가 글 로드 중...")
-                    loaded = source.load_more()
-                    scroll_attempts += 1
-                    if not loaded:
-                        break
+                        if feed_queue.can_scroll():
+                            self.run_control.checkpoint("before_scroll")
+                            self.state_mgr.update(new_state=FeedState.LOADING_MORE, message="피드 스크롤하여 추가 글 로드 중...")
+                            loaded = source.load_more()
+                            self.run_control.checkpoint("after_scroll")
+                            scroll_attempts += 1
+                            if not loaded:
+                                break
+                            continue
+                        else:
+                            break
+
+                    scroll_attempts = 0
+                    for p in new_posts:
+                        seen_candidate_keys.add(p.key)
+                        self.state_mgr.update(inc_candidate=True)
+                    feed_queue.push(new_posts)
+
+                post = feed_queue.pop()
+                if not post:
                     continue
 
-                scroll_attempts = 0
-
-                for post in new_posts:
+                feed_queue.set_active(post.key)
+                try:
                     if len(attempted_post_keys) >= max_items or self.stop_event.is_set():
                         break
 
-                    seen_candidate_keys.add(post.key)
-                    self.state_mgr.update(inc_candidate=True)
+                    self.run_control.checkpoint("before_post_candidate")
 
                     # P0-7: 서로이웃이 아니면 상세 글에 들어가기 전에 즉시 스킵
                     if source_type == FeedSourceType.NEIGHBOR and neighbor_mutual_only:
                         neighbor_cards_scanned += 1
                         post_b_id = (getattr(post, "blog_id", "") or "").strip().lower()
-                        if not post_b_id:
+                        rel = relationship_resolver.resolve(post_b_id) if 'relationship_resolver' in locals() else None
+                        if not rel or rel.rel_type == RelationshipType.UNKNOWN:
                             neighbor_non_mutual_skipped += 1
-                            logger.log(f"  ⏭️ [NEIGHBOR_GUARD][SKIP_UNKNOWN] post={post.key} reason=relationship_unknown")
+                            if neighbor_like_sweep_mode:
+                                sweep_consecutive_already_liked = 0
+                            logger.log(f"  ⏭️ [NEIGHBOR_GUARD][SKIP_UNKNOWN] post={post.key} blog={post_b_id} reason={rel.evidence if rel else 'unresolved'}")
                             continue
-                        if post_b_id not in mutual_blog_ids:
+                        if rel.rel_type == RelationshipType.NON_MUTUAL:
                             neighbor_non_mutual_skipped += 1
-                            logger.log(f"  ⏭️ [NEIGHBOR_GUARD][SKIP_NON_MUTUAL] blog={post_b_id} post={post.key} reason=not_mutual")
+                            # Confirmed NON_MUTUAL: streak unchanged
+                            logger.log(f"  ⏭️ [NEIGHBOR_GUARD][SKIP_NON_MUTUAL] blog={post_b_id} post={post.key} reason=not_mutual ({rel.evidence})")
                             continue
                         neighbor_mutual_processed += 1
 
@@ -656,13 +695,24 @@ class FeedController:
                                     neighbor_new_likes += 1
                                 elif result.like_result.error == "low_confidence_skip" or result.like_result.state_after == LikeState.UNKNOWN:
                                     neighbor_unknown_state += 1
-                        while self.pause_event and self.pause_event.is_set() and not self.stop_event.is_set():
-                            time.sleep(0.3)
-                            cmd = self.command_bridge.pop_command() if self.command_bridge else None
-                            if cmd:
-                                self.consecutive_gemini_failures = 0
-                                self.pause_event.clear()
-                                break
+
+                        if neighbor_like_sweep_mode:
+                            state_before = getattr(result.like_result, "state_before", None) if hasattr(result, "like_result") and result.like_result else None
+                            if state_before == LikeState.LIKED:
+                                sweep_consecutive_already_liked += 1
+                                logger.log(f"  ❤️ [SWEEP_STREAK] 연속 기존 공감 확인: {sweep_consecutive_already_liked}/{policy.sweep_stop_consecutive_liked} ({post.key})")
+                                if sweep_consecutive_already_liked >= policy.sweep_stop_consecutive_liked:
+                                    logger.log(f"  🛑 [SWEEP] {policy.sweep_stop_consecutive_liked}연속 이미 공감 완료된 글 감지 -> 피드 훑기를 즉시 정상 종료합니다. (SWEEP_CONSECUTIVE_ALREADY_LIKED_4)")
+                                    final_close_reason = "SWEEP_CONSECUTIVE_ALREADY_LIKED_4"
+                                    break
+                            elif state_before == LikeState.NOT_LIKED:
+                                sweep_consecutive_already_liked = 0
+                                logger.log(f"  🤍 [SWEEP_STREAK] 미공감 글 관측 -> 연속 카운트 초기화 (0/{policy.sweep_stop_consecutive_liked})")
+                            else:
+                                sweep_consecutive_already_liked = 0
+                                logger.log(f"  ⚠️ [SWEEP_STREAK] 공감 상태 불명 -> 연속 카운트 초기화 (0/{policy.sweep_stop_consecutive_liked})")
+
+                        self.run_control.checkpoint("after_post_process")
                     except StopRequestedException:
                         final_close_reason = "user_stop"
                         raise
@@ -677,6 +727,18 @@ class FeedController:
                                 result = processor.process(detail_page, post, action_plan=action_plan)
                                 self.history.record_result(result)
                                 self._handle_post_result(result)
+                                if neighbor_like_sweep_mode:
+                                    state_before = getattr(result.like_result, "state_before", None) if hasattr(result, "like_result") and result.like_result else None
+                                    if state_before == LikeState.LIKED:
+                                        sweep_consecutive_already_liked += 1
+                                        if sweep_consecutive_already_liked >= policy.sweep_stop_consecutive_liked:
+                                            final_close_reason = "SWEEP_CONSECUTIVE_ALREADY_LIKED_4"
+                                            break
+                                    elif state_before == LikeState.NOT_LIKED:
+                                        sweep_consecutive_already_liked = 0
+                                    else:
+                                        sweep_consecutive_already_liked = 0
+                                self.run_control.checkpoint("after_post_process")
                             except (StopRequestedException, FatalSessionError):
                                 raise
                             except Exception as rpe2:
@@ -712,6 +774,9 @@ class FeedController:
                         final_close_reason = "user_stop"
                         break
 
+                    if final_close_reason == "SWEEP_CONSECUTIVE_ALREADY_LIKED_4":
+                        break
+
                     # 4. 다음 글로 넘어가기 전 Pacing 대기 및 Random Pause
                     is_user_skipped = (
                         (self.skip_event and self.skip_event.is_set()) or
@@ -742,11 +807,27 @@ class FeedController:
                             if p_pause and p_pause.skipped:
                                 logger.log("  ⏭️ [PACING] 사용자가 휴식 대기를 건너뛰었습니다.")
                                 self.skip_event.clear()
+                finally:
+                    feed_queue.set_active(None)
+
+                if final_close_reason == "SWEEP_CONSECUTIVE_ALREADY_LIKED_4":
+                    break
 
             if self.stop_event.is_set():
                 self.state_mgr.update(new_state=FeedState.STOPPED, message="사용자에 의해 작업이 중지되었습니다.")
                 logger.log("⏹ [ASSISTANT] 사용자 요청으로 작업 중지 완료.", "WARNING")
                 final_close_reason = "user_stop"
+            elif final_close_reason == "SWEEP_CONSECUTIVE_ALREADY_LIKED_4":
+                self.state_mgr.update(
+                    new_state=FeedState.COMPLETED,
+                    message=f"이웃 공감 훑기 완료: {policy.sweep_stop_consecutive_liked}연속 기존 공감 감지로 정상 종료 (SWEEP_CONSECUTIVE_ALREADY_LIKED_4)"
+                )
+                logger.log(
+                    f"✅ [SWEEP] {policy.sweep_stop_consecutive_liked}연속 기존 공감 글 감지로 공감 훑기 정상 종료!\n"
+                    f"  - 처리 포스트: {len(attempted_post_keys)}개\n"
+                    f"  - 신규 공감: {neighbor_new_likes}개\n"
+                    f"  - 기존 공감: {neighbor_already_liked}개\n"
+                )
             else:
                 st = self.state_mgr.get_state() if self.state_mgr else None
                 sampled_in = st.sampled_in_count if st else 0

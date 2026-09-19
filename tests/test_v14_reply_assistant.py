@@ -18,12 +18,10 @@ class TestV14ReplyAssistant(unittest.TestCase):
             content_focus="FOOD_RESTAURANT",
             verified_anchors=["바게트", "샐러드"]
         )
-        self.assertIn("너는 네이버 블로그 이웃 댓글 초안 작성기야", prompt)
+        self.assertIn("너는 네이버 블로그 이웃", prompt)
         self.assertIn("NEED_MORE_CONTEXT", prompt)
-        self.assertIn("[검증된 앵커]", prompt)
+        self.assertIn("[핵심 소재]", prompt)
         self.assertIn("바게트, 샐러드", prompt)
-        self.assertIn("[콘텐츠 분류]", prompt)
-        self.assertIn("FOOD_RESTAURANT", prompt)
         self.assertIn("30~80자", prompt)
 
     def test_v10_prompt_core_and_secondary_anchors(self):
@@ -37,7 +35,7 @@ class TestV14ReplyAssistant(unittest.TestCase):
         )
         self.assertIn("음식/핵심: 치즈카츠", prompt)
         self.assertIn("보조: 주차장", prompt)
-        self.assertIn("핵심 앵커가 하나 이상 있으면 보조 앵커만으로 댓글을 만들지 마", prompt)
+        self.assertIn("핵심 소재가 있으면 그 소재 또는 그 소재와 직접 관련된 본문 사실에 반응한다", prompt)
 
     def test_reply_batch_prompt_and_parsing(self):
         prompt = MyBlogReplyService.build_batch_prompt(

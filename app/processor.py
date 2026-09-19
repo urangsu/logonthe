@@ -34,11 +34,8 @@ from services.gemini_existing_chrome import ExistingChromeGeminiBridge
 from services.gemini_extension_bridge import GeminiCommand, GeminiExtensionBridge, GeminiResultStatus
 from services.pacing import PacingService
 from browser.session import interruptible_wait
+from app.run_control import RunControl, StopRequestedException
 from src.logger import logger
-
-
-class StopRequestedException(UserStopRequestedError):
-    pass
 
 
 def build_quality_rewrite_feedback(gate_res: Any) -> str:
@@ -186,6 +183,7 @@ class PostProcessor:
         auto_comment_delay_min: Optional[float] = None,
         auto_comment_delay_max: Optional[float] = None,
         history_store: Optional[Any] = None,
+        run_control: Optional[RunControl] = None,
     ):
         self.config = config
         self.session = session
@@ -208,6 +206,25 @@ class PostProcessor:
         self.stop_event = stop_event
         self.pause_event = pause_event
         self.skip_event = skip_event
+        if run_control is not None:
+            self.run_control = run_control
+            self.stop_event = run_control.stop_event
+            self.pause_event = run_control.pause_event
+            self.skip_event = run_control.skip_event
+        else:
+            self.run_control = RunControl(
+                stop_event=self.stop_event,
+                pause_event=self.pause_event,
+                skip_event=self.skip_event,
+                state_manager=self.state_mgr,
+            )
+            self.stop_event = self.run_control.stop_event
+            self.pause_event = self.run_control.pause_event
+            self.skip_event = self.run_control.skip_event
+
+        if self.pacing and hasattr(self.pacing, "run_control") and not getattr(self.pacing, "run_control", None):
+            self.pacing.run_control = self.run_control
+
         self.gemini_extension_bridge = gemini_extension_bridge
         if self.gemini_extension_bridge and hasattr(self.gemini_extension_bridge, "set_control_events"):
             self.gemini_extension_bridge.set_control_events(self.stop_event, self.skip_event)
@@ -258,6 +275,9 @@ class PostProcessor:
         try:
             return self._process_internal(detail_page, post, action_plan=action_plan)
         finally:
+            if hasattr(self, "run_control") and self.run_control:
+                self.run_control.set_active_post(None)
+                self.run_control.safe_clear_skips()
             if self.state_mgr and post_key not in self._processed_post_keys:
                 self._processed_post_keys.add(post_key)
                 self.state_mgr.update(inc_processed=True)
@@ -273,10 +293,27 @@ class PostProcessor:
         navigation_version = self.navigation_version
         post_key = post.key or post.url
 
-        if self.skip_event:
-            self.skip_event.clear()
-        if self.command_bridge:
-            self.command_bridge.clear_skips()
+        if hasattr(self, "run_control") and self.run_control:
+            self.run_control.set_active_post(post_key)
+            if self.run_control.consume_pending_skip(post_key):
+                logger.log(f"  ⏭️ [RUN_CONTROL] 이전 일시정지 중 예약된 스킵 실행: {post_key}")
+                result.like_result.error = "user_skipped"
+                result.comment_result.status = CommentSubmitState.SKIPPED
+                result.comment_result.error = "user_skipped"
+                if self.state_mgr:
+                    self.state_mgr.update(new_state=FeedState.SKIPPING, inc_skip=True)
+                return result
+
+            if not self.run_control.is_skip_pending_for(post_key):
+                if self.skip_event:
+                    self.skip_event.clear()
+                if self.command_bridge:
+                    self.command_bridge.clear_skips()
+        else:
+            if self.skip_event:
+                self.skip_event.clear()
+            if self.command_bridge:
+                self.command_bridge.clear_skips()
 
         if self.stop_event and self.stop_event.is_set():
             raise StopRequestedException("작업 중지 요청됨")
@@ -311,8 +348,13 @@ class PostProcessor:
         logger.log(f"--------------------------------------------------")
         logger.log(f"[POST] 상세 이동: {post.url} ({post.title or '제목 없음'})")
 
+        if hasattr(self, "run_control") and self.run_control:
+            self.run_control.checkpoint("before_detail_goto")
+
         try:
             detail_page.goto(post.url, wait_until="domcontentloaded", timeout=25000)
+            if hasattr(self, "run_control") and self.run_control:
+                self.run_control.checkpoint("after_detail_goto")
             if self.pacing:
                 settle = self.pacing.wait_page_settle()
                 if settle.stopped or (self.stop_event and self.stop_event.is_set()):
@@ -446,7 +488,11 @@ class PostProcessor:
                     )
                 else:
                     # 2-3. 실제 공감 트랜잭션 실행 (2-Path 및 UI Settle 적용)
+                    if hasattr(self, "run_control") and self.run_control:
+                        self.run_control.checkpoint("before_like_click")
                     tx_res = LikeTransactionService.execute_like_transaction(detail_page, self.stop_event, post=post)
+                    if hasattr(self, "run_control") and self.run_control:
+                        self.run_control.checkpoint("after_like_click")
                     tx_res.like_count = elig_like_cnt
                     tx_res.daily_visitors = elig_daily_vis
                     result.like_result = tx_res
@@ -512,9 +558,13 @@ class PostProcessor:
                 self.state_mgr.update(new_state=FeedState.OPENING_COMMENT, message="댓글 레이어 열기 및 서버 중복 확인 중...")
 
             # 3-1. 댓글 레이어 오픈 Polling
+            if hasattr(self, "run_control") and self.run_control:
+                self.run_control.checkpoint("before_comment_open")
             open_ok, open_reason = CommentInteractionService.open_comment_layer(
                 detail_page, stop_event=self.stop_event, skip_event=self.skip_event
             )
+            if hasattr(self, "run_control") and self.run_control:
+                self.run_control.checkpoint("after_comment_open")
             if not open_ok:
                 if open_reason == "user_skipped":
                     logger.log("  ⏭️ [USER] 댓글 레이어 준비 중 다음 글로 건너뛰기 요청됨 (스킵).")
@@ -610,7 +660,7 @@ class PostProcessor:
                     corpus_examples, corpus_stats, style_profile = UserLearningService.get_learning_context(
                         category=content_focus,
                         anchors=food_anchors,
-                        limit=3,
+                        limit=2,
                     )
 
                     style_plan = (action_plan.style_plan if action_plan else None)
@@ -722,6 +772,8 @@ class PostProcessor:
                                         request_id=request_id,
                                         timeout_seconds=gemini_timeout,
                                     )
+                                    if hasattr(self, "run_control") and self.run_control:
+                                        self.run_control.checkpoint("before_gemini_publish")
                                     if not self.gemini_extension_bridge.publish(command, stop_event=self.stop_event, skip_event=self.skip_event):
                                         if self.skip_event and self.skip_event.is_set():
                                             logger.log("  ⏭️ [USER] Gemini 발행 시점에 스킵 감지 -> 즉시 건너뜁니다.")
@@ -743,6 +795,8 @@ class PostProcessor:
                                         stop_event=self.stop_event,
                                         skip_event=self.skip_event,
                                     )
+                                    if hasattr(self, "run_control") and self.run_control:
+                                        self.run_control.checkpoint("after_gemini_publish")
                                     if self.skip_event and self.skip_event.is_set():
                                         logger.log("  ⏭️ [USER] Gemini 생성 중 다음 글로 바로 넘어가기 요청됨 (스킵).")
                                         result.comment_result = CommentProcessResult(
@@ -980,6 +1034,17 @@ class PostProcessor:
                                                         if matched_sec:
                                                             selected_anchor = f"secondary:{matched_sec[0]}"
 
+                                                    # Semantic connection to food/dining context (식사 디테일이나 사실 연결 인정)
+                                                    if selected_anchor == "none" and gen_ctx.verified_anchors:
+                                                        dining_context_signals = (
+                                                            "메뉴", "주문", "식사", "웨이팅", "대기", "줄", "오픈", "양", "가격",
+                                                            "반찬", "스프", "밥", "고기", "국물", "소스", "디저트", "커피", "음식",
+                                                            "점심", "저녁", "리필", "한시", "추천", "조합"
+                                                        )
+                                                        matched_signals = [s for s in dining_context_signals if s in gemini_answer]
+                                                        if matched_signals:
+                                                            selected_anchor = f"dining_context:{matched_signals[0]}"
+
                                                     if content_focus != "GENERAL":
                                                         logger.log(f"[FOOD_COMMENT] focus={content_focus} selected_anchor={selected_anchor}")
 
@@ -997,9 +1062,9 @@ class PostProcessor:
                                                                     self.state_mgr.update(new_state=FeedState.SKIPPING, inc_skip=True)
                                                                 return result
                                                             request_id = uuid.uuid4().hex
-                                                            anchors_hint = ", ".join(gen_ctx.verified_anchors[:3])
+                                                            anchors_hint = ", ".join(gen_ctx.verified_anchors[:2])
                                                             ai_prompt = gen_ctx.build_prompt(
-                                                                rewrite_feedback=f"본문에 언급된 핵심 메뉴/음식({anchors_hint}) 중 하나를 자연스럽게 포함해 주세요.",
+                                                                rewrite_feedback=f"핵심 소재({anchors_hint})와 직접 연결된 본문의 구체적 사실 하나에 조금 더 가벼운 블로그 이웃 말투로 반응해 주세요. 단어 자체를 억지로 넣을 필요는 없습니다.",
                                                                 request_id=request_id,
                                                             )
                                                             gemini_answer = None
@@ -1276,6 +1341,8 @@ class PostProcessor:
                                 post_key=post.key,
                                 timeout_seconds=auto_submit_timeout,
                                 state_mgr=self.state_mgr,
+                                pause_event=self.pause_event,
+                                run_control=self.run_control,
                             )
 
                             if action == UserAction.STOP:
@@ -1356,6 +1423,8 @@ class PostProcessor:
                                         except Exception as e:
                                             logger.log(f"⚠️ [HISTORY] pre_submit 기록 실패 (네이티브 클릭 후, 서버 검증 계속 진행): {e}", "WARNING")
 
+                                if hasattr(self, "run_control") and self.run_control:
+                                    self.run_control.checkpoint("before_comment_submit")
                                 outcome = CommentInteractionService.submit_and_verify(
                                     detail_page,
                                     cmt_res.submitted_text,
@@ -1364,6 +1433,8 @@ class PostProcessor:
                                     click=(origin != SubmitOrigin.NATIVE_CLICK),
                                     origin=origin,
                                 )
+                                if hasattr(self, "run_control") and self.run_control:
+                                    self.run_control.checkpoint("after_comment_submit")
                                 status = outcome.state if hasattr(outcome, "state") else outcome
                                 cmt_res.status = status
 

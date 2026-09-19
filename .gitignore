@@ -27,7 +27,7 @@ data/buddy_engagement_audit_*.xlsx
 data/buddy_engagement_summary_*.csv
 data/unresponsive_buddies_*.csv
 data/non_buddy_reactors_*.csv
-data/user_learning_corpus.json
+data/user_learning_corpus*.json
 data/accumulated_visited_comments.json
 data/naver_comment_corpus.json
 data/real_comment_corpus.json

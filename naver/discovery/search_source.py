@@ -30,10 +30,14 @@ class TargetedSearchFeedSource:
         custom_queries: Optional[List[str]] = None,
         posts_per_query: int = 3,
         rotator: Optional[QueryRotator] = None,
+        pause_event: Optional[threading.Event] = None,
+        run_control = None,
     ):
         self.page = page
         self.max_items = max_items
-        self.stop_event = stop_event
+        self.run_control = run_control
+        self.stop_event = stop_event or getattr(run_control, "stop_event", None)
+        self.pause_event = pause_event or getattr(run_control, "pause_event", None)
         if rotator is not None:
             self.rotator = rotator
         else:
@@ -223,10 +227,17 @@ class TargetedSearchFeedSource:
         """더보기 스크롤 또는 다음 검색어로 순환하여 추가 글 로드"""
         if self._exhausted:
             return False
+
+        if self.run_control and hasattr(self.run_control, "checkpoint"):
+            self.run_control.checkpoint("before_scroll")
+
         try:
             before_fingerprints = self._get_card_fingerprints()
             self.page.evaluate("window.scrollBy(0, 1000)")
-            interruptible_wait(self.stop_event, 1.2)
+            if self.run_control and hasattr(self.run_control, "interruptible_wait"):
+                self.run_control.interruptible_wait(1.2, stage="after_scroll")
+            else:
+                interruptible_wait(self.stop_event, 1.2, pause_event=self.pause_event)
             after_fingerprints = self._get_card_fingerprints()
 
             new_unique = after_fingerprints - before_fingerprints
