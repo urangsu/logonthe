@@ -682,6 +682,7 @@ class FeedController:
                         raise
 
                     # 개별 포스트 오류 격리 (Per-Post Error Boundary) & 단일 페이지 복구 재시도
+                    result: Optional[PostProcessResult] = None
                     try:
                         result = processor.process(detail_page, post, action_plan=action_plan)
                         self.history.record_result(result)
@@ -750,6 +751,7 @@ class FeedController:
                                 )
                                 self.history.record_result(failed_res)
                                 self._handle_post_result(failed_res)
+                                result = failed_res
                         else:
                             logger.log(f"  ⚠️ [POST_RECOVERABLE] 글 처리 오류 격리 ({post.key}): {rpe}", "WARNING")
                             failed_res = PostProcessResult(
@@ -759,6 +761,7 @@ class FeedController:
                             )
                             self.history.record_result(failed_res)
                             self._handle_post_result(failed_res)
+                            result = failed_res
                             continue
                     except Exception as pe:
                         logger.log(f"  ⚠️ [POST_ERROR] 글 처리 예기치 않은 오류 격리 ({post.key}): {pe}", "WARNING")
@@ -769,6 +772,7 @@ class FeedController:
                         )
                         self.history.record_result(failed_res)
                         self._handle_post_result(failed_res)
+                        result = failed_res
 
                     if self.stop_event.is_set():
                         final_close_reason = "user_stop"
@@ -778,14 +782,16 @@ class FeedController:
                         break
 
                     # 4. 다음 글로 넘어가기 전 Pacing 대기 및 Random Pause
+                    comment_res = getattr(result, "comment_result", None) if result else None
+                    like_res = getattr(result, "like_result", None) if result else None
                     is_user_skipped = (
                         (self.skip_event and self.skip_event.is_set()) or
-                        (getattr(result.comment_result, "status", None) == CommentSubmitState.SKIPPED and
-                         getattr(result.comment_result, "error", "") in (
+                        (getattr(comment_res, "status", None) == CommentSubmitState.SKIPPED and
+                         getattr(comment_res, "error", "") in (
                              "user_skipped", "user_skip", "user_skipped_during_gemini_generation",
                              "user_skipped_during_open", "user_skipped_during_settle", "user_skipped_during_like"
                          )) or
-                        getattr(result.like_result, "error", "") == "user_skipped"
+                        getattr(like_res, "error", "") == "user_skipped"
                     )
 
                     if is_user_skipped:
