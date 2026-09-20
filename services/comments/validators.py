@@ -30,8 +30,7 @@ class PositiveSafetyValidator:
 
     BANNED_FAKE_EXPERIENCES = [
         "저도 가봤", "저도 먹어봤", "저도 써봤", "저도 구매했", "저도 이용해봤",
-        "저희 아이도", "우리 강아지도", "우리 고양이도", "저희 집도", "저희 가족도", "저도 예전에",
-        "더라구요", "더군요"
+        "저희 아이도", "우리 강아지도", "우리 고양이도", "저희 집도", "저희 가족도", "저도 예전에"
     ]
 
     BANNED_BODY_EVALUATIONS = [
@@ -62,7 +61,7 @@ class PositiveSafetyValidator:
     ]
 
     BANNED_EXAGGERATIONS = [
-        "취향저격", "취저", "못 참죠", "못참죠", "방문각", "구매각", "강추", "대박"
+        "취향저격", "취저", "못 참죠", "못참죠", "방문각", "구매각", "강추"
     ]
 
     BANNED_EMOTICONS = [

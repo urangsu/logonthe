@@ -293,8 +293,10 @@ class TestV133DiscoveryAndRuntime(unittest.TestCase):
             timeout_seconds=10.0,
             delivery_reserve_seconds=9.0
         )
-        bridge.publish(cmd)
-        bridge.claim_command(cmd.request_id, "tab_test_01")
+        import unittest.mock as mock
+        with mock.patch("time.time", return_value=now - 10.0):
+            bridge.publish(cmd)
+            bridge.claim_command(cmd.request_id, "tab_test_01")
 
         # Content reports generation timeout
         res = GeminiResult(
@@ -310,6 +312,125 @@ class TestV133DiscoveryAndRuntime(unittest.TestCase):
         self.assertTrue(accepted, f"Result should be accepted before acceptance deadline, got {reason}")
         self.assertEqual(reason, "accepted")
         self.assertNotEqual(reason, "late_result")
+
+    def test_gem_r17_py_command_lifecycle_deadlines(self):
+        """GEM-R17-PY: 55s generation + 9s acceptance reserve command lifecycle:
+        T0+54 claim -> PASS
+        T0+56 claim -> FAIL (generation deadline expired)
+        T0+60 result for already-claimed command -> PASS (within acceptance deadline)
+        T0+65 result -> late_result (acceptance deadline expired)
+        """
+        import unittest.mock as mock
+
+        bridge = GeminiExtensionBridge(expected_extension_version="13.2.3", expected_build_id="13.2.3-r17")
+        bridge.record_heartbeat("ready", "Gemini", "https://gemini.google.com/app", "13.2.3", "13.2.3-r17", 3, 2)
+
+        T0 = 1000.0
+        cmd = GeminiCommand(
+            request_id="req_lifecycle_01",
+            post_key="post:lifecycle_01",
+            navigation_version=1,
+            prompt="55+9 생애주기 테스트",
+            created_at=T0,
+            deadline_at=T0 + 55.0,
+            deadline_at_ms=int((T0 + 55.0) * 1000),
+            created_at_ms=int(T0 * 1000),
+            generation_deadline_at=T0 + 55.0,
+            generation_deadline_at_ms=int((T0 + 55.0) * 1000),
+            acceptance_deadline_at=T0 + 64.0,
+            acceptance_deadline_at_ms=int((T0 + 64.0) * 1000),
+            timeout_seconds=55.0,
+            delivery_reserve_seconds=9.0,
+        )
+
+        with mock.patch("time.time", return_value=T0):
+            self.assertTrue(bridge.publish(cmd))
+
+        # 1. T0+54: claim -> PASS
+        with mock.patch("time.time", return_value=T0 + 54.0):
+            claimed = bridge.claim_command(cmd.request_id, "tab_01")
+            self.assertTrue(claimed, "T0+54 claim should PASS")
+            self.assertEqual(bridge._command_state, "claimed")
+
+        # 2. T0+60: result delivery for already-claimed command -> PASS
+        res = GeminiResult(
+            request_id=cmd.request_id,
+            post_key=cmd.post_key,
+            navigation_version=cmd.navigation_version,
+            status="completed",
+            text="정상 생성 댓글",
+            delivery_id=f"{cmd.request_id}:completed:10:h_test"
+        )
+        with mock.patch("time.time", return_value=T0 + 60.0):
+            accepted, reason = bridge.submit_result(res)
+            self.assertTrue(accepted, f"T0+60 result for claimed command should PASS, got {reason}")
+            self.assertEqual(reason, "accepted")
+
+        # 3. T0+56: claim -> FAIL (past generation deadline 55s)
+        bridge2 = GeminiExtensionBridge(expected_extension_version="13.2.3", expected_build_id="13.2.3-r17")
+        bridge2.record_heartbeat("ready", "Gemini", "https://gemini.google.com/app", "13.2.3", "13.2.3-r17", 3, 2)
+
+        cmd2 = GeminiCommand(
+            request_id="req_lifecycle_02",
+            post_key="post:lifecycle_02",
+            navigation_version=1,
+            prompt="55+9 생애주기 만료 테스트",
+            created_at=T0,
+            deadline_at=T0 + 55.0,
+            deadline_at_ms=int((T0 + 55.0) * 1000),
+            created_at_ms=int(T0 * 1000),
+            generation_deadline_at=T0 + 55.0,
+            generation_deadline_at_ms=int((T0 + 55.0) * 1000),
+            acceptance_deadline_at=T0 + 64.0,
+            acceptance_deadline_at_ms=int((T0 + 64.0) * 1000),
+            timeout_seconds=55.0,
+            delivery_reserve_seconds=9.0,
+        )
+        with mock.patch("time.time", return_value=T0):
+            self.assertTrue(bridge2.publish(cmd2))
+
+        with mock.patch("time.time", return_value=T0 + 56.0):
+            claimed2 = bridge2.claim_command(cmd2.request_id, "tab_02")
+            self.assertFalse(claimed2, "T0+56 claim should FAIL")
+            self.assertIsNone(bridge2._command, "Expired command should be cleared")
+            self.assertEqual(bridge2._command_state, "expired")
+
+        # 4. T0+65: result delivery past acceptance deadline -> late_result
+        bridge3 = GeminiExtensionBridge(expected_extension_version="13.2.3", expected_build_id="13.2.3-r17")
+        bridge3.record_heartbeat("ready", "Gemini", "https://gemini.google.com/app", "13.2.3", "13.2.3-r17", 3, 2)
+        cmd3 = GeminiCommand(
+            request_id="req_lifecycle_03",
+            post_key="post:lifecycle_03",
+            navigation_version=1,
+            prompt="55+9 생애주기 late 테스트",
+            created_at=T0,
+            deadline_at=T0 + 55.0,
+            deadline_at_ms=int((T0 + 55.0) * 1000),
+            created_at_ms=int(T0 * 1000),
+            generation_deadline_at=T0 + 55.0,
+            generation_deadline_at_ms=int((T0 + 55.0) * 1000),
+            acceptance_deadline_at=T0 + 64.0,
+            acceptance_deadline_at_ms=int((T0 + 64.0) * 1000),
+            timeout_seconds=55.0,
+            delivery_reserve_seconds=9.0,
+        )
+        with mock.patch("time.time", return_value=T0):
+            bridge3.publish(cmd3)
+        with mock.patch("time.time", return_value=T0 + 10.0):
+            bridge3.claim_command(cmd3.request_id, "tab_03")
+
+        res3 = GeminiResult(
+            request_id=cmd3.request_id,
+            post_key=cmd3.post_key,
+            navigation_version=cmd3.navigation_version,
+            status="completed",
+            text="지연 생성 댓글",
+            delivery_id=f"{cmd3.request_id}:completed:10:h_late"
+        )
+        with mock.patch("time.time", return_value=T0 + 65.0):
+            accepted3, reason3 = bridge3.submit_result(res3)
+            self.assertFalse(accepted3, "T0+65 result should FAIL")
+            self.assertEqual(reason3, "late_result")
 
     def test_gem_r15_py_002_idempotent_failover_delivery(self):
         """GEM-R15-PY-002: Primary와 Failover 경로로 동일 delivery_id 결과가 2회 전달되어도 충돌 없이 already_accepted 처리"""

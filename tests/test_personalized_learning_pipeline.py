@@ -197,9 +197,9 @@ class TestPersonalizedLearningPipeline(unittest.TestCase):
         self.assertTrue(stats["is_fallback"])
         self.assertEqual(stats["total_raw"], 0)
         self.assertEqual(stats["cleaned"], 0)
-        self.assertEqual(len(examples), 3)
-        # 기본 예시 사용 확인
-        self.assertIn("스프랑 밥 무한리필이라니 경양식 돈까스 먹을 때 최고네요~", examples[0])
+        # Fallback now uses single clean grounded representative example
+        self.assertEqual(len(examples), 1)
+        self.assertIn("스프랑 밥 무한리필이라니 경양식 돈까스 먹을 때 든든하겠네요~", examples[0])
 
     def test_prompt_builder_factuality_boundary_and_personalized_integration(self):
         """프롬프트 빌더에 예시/사실 경계문 및 개인화 예시/문체 프로필이 정상 반영되는지 검증"""
@@ -223,7 +223,7 @@ class TestPersonalizedLearningPipeline(unittest.TestCase):
         )
 
         # 1. 버전 확인
-        self.assertEqual(AIPromptBuilder.PROMPT_VERSION, "2.1.0-personalized")
+        self.assertEqual(AIPromptBuilder.PROMPT_VERSION, "3.0.0-grounded-human")
 
         # 2. 사실/예시 분리 경계문 확인
         self.assertIn("[말투 참고 예시]", prompt)
@@ -233,10 +233,10 @@ class TestPersonalizedLearningPipeline(unittest.TestCase):
         self.assertIn("수제 패티 육즙이 가득해서 수제버거 맛집 느낌 제대로네요~", prompt)
         self.assertIn("감자튀김에 트러플 마요 소스 조합이 독특해 보여요", prompt)
 
-        # 4. 주입된 개인화 문체 프로필 확인
+        # 4. 주입된 개인화 문체 프로필 확인 (top_endings는 제거되어 자율 선택 보장)
         self.assertIn("개인화 문체 기준(vv2.0-test)", prompt)
         self.assertIn("평균 35자 내외", prompt)
-        self.assertIn("선호 종결어미(~네요, ~요)", prompt)
+        self.assertNotIn("선호 종결어미", prompt)
         self.assertIn("사용자 수정 경향 반영: 길이 단축 (간결한 1문장 선호)", prompt)
 
 

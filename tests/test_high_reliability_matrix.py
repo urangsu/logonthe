@@ -790,9 +790,7 @@ class TestHighReliabilityMatrix(unittest.TestCase):
         prompt_a = AIPromptBuilder.build("제목", "본문", style_plan=plan_a)
         prompt_b = AIPromptBuilder.build("제목", "본문", style_plan=plan_b)
 
-        self.assertIn("~네요", prompt_a)
         self.assertIn("짧은 감상", prompt_a)
-        self.assertIn("~겠어요", prompt_b)
         self.assertIn("구체적 디테일 공감", prompt_b)
         self.assertNotEqual(prompt_a, prompt_b)
 
@@ -804,8 +802,8 @@ class TestHighReliabilityMatrix(unittest.TestCase):
         prompt1 = AIPromptBuilder.build("제목", "본문1", style_plan=action_plan.style_plan)
         prompt2 = AIPromptBuilder.build("제목", "본문2 확장", style_plan=action_plan.style_plan)
 
-        self.assertIn("~보여요", prompt1)
-        self.assertIn("~보여요", prompt2)
+        self.assertIn("가벼운 관심", prompt1)
+        self.assertIn("가벼운 관심", prompt2)
         self.assertEqual(action_plan.style_plan.ending_family, "~보여요")
 
     def test_tone_03_user_learning_provenance_distinction(self):

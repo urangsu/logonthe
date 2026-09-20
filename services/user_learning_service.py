@@ -6,6 +6,7 @@ import os
 import re
 import tempfile
 import time
+import unicodedata
 from typing import Optional, Dict, Any, List, Tuple
 
 from app.models import FeedPost
@@ -31,6 +32,8 @@ class PersonalizedStyleProfile:
     tilde_ratio: float = 0.3
     exclamation_ratio: float = 0.2
     question_ratio: float = 0.05
+    laughter_ratio: float = 0.05
+    emoji_ratio: float = 0.02
     top_endings: List[str] = field(default_factory=lambda: ["~네요", "~요"])
     user_edit_tendency: List[str] = field(default_factory=list)
 
@@ -285,6 +288,8 @@ class UserLearningService:
         tilde_count = sum(1 for it in cleaned_entries if "~" in it["final_submitted"])
         excl_count = sum(1 for it in cleaned_entries if "!" in it["final_submitted"])
         q_count = sum(1 for it in cleaned_entries if "?" in it["final_submitted"])
+        laughter_count = sum(1 for it in cleaned_entries if re.search(r"[ㅋㅎㅠㅜ]", it.get("final_submitted", "")))
+        emoji_count = sum(1 for it in cleaned_entries if any(unicodedata.category(c) == "So" for c in it.get("final_submitted", "")))
 
         endings_freq: Dict[str, int] = {}
         for it in cleaned_entries:
@@ -332,6 +337,8 @@ class UserLearningService:
             tilde_ratio=round(tilde_count / total, 2),
             exclamation_ratio=round(excl_count / total, 2),
             question_ratio=round(q_count / total, 2),
+            laughter_ratio=round(laughter_count / total, 2),
+            emoji_ratio=round(emoji_count / total, 2),
             top_endings=top_endings,
             user_edit_tendency=edit_tendencies,
         )

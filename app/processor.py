@@ -309,7 +309,7 @@ class PostProcessor:
         ai_prompt = ""
         if self.ai_clipboard_enabled or self.gemini_web_enabled:
             ai_prompt = gen_ctx.build_prompt(request_id=req_id)
-            prompt_ver = getattr(AIPromptBuilder, "PROMPT_VERSION", "2.1.0-personalized")
+            prompt_ver = getattr(AIPromptBuilder, "PROMPT_VERSION", "3.0.0-grounded-human")
             stats = gen_ctx.corpus_stats or {}
             logger.log(
                 f"  📝 [PROMPT] version={prompt_ver} "
@@ -1056,7 +1056,8 @@ class PostProcessor:
 
                                                 # Step 1: Body validation
                                                 body_gate = FinalQualityGate.validate_final_text(
-                                                    gemini_answer, preset=preset, source="gemini_body"
+                                                    gemini_answer, preset=preset, source="gemini_body",
+                                                    style_profile=getattr(gen_ctx, "style_profile", None),
                                                 )
                                                 if not body_gate.valid:
                                                     if not getattr(self, "_quality_body_retry_done", False) and gen_ctx.attempt_count < gen_ctx.max_attempts:
@@ -1097,7 +1098,8 @@ class PostProcessor:
                                                     # Step 2: Combined / Suffix validation
                                                     candidate_with_suffix = DraftService.compose_body_and_suffix(gemini_answer, suffix)
                                                     combined_gate = FinalQualityGate.validate_final_text(
-                                                        candidate_with_suffix, preset=preset, source="gemini_suffix"
+                                                        candidate_with_suffix, preset=preset, source="gemini_suffix",
+                                                        style_profile=getattr(gen_ctx, "style_profile", None),
                                                     )
                                                     if not combined_gate.valid:
                                                         if not getattr(self, "_quality_body_retry_done", False) and gen_ctx.attempt_count < gen_ctx.max_attempts:
@@ -1139,8 +1141,9 @@ class PostProcessor:
                                                             f"✅ [GEMINI/EXTENSION] 품질 검사 통과: "
                                                             f"length={combined_gate.length} source=gemini"
                                                         )
+                                                        # P0-4: Semantic anchor selection & connection
                                                         selected_anchor = "none"
-                                                        matched_food = [a for a in gen_ctx.verified_anchors if a in gemini_answer]
+                                                        matched_food = [d for d in gen_ctx.verified_anchors if d in gemini_answer]
                                                         if matched_food:
                                                             selected_anchor = matched_food[0]
                                                         elif gen_ctx.secondary_anchors:
@@ -1151,9 +1154,8 @@ class PostProcessor:
                                                         # Semantic connection to food/dining context (식사 디테일이나 사실 연결 인정)
                                                         if selected_anchor == "none" and gen_ctx.verified_anchors:
                                                             dining_context_signals = (
-                                                                "메뉴", "주문", "식사", "웨이팅", "대기", "줄", "오픈", "양", "가격",
-                                                                "반찬", "스프", "밥", "고기", "국물", "소스", "디저트", "커피", "음식",
-                                                                "점심", "저녁", "리필", "한시", "추천", "조합"
+                                                                "웨이팅", "대기", "줄", "오픈", "양", "가격", "리필", "점심", "저녁", "주문",
+                                                                "반찬", "스프", "밥", "고기", "국물", "소스", "디저트", "커피", "한시"
                                                             )
                                                             matched_signals = [s for s in dining_context_signals if s in gemini_answer]
                                                             if matched_signals:
@@ -1326,7 +1328,10 @@ class PostProcessor:
                         if gemini_answer:
                             logger.log(f"[GEMINI_GENERATION_SUCCESS] rid={request_id} post={post.key} nav={navigation_version}")
                             cand_composed = DraftService.compose_body_and_suffix(gemini_answer, suffix)
-                            gate_res = FinalQualityGate.validate_final_text(cand_composed, preset=preset, source="gemini")
+                            gate_res = FinalQualityGate.validate_final_text(
+                                cand_composed, preset=preset, source="gemini",
+                                style_profile=getattr(gen_ctx, "style_profile", None) if "gen_ctx" in locals() else None,
+                            )
                             if gate_res.valid:
                                 draft_text = cand_composed
                                 draft_source_label = "Gemini 생성"

@@ -619,7 +619,11 @@ class GeminiExtensionBridge:
                 return False
             if not self._command or self._command_state != "pending":
                 return False
-            if time.time() >= (self._command.acceptance_deadline_at or self._command.deadline_at):
+            generation_deadline = (
+                self._command.generation_deadline_at
+                or self._command.deadline_at
+            )
+            if time.time() >= generation_deadline:
                 self._command = None
                 self._command_state = "expired"
                 return False

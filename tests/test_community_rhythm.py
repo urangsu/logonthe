@@ -172,6 +172,41 @@ class TestCommunityRhythmPolicy(unittest.TestCase):
         self.assertTrue(result.valid)
         self.assertEqual(result.source, "local")
 
+    def test_daebak_and_deoraguyo_and_soft_style_rules(self):
+        """P1: '대박' 1회 허용, '더라구요' 관찰 허용, style_profile 기반 soft style 검증"""
+        # 1. '대박' 1회 허용, 2회 이상 차단
+        single_daebak = FinalQualityGate.validate("대박 돈까스 비주얼 진짜 좋네요~", preset="community")
+        self.assertTrue(single_daebak.valid, f"Expected single 대박 to be allowed, got {single_daebak.code}")
+
+        multi_daebak = FinalQualityGate.validate("대박 돈까스 비주얼 대박 좋네요~", preset="community")
+        self.assertFalse(multi_daebak.valid)
+        self.assertEqual(multi_daebak.code, "excessive_slang")
+
+        # 2. '더라구요', '더군요' 관찰 허용 (가짜 경험 regex 아닌 경우)
+        observation = FinalQualityGate.validate("사진으로 봐도 양이 꽤 많아 보이더라구요", preset="community")
+        self.assertTrue(observation.valid, f"Expected observation to pass, got {observation.code}")
+
+        fake_exp = FinalQualityGate.validate("저도 먹어봤는데 정말 맛있더라구요", preset="community")
+        self.assertFalse(fake_exp.valid)
+        self.assertEqual(fake_exp.code, "fake_experience")
+
+        # 3. style_profile soft style
+        from services.user_learning_service import PersonalizedStyleProfile
+        profile_with_laughter = PersonalizedStyleProfile(laughter_ratio=0.08, emoji_ratio=0.03)
+
+        # Without profile: ㅎㅎ rejected
+        no_prof = FinalQualityGate.validate("여기 돈까스 양 진짜 많네요 ㅎㅎ", preset="community")
+        self.assertFalse(no_prof.valid)
+        self.assertEqual(no_prof.code, "laughter_or_emoticon")
+
+        # With profile: single ㅎㅎ accepted
+        with_prof = FinalQualityGate.validate("여기 돈까스 양 진짜 많네요 ㅎㅎ", preset="community", style_profile=profile_with_laughter)
+        self.assertTrue(with_prof.valid, f"Expected single ㅎㅎ to pass with profile, got {with_prof.code}")
+
+        # With profile: single emoji accepted
+        emoji_pass = FinalQualityGate.validate("여기 돈까스 양 진짜 많네요 😊", preset="community", style_profile=profile_with_laughter)
+        self.assertTrue(emoji_pass.valid, f"Expected single emoji to pass with profile, got {emoji_pass.code}")
+
 
 if __name__ == "__main__":
     unittest.main()

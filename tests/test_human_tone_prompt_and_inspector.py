@@ -25,9 +25,8 @@ class TestHumanTonePromptAndInspector(unittest.TestCase):
         self.assertIn("[데이터]", prompt)
         self.assertIn("[출력]", prompt)
 
-        # 2. 대표 예시 2개 확인 (Prompt v3: 2개 제한)
-        self.assertIn("스프랑 밥 무한리필이라니 경양식 돈까스 먹을 때 최고네요~", prompt)
-        self.assertIn("텐동 튀김 비쥬얼 진짜 예술이네요~", prompt)
+        # 2. 대표 예시 확인 (사용자 수정본 없을 시 단일 사실 근거 대표 예시)
+        self.assertIn("스프랑 밥 무한리필이라니 경양식 돈까스 먹을 때 든든하겠네요~", prompt)
 
         # 3. 습관적 중복 덧붙임 방지 지침 확인
         self.assertIn("좋겠어요, 참고해야겠어요, 기억해둬야겠네요, 한번 가봐야겠어요, 도움이 될 것 같아요", prompt)

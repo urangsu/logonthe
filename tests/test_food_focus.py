@@ -76,6 +76,23 @@ class TestFoodCommentFocus(unittest.TestCase):
         )
         self.assertNotIn("[음식 글 우선 규칙]", prompt_general)
 
+    def test_food_008_single_char_raw_fish_not_matched_on_company_dinner(self):
+        """FOOD-008: '회식'이나 '회사' 단어에 단일 문자 '회'가 음식 앵커로 오탐되지 않고, 구체적 어휘(모둠회, 연어회)만 탐지됨"""
+        # False positive check: 회사 회식 post
+        res_false = FoodCommentFocus.analyze(
+            "강남역 주변 팀 회식 장소 추천",
+            "회사 동료들과 함께 룸 식당에서 깔끔하게 식사하고 왔습니다."
+        )
+        self.assertNotIn("회", res_false["food_anchors"])
+
+        # True positive check: specific multi-character dishes
+        res_true = FoodCommentFocus.analyze(
+            "노량진 수산시장 모둠회 포장",
+            "싱싱한 모둠회와 연어회 한 접시 푸짐하게 포장해왔어요."
+        )
+        self.assertIn("모둠회", res_true["food_anchors"])
+        self.assertIn("연어회", res_true["food_anchors"])
+
 
 if __name__ == "__main__":
     unittest.main()

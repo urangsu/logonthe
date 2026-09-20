@@ -14,14 +14,10 @@ class AIPromptBuilder:
     - 재작성 시 전체 프롬프트 반복 대신 간결한 델타 피드백 적용.
     """
 
-    PROMPT_VERSION = "2.1.0-personalized"
+    PROMPT_VERSION = "3.0.0-grounded-human"
 
     REPRESENTATIVE_EXAMPLES = [
-        '- "스프랑 밥 무한리필이라니 경양식 돈까스 먹을 때 최고네요~"',
-        '- "텐동 튀김 비쥬얼 진짜 예술이네요~"',
-        '- "올레시장 맛있는거 진짜 많죠 넘 좋네요~"',
-        '- "웨이팅 1시간 반이라니 인기 진짜 많은 곳인가 봐요"',
-        '- "양꼬치보다 양갈비살이 더 맛있다니 의외네요~"',
+        '- "스프랑 밥 무한리필이라니 경양식 돈까스 먹을 때 든든하겠네요~"',
     ]
 
     @classmethod
@@ -94,29 +90,24 @@ class AIPromptBuilder:
         ]
 
         if style_profile and getattr(style_profile, "total_samples", 0) > 0:
-            endings = getattr(style_profile, "top_endings", [])
-            endings_str = f", 선호 종결어미({', '.join(endings[:3])})" if endings else ""
-            style_notes.append(f"- 개인화 문체 기준(v{style_profile.version}): 평균 {int(style_profile.avg_length)}자 내외{endings_str}")
+            style_notes.append(f"- 개인화 문체 기준(v{style_profile.version}): 평균 {int(style_profile.avg_length)}자 내외")
             tendency = getattr(style_profile, "user_edit_tendency", [])
             if tendency:
                 style_notes.append(f"- 사용자 수정 경향 반영: {', '.join(tendency)}")
 
         if style_plan:
-            # 어미를 강제하지 않고 다양성 분석/성향 참고용 메타데이터로 반영
+            # 어미 문자열을 강제하지 않고 반응 톤만 가볍게 반영
             reaction_hint = getattr(style_plan, "reaction_type", "")
-            ending_meta = getattr(style_plan, "ending_family", "")
-            meta_parts = []
             if reaction_hint:
-                meta_parts.append(f"반응 톤: {reaction_hint}")
-            if ending_meta:
-                meta_parts.append(f"분석 어미군: {ending_meta}")
-            if meta_parts:
-                style_notes.append(f"- 스타일 분석 참고: {', '.join(meta_parts)} (어미는 문맥에 맞춰 완전 자율 선택)")
+                style_notes.append(f"- 스타일 분석 참고: 반응 톤은 '{reaction_hint}' 느낌으로 가볍게 작성 (어미는 문맥에 맞춰 완전 자율 선택)")
 
         style_criteria = "\n".join(style_notes)
 
-        # 2. 동적/대표 예시: 최대 2개로 제한
-        examples_to_use = corpus_examples[:2] if (corpus_examples and len(corpus_examples) >= 1) else cls.REPRESENTATIVE_EXAMPLES[:2]
+        # 2. 동적/대표 예시: 사용자 수정본이 있으면 최대 2개, 없으면 대표 예시 1개
+        if corpus_examples and len(corpus_examples) >= 1:
+            examples_to_use = corpus_examples[:2]
+        else:
+            examples_to_use = cls.REPRESENTATIVE_EXAMPLES[:1]
         formatted_examples = []
         for ex in examples_to_use:
             cleaned_ex = ex.strip().lstrip("- ").strip('"\'')
