@@ -366,7 +366,13 @@ class TestV133DiscoveryAndRuntime(unittest.TestCase):
             self.assertTrue(accepted, f"T0+60 result for claimed command should PASS, got {reason}")
             self.assertEqual(reason, "accepted")
 
-        # 3. T0+56: claim -> FAIL (past generation deadline 55s)
+        # 2-1. Identical re-delivery -> already_accepted idempotent ACK
+        with mock.patch("time.time", return_value=T0 + 60.5):
+            re_accepted, re_reason = bridge.submit_result(res)
+            self.assertTrue(re_accepted)
+            self.assertEqual(re_reason, "already_accepted")
+
+        # 3. T0+55.0 exact boundary: claim -> FAIL (half-open: now >= generation_deadline)
         bridge2 = GeminiExtensionBridge(expected_extension_version="13.2.3", expected_build_id="13.2.3-r17")
         bridge2.record_heartbeat("ready", "Gemini", "https://gemini.google.com/app", "13.2.3", "13.2.3-r17", 3, 2)
 
@@ -389,13 +395,48 @@ class TestV133DiscoveryAndRuntime(unittest.TestCase):
         with mock.patch("time.time", return_value=T0):
             self.assertTrue(bridge2.publish(cmd2))
 
-        with mock.patch("time.time", return_value=T0 + 56.0):
+        with mock.patch("time.time", return_value=T0 + 55.0):
             claimed2 = bridge2.claim_command(cmd2.request_id, "tab_02")
-            self.assertFalse(claimed2, "T0+56 claim should FAIL")
+            self.assertFalse(claimed2, "Exact T0+55.0 claim must FAIL on half-open interval")
             self.assertIsNone(bridge2._command, "Expired command should be cleared")
             self.assertEqual(bridge2._command_state, "expired")
 
-        # 4. T0+65: result delivery past acceptance deadline -> late_result
+        # 4. Unclaimed completed result submission at T0+10 or T0+60 -> FAIL (unclaimed_command)
+        bridge_unclaimed = GeminiExtensionBridge(expected_extension_version="13.2.3", expected_build_id="13.2.3-r17")
+        bridge_unclaimed.record_heartbeat("ready", "Gemini", "https://gemini.google.com/app", "13.2.3", "13.2.3-r17", 3, 2)
+        cmd_unclaimed = GeminiCommand(
+            request_id="req_lifecycle_unclaimed",
+            post_key="post:lifecycle_unclaimed",
+            navigation_version=1,
+            prompt="unclaimed 테스트",
+            created_at=T0,
+            deadline_at=T0 + 55.0,
+            deadline_at_ms=int((T0 + 55.0) * 1000),
+            created_at_ms=int(T0 * 1000),
+            generation_deadline_at=T0 + 55.0,
+            generation_deadline_at_ms=int((T0 + 55.0) * 1000),
+            acceptance_deadline_at=T0 + 64.0,
+            acceptance_deadline_at_ms=int((T0 + 64.0) * 1000),
+            timeout_seconds=55.0,
+            delivery_reserve_seconds=9.0,
+        )
+        with mock.patch("time.time", return_value=T0):
+            bridge_unclaimed.publish(cmd_unclaimed)
+
+        res_unclaimed = GeminiResult(
+            request_id=cmd_unclaimed.request_id,
+            post_key=cmd_unclaimed.post_key,
+            navigation_version=cmd_unclaimed.navigation_version,
+            status="completed",
+            text="미수락 상태 댓글",
+            delivery_id=f"{cmd_unclaimed.request_id}:completed:10:h_unclaimed"
+        )
+        with mock.patch("time.time", return_value=T0 + 60.0):
+            accepted_u, reason_u = bridge_unclaimed.submit_result(res_unclaimed)
+            self.assertFalse(accepted_u, "Unclaimed completed result must be rejected")
+            self.assertEqual(reason_u, "unclaimed_command")
+
+        # 5. T0+64.0 exact boundary: result delivery past acceptance deadline -> late_result
         bridge3 = GeminiExtensionBridge(expected_extension_version="13.2.3", expected_build_id="13.2.3-r17")
         bridge3.record_heartbeat("ready", "Gemini", "https://gemini.google.com/app", "13.2.3", "13.2.3-r17", 3, 2)
         cmd3 = GeminiCommand(
@@ -427,9 +468,9 @@ class TestV133DiscoveryAndRuntime(unittest.TestCase):
             text="지연 생성 댓글",
             delivery_id=f"{cmd3.request_id}:completed:10:h_late"
         )
-        with mock.patch("time.time", return_value=T0 + 65.0):
+        with mock.patch("time.time", return_value=T0 + 64.0):
             accepted3, reason3 = bridge3.submit_result(res3)
-            self.assertFalse(accepted3, "T0+65 result should FAIL")
+            self.assertFalse(accepted3, "Exact T0+64.0 result must FAIL on half-open interval")
             self.assertEqual(reason3, "late_result")
 
     def test_gem_r15_py_002_idempotent_failover_delivery(self):

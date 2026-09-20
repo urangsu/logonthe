@@ -403,11 +403,19 @@ class FinalQualityGate:
     )
 
     _LAUGHTER_RE: ClassVar[re.Pattern[str]] = re.compile(r"[ㅋㅎㅠㅜ]{1,}")
+    _EMOJI_RE: ClassVar[re.Pattern[str]] = re.compile(
+        r"(?:\u2764\ufe0f|"
+        r"[\U0001F1E6-\U0001F1FF]{2}|"
+        r"[\U0001F300-\U0001F9FF\U0001FA00-\U0001FAFF]"
+        r"(?:[\U0001F3FB-\U0001F3FF])?"
+        r"(?:\u200D[\U0001F300-\U0001F9FF\U0001FA00-\U0001FAFF](?:[\U0001F3FB-\U0001F3FF])?)*|"
+        r"[\u2600-\u27BF]"
+        r")"
+    )
     _FAKE_EXPERIENCE_RE: ClassVar[re.Pattern[str]] = re.compile(
-        r"(?:저도|저는|제가|저희|우리)\s*"
-        r"(?:어제|지난번에?|지난|전에?|예전에?|직접|이미|한번|최근에?)?\s*"
-        r"(?:가봤|먹어봤|써봤|구매했|구매해봤|이용해봤|주문해봤|"
-        r"다녀왔|방문했|사용해봤)"
+        r"(?:(?:저도|저는|제가|저희|우리)\s*(?:어제|지난번에?|지난|전에?|예전에?|직접|이미|한번|최근에?)?\s*"
+        r"(?:가봤|먹어봤|써봤|구매했|구매해봤|이용해봤|주문해봤|다녀왔|방문했|사용해봤))|"
+        r"(?:(?<![가-힣])(?:먹|가|써|사먹|다녀|주문해|시켜|구매해|방문해|이용해|사용해)(?:어|아)?(?:보니까|보니|봤는데|봤더니|본\s*(?:결과|경험)|봤어요|봤습니다))"
     )
 
     # Descriptive aliases make the policy easy to consume from UI and tests
@@ -434,6 +442,18 @@ class FinalQualityGate:
         return unicodedata.normalize("NFC", text)
 
     @classmethod
+    def _extract_emojis(cls, text: str) -> List[str]:
+        matches = list(cls._EMOJI_RE.finditer(text))
+        matched_spans = [m.span() for m in matches]
+        result = [m.group() for m in matches]
+        for idx, ch in enumerate(text):
+            if any(start <= idx < end for start, end in matched_spans):
+                continue
+            if unicodedata.category(ch) in ("So",):
+                result.append(ch)
+        return result
+
+    @classmethod
     def validate(
         cls,
         text: str,
@@ -446,6 +466,8 @@ class FinalQualityGate:
         semantic_compatibility: Optional[bool] = None,
         repetition_family: Optional[str] = None,
         style_profile: Optional[Any] = None,
+        style_policy: Optional[Any] = None,
+        excerpt: Optional[str] = None,
     ) -> FinalQualityResult:
         original = text if isinstance(text, str) else ""
         normalized = cls.normalize(original)
@@ -482,7 +504,12 @@ class FinalQualityGate:
 
         is_thoughtful = (effective_preset == CommunityRhythmPreset.THOUGHTFUL.value)
         is_user_source = source in ("user_edit", "user", "manual", "user_override")
-        effective_allow_period = allow_period or is_thoughtful or is_user_source
+        effective_allow_period = (
+            allow_period
+            or is_thoughtful
+            or is_user_source
+            or bool(style_policy and getattr(style_policy, "allow_period", False))
+        )
         if not isinstance(text, str):
             return result(False, "invalid_text", "comment text must be a string")
         if not effective_allow_period and not legacy and ("." in normalized or "。" in normalized):
@@ -491,7 +518,7 @@ class FinalQualityGate:
         if not legacy and not is_user_source and normalized.count("~") > (2 if is_thoughtful else 1):
             max_tilde = 2 if is_thoughtful else 1
             return result(False, "excessive_tilde", f"at most {max_tilde} tildes allowed", matched="~")
-        strong_slang = re.findall(r"(?:^|\s)(헐|와|세상에|대박)(?=\s)|미쳤|맛도리", normalized)
+        strong_slang = re.findall(r"(?:^|[\s!?.,~])(헐|와|세상에|대박)(?=[\s!?.,~]|$)|미쳤|맛도리", normalized)
         if not legacy and not is_user_source and len(strong_slang) > (2 if is_thoughtful else 1):
             return result(False, "excessive_slang", "at most one strong slang expression is allowed")
         if semantic_compatibility is False:
@@ -504,10 +531,6 @@ class FinalQualityGate:
             for phrase in cls.FORMAL_SUBSTRINGS:
                 if phrase in normalized:
                     return result(False, "formal_register", f"formal register is forbidden: {phrase}", matched=phrase)
-            # PositiveSafetyValidator still owns its historic macro vocabulary;
-            # its compatibility profile must not reject existing grounded text
-            # merely because a newly added V13.1 root is present. Final text uses
-            # the strict public profile above.
             if not legacy:
                 for phrase in cls.HARD_BANNED_MACROS:
                     if phrase in normalized:
@@ -530,22 +553,43 @@ class FinalQualityGate:
             for phrase in cls.ABSOLUTE_OR_PRESSURE_PHRASES:
                 if phrase in normalized:
                     return result(False, "absolute_or_pressure", f"absolute or pressure wording is forbidden: {phrase}", matched=phrase)
-            allow_soft_laughter = bool(style_profile and getattr(style_profile, "laughter_ratio", 0.0) >= 0.03)
-            allow_soft_emoji = bool(style_profile and getattr(style_profile, "emoji_ratio", 0.0) >= 0.01)
+
+            # 소프트 장식(웃음/이모지) 정책 판정
+            allow_soft_laughter = False
+            allow_soft_emoji = False
+            max_decorations = 0
+
+            if style_policy:
+                allow_soft_laughter = getattr(style_policy, "allow_soft_laughter", False)
+                allow_soft_emoji = getattr(style_policy, "allow_soft_emoji", False)
+                max_decorations = getattr(style_policy, "max_combined_decorations", 1 if (allow_soft_laughter or allow_soft_emoji) else 0)
+            elif style_profile:
+                total_samples = getattr(style_profile, "total_samples", 0)
+                allow_soft_laughter = bool((total_samples == 0 or total_samples >= 5) and getattr(style_profile, "laughter_ratio", 0.0) >= 0.05)
+                allow_soft_emoji = bool((total_samples == 0 or total_samples >= 5) and getattr(style_profile, "emoji_ratio", 0.0) >= 0.03)
+                max_decorations = 1 if (allow_soft_laughter or allow_soft_emoji) else 0
+
+            laughter_matches = cls._LAUGHTER_RE.findall(normalized)
+            emoji_matches = cls._extract_emojis(normalized)
+            combined_decorations = len(laughter_matches) + len(emoji_matches)
+
+            if combined_decorations > max_decorations:
+                if emoji_matches and not allow_soft_emoji:
+                    return result(False, "emoji", f"emoji is forbidden: {emoji_matches[0]}", matched=emoji_matches[0])
+                if laughter_matches and not allow_soft_laughter:
+                    return result(False, "laughter_or_emoticon", f"laughter marker is forbidden: {laughter_matches[0]}", matched=laughter_matches[0])
+                return result(False, "excessive_decorations", f"at most {max_decorations} combined laughter or emoji allowed", matched=normalized)
 
             for phrase in cls.EMOTICON_PHRASES:
                 if phrase in normalized:
-                    if not (allow_soft_laughter and phrase in ("ㅎㅎ", "ㅋㅋ", "^^", "ㅠㅠ", "ㅜㅜ") and normalized.count(phrase) == 1):
+                    if not (allow_soft_laughter and phrase in ("ㅎㅎ", "ㅋㅋ", "^^", "ㅠㅠ", "ㅜㅜ") and combined_decorations <= max_decorations):
                         return result(False, "laughter_or_emoticon", f"laughter or emoticon is forbidden: {phrase}", matched=phrase)
-            laughter = cls._LAUGHTER_RE.search(normalized)
-            if laughter:
-                laughter_all = cls._LAUGHTER_RE.findall(normalized)
-                if not (allow_soft_laughter and len(laughter_all) == 1 and len(laughter_all[0]) <= 2):
-                    return result(False, "laughter_or_emoticon", f"laughter marker is forbidden: {laughter.group()}", matched=laughter.group())
-            emoji_symbols = [s for s in normalized if unicodedata.category(s) == "So"]
-            if emoji_symbols:
-                if not (allow_soft_emoji and len(emoji_symbols) == 1):
-                    return result(False, "emoji", f"emoji or symbol is forbidden: {emoji_symbols[0]}", matched=emoji_symbols[0])
+            if laughter_matches:
+                if not (allow_soft_laughter and len(laughter_matches) <= max_decorations and all(len(m) <= 2 for m in laughter_matches)):
+                    return result(False, "laughter_or_emoticon", f"laughter marker is forbidden: {laughter_matches[0]}", matched=laughter_matches[0])
+            if emoji_matches:
+                if not (allow_soft_emoji and len(emoji_matches) <= max_decorations):
+                    return result(False, "emoji", f"emoji or symbol is forbidden: {emoji_matches[0]}", matched=emoji_matches[0])
 
         # 욕설(RUDE_SLANG)은 항상 금지
         for phrase in cls.RUDE_SLANG_PHRASES:
@@ -569,6 +613,8 @@ class FinalQualityGate:
         semantic_compatibility: Optional[bool] = None,
         repetition_family: Optional[str] = None,
         style_profile: Optional[Any] = None,
+        style_policy: Optional[Any] = None,
+        excerpt: Optional[str] = None,
     ) -> FinalQualityResult:
         return cls.validate(
             final_text, preset=preset, source=source,
@@ -576,6 +622,8 @@ class FinalQualityGate:
             semantic_compatibility=semantic_compatibility,
             repetition_family=repetition_family,
             style_profile=style_profile,
+            style_policy=style_policy,
+            excerpt=excerpt,
         )
 
     @classmethod
@@ -748,6 +796,7 @@ class CommentDraftInspector:
         preset: PresetLike = CommunityRhythmPreset.THOUGHTFUL,
         excerpt: Optional[str] = None,
         source: Optional[str] = None,
+        style_policy: Optional[Any] = None,
     ) -> DraftInspectionResult:
         if not text or not isinstance(text, str):
             return DraftInspectionResult(

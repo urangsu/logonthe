@@ -104,10 +104,12 @@ class GenerationContext:
     attempt_count: int = 0
     max_attempts: int = 3
     rewrite_reasons: List[str] = field(default_factory=list)
+    style_policy: Optional[Any] = None
 
     def update_excerpt(self, new_excerpt: str) -> None:
         from services.food_comment_focus import FoodCommentFocus
         from services.user_learning_service import UserLearningService
+        from services.comments.policy import CommentStylePolicy
         self.excerpt = new_excerpt
         info = FoodCommentFocus.analyze(self.title or "", self.excerpt or "")
         self.content_focus = info.get("focus", "GENERAL")
@@ -121,6 +123,11 @@ class GenerationContext:
         self.corpus_examples = examples
         self.corpus_stats = stats
         self.style_profile = profile
+        self.style_policy = CommentStylePolicy.from_context(
+            preset=self.preset,
+            style_profile=self.style_profile,
+            action_plan=None,
+        )
 
     def build_prompt(
         self,
@@ -128,6 +135,7 @@ class GenerationContext:
         recent_repeats: Optional[str] = None,
         recent_comments: Optional[List[str]] = None,
         request_id: Optional[str] = None,
+        previous_draft: Optional[str] = None,
     ) -> str:
         self.attempt_count += 1
         rid = request_id or uuid.uuid4().hex
@@ -150,6 +158,8 @@ class GenerationContext:
             corpus_examples=self.corpus_examples,
             style_profile=self.style_profile,
             corpus_stats=self.corpus_stats,
+            style_policy=self.style_policy,
+            previous_draft=previous_draft,
         )
 
 
@@ -288,6 +298,14 @@ class PostProcessor:
             limit=2,
         )
 
+        from services.comments.policy import CommentStylePolicy
+        style_policy = CommentStylePolicy.from_context(
+            preset=preset,
+            config=self.config,
+            style_profile=style_profile,
+            action_plan=action_plan,
+        )
+
         style_plan = (action_plan.style_plan if action_plan else None)
         gen_ctx = GenerationContext(
             title=post.title or "",
@@ -303,13 +321,14 @@ class PostProcessor:
             style_profile=style_profile,
             corpus_stats=corpus_stats,
             max_attempts=3,
+            style_policy=style_policy,
         )
 
         req_id = request_id or uuid.uuid4().hex
         ai_prompt = ""
         if self.ai_clipboard_enabled or self.gemini_web_enabled:
             ai_prompt = gen_ctx.build_prompt(request_id=req_id)
-            prompt_ver = getattr(AIPromptBuilder, "PROMPT_VERSION", "3.0.0-grounded-human")
+            prompt_ver = getattr(AIPromptBuilder, "PROMPT_VERSION", "3.1.0-grounded-human")
             stats = gen_ctx.corpus_stats or {}
             logger.log(
                 f"  📝 [PROMPT] version={prompt_ver} "
@@ -1058,6 +1077,8 @@ class PostProcessor:
                                                 body_gate = FinalQualityGate.validate_final_text(
                                                     gemini_answer, preset=preset, source="gemini_body",
                                                     style_profile=getattr(gen_ctx, "style_profile", None),
+                                                    style_policy=getattr(gen_ctx, "style_policy", None),
+                                                    excerpt=gen_ctx.excerpt,
                                                 )
                                                 if not body_gate.valid:
                                                     if not getattr(self, "_quality_body_retry_done", False) and gen_ctx.attempt_count < gen_ctx.max_attempts:
@@ -1079,6 +1100,7 @@ class PostProcessor:
                                                             rewrite_feedback=feedback,
                                                             recent_comments=gen_ctx.recent_comments,
                                                             request_id=request_id,
+                                                            previous_draft=gemini_answer,
                                                         )
                                                         if self.state_mgr:
                                                             self.state_mgr.update(
@@ -1100,6 +1122,8 @@ class PostProcessor:
                                                     combined_gate = FinalQualityGate.validate_final_text(
                                                         candidate_with_suffix, preset=preset, source="gemini_suffix",
                                                         style_profile=getattr(gen_ctx, "style_profile", None),
+                                                        style_policy=getattr(gen_ctx, "style_policy", None),
+                                                        excerpt=gen_ctx.excerpt,
                                                     )
                                                     if not combined_gate.valid:
                                                         if not getattr(self, "_quality_body_retry_done", False) and gen_ctx.attempt_count < gen_ctx.max_attempts:
@@ -1121,6 +1145,7 @@ class PostProcessor:
                                                                 rewrite_feedback=feedback,
                                                                 recent_comments=gen_ctx.recent_comments,
                                                                 request_id=request_id,
+                                                                previous_draft=candidate_with_suffix,
                                                             )
                                                             if self.state_mgr:
                                                                 self.state_mgr.update(
@@ -1151,13 +1176,28 @@ class PostProcessor:
                                                             if matched_sec:
                                                                 selected_anchor = f"secondary:{matched_sec[0]}"
 
-                                                        # Semantic connection to food/dining context (식사 디테일이나 사실 연결 인정)
+                                                        # Semantic connection to food/dining context (식사 디테일 및 본문 실제 사실 연결 검증)
                                                         if selected_anchor == "none" and gen_ctx.verified_anchors:
                                                             dining_context_signals = (
-                                                                "웨이팅", "대기", "줄", "오픈", "양", "가격", "리필", "점심", "저녁", "주문",
-                                                                "반찬", "스프", "밥", "고기", "국물", "소스", "디저트", "커피", "한시"
+                                                                "웨이팅", "대기", "오픈런", "가격", "리필", "점심", "저녁", "주문",
+                                                                "반찬", "스프", "고기", "국물", "소스", "디저트", "커피"
                                                             )
-                                                            matched_signals = [s for s in dining_context_signals if s in gemini_answer]
+                                                            excerpt_text = (gen_ctx.excerpt or "")
+                                                            matched_signals = []
+                                                            for sig in dining_context_signals:
+                                                                if sig in gemini_answer and sig in excerpt_text:
+                                                                    matched_signals.append(sig)
+
+                                                            # '양', '밥', '줄' 등 단문자 신호는 "다양한", "줄어든" 오탐 방지를 위한 경계 및 식사 문맥 검증
+                                                            short_context_checks = [
+                                                                ("양", r"(?<![다모영])양(?:이|도|은|\s*많|\s*적|푸짐)", r"(?<![다모영])양(?:이|도|은|\s*많|\s*적|푸짐)"),
+                                                                ("밥", r"(?<![가-힣])(?:공기)?밥(?:이|도|은|이랑|\s*무한)", r"(?<![가-힣])(?:공기)?밥"),
+                                                                ("줄", r"줄\s*(?:서|대기|라인)", r"줄\s*(?:서|대기|라인)"),
+                                                            ]
+                                                            for label, ans_pat, exc_pat in short_context_checks:
+                                                                if re.search(ans_pat, gemini_answer) and re.search(exc_pat, excerpt_text):
+                                                                    matched_signals.append(label)
+
                                                             if matched_signals:
                                                                 selected_anchor = f"dining_context:{matched_signals[0]}"
 
@@ -1331,6 +1371,8 @@ class PostProcessor:
                             gate_res = FinalQualityGate.validate_final_text(
                                 cand_composed, preset=preset, source="gemini",
                                 style_profile=getattr(gen_ctx, "style_profile", None) if "gen_ctx" in locals() else None,
+                                style_policy=getattr(gen_ctx, "style_policy", None) if "gen_ctx" in locals() else None,
+                                excerpt=getattr(gen_ctx, "excerpt", None) if "gen_ctx" in locals() else None,
                             )
                             if gate_res.valid:
                                 draft_text = cand_composed
@@ -1365,7 +1407,12 @@ class PostProcessor:
                             local_res = ContextualDraftEngine.generate(post.title or "", post.excerpt or "", preset=preset)
                             if local_res and local_res.body:
                                 cand_composed = DraftService.compose_body_and_suffix(local_res.body, suffix)
-                                gate_res = FinalQualityGate.validate_final_text(cand_composed, preset=preset, source="local")
+                                gate_res = FinalQualityGate.validate_final_text(
+                                    cand_composed, preset=preset, source="local",
+                                    style_profile=getattr(gen_ctx, "style_profile", None),
+                                    style_policy=getattr(gen_ctx, "style_policy", None),
+                                    excerpt=gen_ctx.excerpt,
+                                )
                                 if gate_res.valid:
                                     draft_text = cand_composed
                                     detected_category = local_res.category
@@ -1391,7 +1438,12 @@ class PostProcessor:
                                     self.state_mgr.update(new_state=FeedState.SKIPPING, inc_skip=True)
                             return result
 
-                        pre_inject_gate = FinalQualityGate.validate_final_text(draft_text, preset=preset, source="editor_injection")
+                        pre_inject_gate = FinalQualityGate.validate_final_text(
+                            draft_text, preset=preset, source="editor_injection",
+                            style_profile=getattr(gen_ctx, "style_profile", None),
+                            style_policy=getattr(gen_ctx, "style_policy", None),
+                            excerpt=gen_ctx.excerpt,
+                        )
                         if not pre_inject_gate.valid:
                             logger.log(f"  ❌ [COMMENT] 에디터 주입 전 품질 게이트 실패: [{pre_inject_gate.code}] {pre_inject_gate.reason}", "ERROR")
                             result.comment_result = CommentProcessResult(status=CommentSubmitState.FAILED, error=pre_inject_gate.code)
@@ -1507,7 +1559,12 @@ class PostProcessor:
                                                 self.state_mgr.update(new_state=FeedState.WAITING_USER, message=msg)
                                             continue
 
-                                        final_gate = FinalQualityGate.validate_final_text(submitted_cand, preset=preset, source=sub_source)
+                                        final_gate = FinalQualityGate.validate_final_text(
+                                            submitted_cand, preset=preset, source=sub_source,
+                                            style_profile=getattr(gen_ctx, "style_profile", None),
+                                            style_policy=getattr(gen_ctx, "style_policy", None),
+                                            excerpt=gen_ctx.excerpt,
+                                        )
                                         if not final_gate.valid:
                                             logger.log(f"  ❌ [COMMENT] 등록 직전 댓글 품질 게이트 통과 실패: [{final_gate.code}] {final_gate.reason} (매칭: {final_gate.matched}) - 등록 보류", "WARNING")
                                             CommentInteractionService.release_submit_lock(detail_page, source=origin.value)

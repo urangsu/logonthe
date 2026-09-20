@@ -13,7 +13,7 @@ class FoodCommentFocus:
 
     RESTAURANT_DISHES = [
         "돈까스", "카츠", "치즈카츠", "국밥", "순대국", "돼지국밥", "덮밥", "파스타", "리조또",
-        "라멘", "우동", "초밥", "스시", "사시미", "광어회", "연어회", "방어회", "모둠회", "참치회", "활어회", "숙성회", "물회",
+        "라멘", "우동", "초밥", "스시", "사시미", "광어회", "연어회", "방어회", "모둠회", "모듬회", "참치회", "활어회", "숙성회", "물회", "세꼬시",
         "삼겹살", "목살", "갈비", "우대갈비",
         "곱창", "막창", "대창", "쭈꾸미", "닭갈비", "닭구이", "숯불닭갈비", "치킨", "피자",
         "버거", "수제버거", "국수", "칼국수", "비빔국수", "냉면", "평양냉면", "찌개", "된장찌개",
@@ -21,6 +21,11 @@ class FoodCommentFocus:
         "전복", "장어", "육회", "비빔밥", "숯불구이", "숯불", "구이", "볶음밥", "안동소주",
         "스테이크", "바베큐", "수육", "보쌈", "족발", "찜닭", "마라탕", "마라샹궈", "쌀국수",
         "분짜", "팟타이", "카레", "돈부리"
+    ]
+
+    RAW_FISH_PATTERNS = [
+        re.compile(r"(?<![가-힣])((?:광어|연어|방어|모둠|모듬|참치|활어|숙성|생선)\s+회)(?![가-힣])"),
+        re.compile(r"(?<![가-힣])(회\s+(?:한\s*접시|포장|세트|뜨[는고]))(?![가-힣])"),
     ]
 
     # Cafe & Dessert signals
@@ -68,6 +73,9 @@ class FoodCommentFocus:
         has_product_brand = any(brand in combined_text for brand in cls.PRODUCT_BRAND_SIGNALS)
         matched_cafe_dishes = [d for d in cls.CAFE_DISHES if d in combined_text]
         matched_restaurant_dishes = [d for d in cls.RESTAURANT_DISHES if d in combined_text]
+        for pat in cls.RAW_FISH_PATTERNS:
+            for m in pat.finditer(combined_text):
+                matched_restaurant_dishes.append(m.group(1))
 
         if has_product_brand and (matched_cafe_dishes or "디저트" in combined_text or "젤라또" in combined_text or "찹쌀떡" in combined_text):
             # Prioritize extracted dessert/product terms

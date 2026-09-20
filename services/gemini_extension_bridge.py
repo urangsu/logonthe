@@ -673,17 +673,31 @@ class GeminiExtensionBridge:
                 return False, "no_active_command"
             if not command.post_key or command.navigation_version <= 0:
                 return False, "active_command_identity_invalid"
-            acc_deadline = getattr(command, "acceptance_deadline_at", None) or command.deadline_at
-            if time.time() > acc_deadline:
-                self._command = None
-                self._command_state = "expired"
-                return False, "late_result"
             if result.request_id != command.request_id:
                 return False, "request_id_mismatch"
             if result.post_key != command.post_key:
                 return False, "post_key_mismatch"
             if result.navigation_version != command.navigation_version:
                 return False, "navigation_version_mismatch"
+
+            now = time.time()
+            status_str = result.status.value if hasattr(result.status, "value") else str(result.status)
+            is_completed = (result.status == GeminiResultStatus.COMPLETED or status_str == "completed")
+
+            if self._command_state != "claimed":
+                if is_completed:
+                    return False, "unclaimed_command"
+                gen_deadline = getattr(command, "generation_deadline_at", None) or command.deadline_at
+                if now >= gen_deadline:
+                    self._command = None
+                    self._command_state = "expired"
+                    return False, "late_result"
+            else:
+                acc_deadline = getattr(command, "acceptance_deadline_at", None) or command.deadline_at
+                if now >= acc_deadline:
+                    self._command = None
+                    self._command_state = "expired"
+                    return False, "late_result"
 
             self._results[result.request_id] = result
             if len(self._results) > 100:

@@ -2462,4 +2462,117 @@ test('GEM-R17-JS-005: Python cancel discovered -> background /v1/cancel poll -> 
   assert.strictEqual(resultPostCount, postCountBeforeLate, 'Cancelled late result must NOT trigger a POST to Python /v1/result');
 });
 
+test('GEM-R17-JS-006: background.js acceptance deadline preserves 9s delivery reserve without premature 5s timeout collision', async () => {
+  const rid = 'req_acc_coord_01';
+  let resultForwarded = false;
+
+  const T0 = 1000000;
+  let simulatedNow = T0 + 54000; // T0 + 54s (1s before generation deadline, 10s before acceptance deadline)
+
+  class FakeDate extends Date {
+    constructor(...args) {
+      if (args.length === 0) super(simulatedNow);
+      else super(...args);
+    }
+    static now() { return simulatedNow; }
+    getTime() { return simulatedNow; }
+  }
+
+  const { background, messageListener, tabMessages } = loadRealBackgroundJs({
+    extraGlobals: {
+      Date: FakeDate
+    },
+    onFetch: async (url, opts) => {
+      if (url.includes('/v1/contract')) {
+        return {
+          ok: true,
+          json: async () => ({
+            extensionVersion: '13.2.3',
+            runtimeBuild: '13.2.3-r17',
+            protocolVersion: 1,
+            bridgeSchemaVersion: 1
+          })
+        };
+      }
+      if (url.includes('/v1/command/wait')) {
+        return {
+          ok: true,
+          json: async () => ({
+            command: {
+              requestId: rid,
+              postKey: 'post_coord_01',
+              navigationVersion: 1,
+              prompt: '타이머 정합성 테스트',
+              deadlineAtMs: T0 + 55000,
+              generationDeadlineAtMs: T0 + 55000,
+              acceptanceDeadlineAtMs: T0 + 64000,
+              timeoutSeconds: 55,
+              deliveryReserveSeconds: 9
+            }
+          })
+        };
+      }
+      if (url.includes('/v1/claim')) {
+        return { ok: true, json: async () => ({ claimed: true }) };
+      }
+      if (url.includes('/v1/result')) {
+        resultForwarded = true;
+        return { ok: true, json: async () => ({ accepted: true }) };
+      }
+      if (url.includes('/v1/cancel')) {
+        return { ok: true, json: async () => ({ cancelled: false }) };
+      }
+      return { ok: true, json: async () => ({}) };
+    },
+    onTabSendMessage: (tabId, msg, cb) => {
+      if (msg.type === 'NFA_CHECK_FRESH_CHAT') {
+        cb({ ok: true, fresh: true, conversationEpoch: 1, contentInstanceId: 'inst_coord_01' });
+      } else if (msg.type === 'NFA_RUNTIME_PING' || msg.type === 'NFA_PING_GEMINI_DOM') {
+        cb({ ok: true, alive: true, build: '13.2.3-r17', status: 'ready', conversationEpoch: 1, contentInstanceId: 'inst_coord_01' });
+      } else if (msg.type === 'NFA_EXECUTE_COMMAND') {
+        cb({ ok: true, started: true });
+      } else if (msg.type === 'NFA_CANCEL_COMMAND') {
+        cb({ ok: true, cancelled: true });
+      } else {
+        cb({ ok: true, alive: true, build: '13.2.3-r17', status: 'ready' });
+      }
+    }
+  });
+
+  assert.ok(background, 'Background runtime should be initialized');
+
+  const cyclePromise = background.runCommandCycle();
+  await new Promise(r => setTimeout(r, 100));
+
+  // Advance time to T0 + 55.2s (generation deadline passed, but within 9s acceptance delivery reserve)
+  simulatedNow = T0 + 55200;
+
+  // Deliver execution result from content script
+  const deliverAck = await new Promise(resolve => {
+    messageListener(
+      {
+        type: 'NFA_EXECUTION_RESULT',
+        requestId: rid,
+        postKey: 'post_coord_01',
+        navigationVersion: 1,
+        status: 'completed',
+        text: '수락 유예 시간 내 전달된 정상 결과'
+      },
+      {},
+      resolve
+    );
+  });
+
+  assert.ok(deliverAck !== null, 'Delivery ACK must be returned');
+  assert.strictEqual(deliverAck.accepted, true, 'Delivery during acceptance reserve must be accepted');
+
+  await cyclePromise;
+  assert.strictEqual(resultForwarded, true, 'Result must be forwarded to Python bridge');
+
+  // Verify no cancel command was dispatched due to timer collision
+  const cancelMsgs = tabMessages.filter(m => m.msg?.type === 'NFA_CANCEL_COMMAND' && m.msg?.requestId === rid);
+  assert.strictEqual(cancelMsgs.length, 0, 'No cancel command should be dispatched when completed within acceptance reserve');
+});
+
+
 

@@ -98,6 +98,7 @@ class GeminiExtensionBridgeTests(unittest.TestCase):
         bridge = GeminiExtensionBridge()
         command = GeminiCommand.create("post:1", 3, "prompt")
         bridge.publish(command)
+        bridge.claim_command(command.request_id, "test_claimant")
         bridge.submit_result(GeminiResult("old", "post:0", 2, GeminiResultStatus.COMPLETED, "wrong"))
         self.assertIsNone(bridge.wait_for_result(command, timeout=0.02))
         bridge.submit_result(GeminiResult(command.request_id, command.post_key, 2, GeminiResultStatus.COMPLETED, "wrong nav"))

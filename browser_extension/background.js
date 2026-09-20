@@ -376,7 +376,9 @@ async function runCommandCycle() {
   }
   let execResult = null;
   const dispatchPromise = new Promise(resolve => {
-    const deadlineMs = typeof command.deadlineAtMs === 'number' && command.deadlineAtMs > 0 ? command.deadlineAtMs - Date.now() : (typeof command.deadlineAt === 'number' && command.deadlineAt > 1e11 ? command.deadlineAt - Date.now() : (typeof command.deadlineAt === 'number' && command.deadlineAt > 0 ? command.deadlineAt * 1000 - Date.now() : 60000));
+    const accDeadlineAtMs = command.acceptanceDeadlineAtMs || command.acceptance_deadline_at_ms || (typeof command.acceptance_deadline_at === 'number' ? command.acceptance_deadline_at * 1000 : 0);
+    const targetDeadlineAtMs = accDeadlineAtMs || (typeof command.deadlineAtMs === 'number' && command.deadlineAtMs > 0 ? command.deadlineAtMs : (typeof command.deadlineAt === 'number' && command.deadlineAt > 1e11 ? command.deadlineAt : (typeof command.deadlineAt === 'number' && command.deadlineAt > 0 ? command.deadlineAt * 1000 : 0)));
+    const deadlineMs = targetDeadlineAtMs > 0 ? targetDeadlineAtMs - Date.now() : 60000;
     const timeoutMs = Math.max(5000, deadlineMs);
     const keepAliveInterval = setInterval(() => {
       if (!inFlightCommandResolvers.has(command.requestId)) { clearInterval(keepAliveInterval); return; }
@@ -477,9 +479,9 @@ async function diagnose() {
   catch (error) { return { ok: false, status: 'loopback_bridge_unreachable', error: String(error?.message || error), injection }; }
 }
 
-chrome.runtime.onInstalled.addListener(() => { ensureAllGeminiTabs().catch(() => {}); });
-chrome.runtime.onStartup.addListener(() => { ensureAllGeminiTabs().catch(() => {}); });
-chrome.tabs.onUpdated.addListener((tabId, changeInfo, tab) => {
+chrome.runtime?.onInstalled?.addListener?.(() => { ensureAllGeminiTabs().catch(() => {}); });
+chrome.runtime?.onStartup?.addListener?.(() => { ensureAllGeminiTabs().catch(() => {}); });
+chrome.tabs?.onUpdated?.addListener?.((tabId, changeInfo, tab) => {
   const url = changeInfo.url || tab.url || '';
   if ((changeInfo.status === 'complete' || changeInfo.url) && /^https:\/\/gemini\.google\.com\//.test(url)) ensureGeminiRuntime(tabId).catch(() => {});
 });
