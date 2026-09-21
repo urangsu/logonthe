@@ -3,6 +3,11 @@
     "case_id": 1,
     "domain": "맛집/카페",
     "title": "[성수] 뚝섬역 에스프레소 바 카멜커피 7호점 - 앙버터와 시그니처 카멜커피 후기",
+    "prompt_comparison": {
+      "v3_0_len": 1413,
+      "v3_2_len": 792,
+      "reduction_percent": "43.9%"
+    },
     "legacy": {
       "text": "달콤한 수제 크림 올린 카멜커피 밸런스가 좋아 보여요 성수동 갈 때 한번 가봐야겠어요",
       "length": 47,
@@ -16,7 +21,9 @@
       "length": 32,
       "passed": true,
       "stage": 0,
-      "code": "ok"
+      "code": "ok",
+      "quality_gate_valid": true,
+      "quality_gate_code": "ok"
     },
     "metrics": {
       "naturalness": "개선본 우수 (구어체 단문 직결)",
@@ -29,6 +36,11 @@
     "case_id": 2,
     "domain": "여행",
     "title": "1박 2일 강릉 뚜벅이 여행 코스 추천 | 안목해변 카페거리와 BTS 버스정류장",
+    "prompt_comparison": {
+      "v3_0_len": 1268,
+      "v3_2_len": 728,
+      "reduction_percent": "42.6%"
+    },
     "legacy": {
       "text": "에메랄드빛 안목해변 바다 색깔을 이렇게 풀어주니 새롭게 보이네요 꼭 기억해둬야겠네요",
       "length": 46,
@@ -42,7 +54,9 @@
       "length": 33,
       "passed": true,
       "stage": 0,
-      "code": "ok"
+      "code": "ok",
+      "quality_gate_valid": true,
+      "quality_gate_code": "ok"
     },
     "metrics": {
       "naturalness": "개선본 우수 (구어체 단문 직결)",
@@ -55,6 +69,11 @@
     "case_id": 3,
     "domain": "제품/리뷰",
     "title": "로지텍 MX Master 3S 마우스 3개월 실사용 장단점 솔직 후기",
+    "prompt_comparison": {
+      "v3_0_len": 1307,
+      "v3_2_len": 757,
+      "reduction_percent": "42.1%"
+    },
     "legacy": {
       "text": "무한 휠 스크롤 설명이 구체적이라 이해하기 편하네요 참고해야겠어요",
       "length": 36,
@@ -68,7 +87,9 @@
       "length": 30,
       "passed": true,
       "stage": 0,
-      "code": "ok"
+      "code": "ok",
+      "quality_gate_valid": true,
+      "quality_gate_code": "ok"
     },
     "metrics": {
       "naturalness": "개선본 우수 (구어체 단문 직결)",
@@ -81,6 +102,11 @@
     "case_id": 4,
     "domain": "일상/공부",
     "title": "주말 자격증 공부 일상과 도서관 집중 루틴 ☕",
+    "prompt_comparison": {
+      "v3_0_len": 1260,
+      "v3_2_len": 718,
+      "reduction_percent": "43.0%"
+    },
     "legacy": {
       "text": "도서관 창가 자리에서 공부하는 부분이 제일 기억에 남네요 도움이 될 것 같아요",
       "length": 43,
@@ -94,7 +120,9 @@
       "length": 37,
       "passed": true,
       "stage": 0,
-      "code": "ok"
+      "code": "ok",
+      "quality_gate_valid": true,
+      "quality_gate_code": "ok"
     },
     "metrics": {
       "naturalness": "개선본 우수 (구어체 단문 직결)",

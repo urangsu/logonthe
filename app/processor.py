@@ -106,6 +106,7 @@ class GenerationContext:
     max_attempts: int = 3
     rewrite_reasons: List[str] = field(default_factory=list)
     style_policy: Optional[Any] = None
+    prompt_version: str = "3.0.0-grounded-human"
 
     def update_excerpt(self, new_excerpt: str) -> None:
         from services.food_comment_focus import FoodCommentFocus
@@ -161,6 +162,7 @@ class GenerationContext:
             corpus_stats=self.corpus_stats,
             style_policy=self.style_policy,
             previous_draft=previous_draft,
+            version=self.prompt_version,
         )
 
 
@@ -269,6 +271,11 @@ class PostProcessor:
         # P1-1 Invariant: if auto_comment_submit_enabled is active, comment pipeline is always enabled
         self.comment_enabled = bool(comment_enabled or self.auto_comment_submit_enabled)
         self._processed_post_keys: set[str] = set()
+        self.ai_prompt_version = str(cfg_dict.get("ai_prompt_version", "3.0.0-grounded-human"))
+        self.current_stage: str = "init"
+        self.current_post_key: Optional[str] = None
+        self.current_request_id: Optional[str] = None
+        self.current_result: Optional[PostProcessResult] = None
 
     def _prepare_comment_generation_context(
         self,
@@ -308,6 +315,7 @@ class PostProcessor:
         )
 
         style_plan = (action_plan.style_plan if action_plan else None)
+        prompt_ver = getattr(self, "ai_prompt_version", "3.0.0-grounded-human")
         gen_ctx = GenerationContext(
             title=post.title or "",
             excerpt=post.excerpt or "",
@@ -323,16 +331,17 @@ class PostProcessor:
             corpus_stats=corpus_stats,
             max_attempts=3,
             style_policy=style_policy,
+            prompt_version=prompt_ver,
         )
 
         req_id = request_id or uuid.uuid4().hex
+        self.current_request_id = req_id
         ai_prompt = ""
         if self.ai_clipboard_enabled or self.gemini_web_enabled:
             ai_prompt = gen_ctx.build_prompt(request_id=req_id)
-            prompt_ver = getattr(AIPromptBuilder, "PROMPT_VERSION", "3.1.0-grounded-human")
             stats = gen_ctx.corpus_stats or {}
             logger.log(
-                f"  📝 [PROMPT] version={prompt_ver} "
+                f"  📝 [PROMPT] version={gen_ctx.prompt_version} "
                 f"raw_corpus_count={stats.get('total_raw', 0)} "
                 f"cleaned_corpus_count={stats.get('cleaned', 0)} "
                 f"user_edit_count={stats.get('user_edits', 0)} "
@@ -366,6 +375,16 @@ class PostProcessor:
         post_key = post.key or post.url
         try:
             return self._process_internal(detail_page, post, action_plan=action_plan)
+        except Exception as exc:
+            import traceback
+            stage = getattr(self, "current_stage", "unknown")
+            rid = getattr(self, "current_request_id", "none")
+            tb_str = traceback.format_exc()
+            logger.log(
+                f"  ⚠️ [POST_PROCESSOR_EXCEPTION] stage={stage} post_key={post_key} request_id={rid}: {exc}\n{tb_str}",
+                "WARNING"
+            )
+            raise
         finally:
             if hasattr(self, "run_control") and self.run_control:
                 self.run_control.set_active_post(None)
@@ -384,6 +403,9 @@ class PostProcessor:
         self.navigation_version += 1
         navigation_version = self.navigation_version
         post_key = post.key or post.url
+        self.current_post_key = post_key
+        self.current_result = result
+        self.current_stage = "start"
 
         if hasattr(self, "run_control") and self.run_control:
             self.run_control.set_active_post(post_key)
@@ -674,6 +696,7 @@ class PostProcessor:
                         tx_res.like_count = elig_like_cnt
                         tx_res.daily_visitors = elig_daily_vis
                         result.like_result = tx_res
+                        self.current_result = result
 
                         if tx_res.action_taken and tx_res.state_after == LikeState.LIKED:
                             if self.state_mgr:
@@ -1202,6 +1225,25 @@ class PostProcessor:
                                                             if matched_signals:
                                                                 selected_anchor = f"dining_context:{matched_signals[0]}"
 
+                                                            # Natural subjective dining sentiments & associations (군침, 밥 한 공기, 밥도둑, 든든하, 먹음직 등)
+                                                            if selected_anchor == "none":
+                                                                dining_sentiment_patterns = [
+                                                                    ("밥한공기", r"밥\s*(?:한\s*공기|생각)"),
+                                                                    ("군침", r"군침"),
+                                                                    ("밥도둑", r"밥도둑"),
+                                                                    ("든든", r"든든하"),
+                                                                    ("먹음직", r"먹음직"),
+                                                                    ("맛도리", r"맛도리"),
+                                                                    ("꿀조합", r"(?:꿀)?조합"),
+                                                                    ("달달", r"달달한"),
+                                                                    ("시원", r"시원하(?:겠|네|요)"),
+                                                                    ("찰떡궁합", r"찰떡궁합"),
+                                                                ]
+                                                                for label, pat in dining_sentiment_patterns:
+                                                                    if re.search(pat, gemini_answer):
+                                                                        selected_anchor = f"dining_sentiment:{label}"
+                                                                        break
+
                                                         if content_focus != "GENERAL":
                                                             logger.log(f"[FOOD_COMMENT] focus={content_focus} selected_anchor={selected_anchor}")
 
@@ -1384,7 +1426,10 @@ class PostProcessor:
                                 # 1-time mechanical auto-repair for minor style violations (laughter/tilde/slang)
                                 self._gemini_auto_repair_done = True
                                 repaired_text, repaired_gate = FinalQualityGate.auto_repair(
-                                    cand_composed, gate_res, preset=preset, source="gemini"
+                                    cand_composed, gate_res, preset=preset, source="gemini",
+                                    style_profile=getattr(gen_ctx, "style_profile", None) if "gen_ctx" in locals() else None,
+                                    style_policy=getattr(gen_ctx, "style_policy", None) if "gen_ctx" in locals() else None,
+                                    excerpt=getattr(gen_ctx, "excerpt", None) if "gen_ctx" in locals() else None,
                                 )
                                 if repaired_text and repaired_gate.valid:
                                     draft_text = repaired_text

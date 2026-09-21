@@ -60,6 +60,7 @@ DEFAULT_CONFIG_V2: Dict[str, Any] = {
     "ai_clipboard_enabled": True,
     "ai_context_max_chars": 700,
     "ai_prompt_style": "warm_short",
+    "ai_prompt_version": "3.0.0-grounded-human",
     "append_fixed_suffix_to_ai": False,
 
     # Gemini Browser Mode: 기본은 일반 Chrome 확장 브리지,
@@ -117,6 +118,15 @@ def migrate_comment_style_preset(data: Dict[str, Any]) -> Dict[str, Any]:
     preset = str(migrated.get("comment_style_preset") or "").strip()
     if not preset:
         migrated["comment_style_preset"] = "community"
+    return migrated
+
+
+def migrate_ai_prompt_version(data: Dict[str, Any]) -> Dict[str, Any]:
+    """프롬프트 버전이 비어있는 경우 기본값('3.0.0-grounded-human')을 설정하고 사용자 명시 선택은 보존"""
+    migrated = dict(data)
+    ver = str(migrated.get("ai_prompt_version") or "").strip()
+    if not ver:
+        migrated["ai_prompt_version"] = "3.0.0-grounded-human"
     return migrated
 
 
@@ -232,6 +242,7 @@ def migrate_config_v1_to_v2(old_data: Dict[str, Any]) -> Dict[str, Any]:
 
     cfg = migrate_workflow_mode(cfg)
     cfg = migrate_engagement_audit_recent_posts(cfg)
+    cfg = migrate_ai_prompt_version(cfg)
     cfg["schema_version"] = 2
     # Keep this historical converter truthful. ConfigService.load immediately
     # applies the separate v2 -> v3 migration to the extension bridge.
@@ -303,6 +314,7 @@ class ConfigService:
             merged = migrate_workflow_mode(merged)
             merged = normalize_auto_comment_config(merged)
             merged = migrate_comment_style_preset(merged)
+            merged = migrate_ai_prompt_version(merged)
             migrated_audit = migrate_engagement_audit_recent_posts(merged)
             if migrated_audit != merged:
                 self._atomic_save(migrated_audit)
@@ -317,6 +329,7 @@ class ConfigService:
         merged.update(data)
         merged = migrate_workflow_mode(merged)
         merged = normalize_auto_comment_config(merged)
+        merged = migrate_ai_prompt_version(merged)
         merged = migrate_engagement_audit_recent_posts(merged)
         merged["schema_version"] = 3
         self._atomic_save(merged)
@@ -329,6 +342,7 @@ class ConfigService:
         merged.update(values)
         merged = migrate_workflow_mode(merged)
         merged = normalize_auto_comment_config(merged)
+        merged = migrate_ai_prompt_version(merged)
         merged = migrate_engagement_audit_recent_posts(merged)
         merged["schema_version"] = 3
         self._atomic_save(merged)

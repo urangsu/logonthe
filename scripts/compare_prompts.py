@@ -4,8 +4,14 @@
 """
 
 import os
+import sys
 import json
-from services.ai_prompt import AIPromptBuilder
+
+ROOT_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+if ROOT_DIR not in sys.path:
+    sys.path.insert(0, ROOT_DIR)
+
+from services.ai_prompt import AIPromptBuilder, PROMPT_VERSION_V3_0, PROMPT_VERSION_V3_2
 from services.comments.community_rhythm import CommentDraftInspector, FinalQualityGate
 from app.models import StylePlan
 
@@ -81,12 +87,20 @@ def run_comparison():
         focus = tc["content_focus"]
         anchors = tc["verified_anchors"]
 
-        # 1. 개선된 프롬프트 생성
-        prompt = AIPromptBuilder.build(
+        # 1. 프롬프트 생성 비교 (v3.0 vs v3.2)
+        prompt_v3_0 = AIPromptBuilder.build(
             title=title,
             excerpt=excerpt,
             content_focus=focus,
             verified_anchors=anchors,
+            version=PROMPT_VERSION_V3_0,
+        )
+        prompt_v3_2 = AIPromptBuilder.build(
+            title=title,
+            excerpt=excerpt,
+            content_focus=focus,
+            verified_anchors=anchors,
+            version=PROMPT_VERSION_V3_2,
         )
 
         leg_text = tc["legacy_draft"]
@@ -95,11 +109,19 @@ def run_comparison():
         # 검사기 평가
         leg_inspect = CommentDraftInspector.inspect(leg_text)
         imp_inspect = CommentDraftInspector.inspect(imp_text)
+        gate_res = FinalQualityGate.validate_final_text(imp_text, excerpt=excerpt)
+
+        prompt_reduction = round((1 - len(prompt_v3_2) / max(len(prompt_v3_0), 1)) * 100, 1)
 
         entry = {
             "case_id": idx,
             "domain": domain,
             "title": title,
+            "prompt_comparison": {
+                "v3_0_len": len(prompt_v3_0),
+                "v3_2_len": len(prompt_v3_2),
+                "reduction_percent": f"{prompt_reduction}%",
+            },
             "legacy": {
                 "text": leg_text,
                 "length": len(leg_text),
@@ -114,6 +136,8 @@ def run_comparison():
                 "passed": imp_inspect.passed,
                 "stage": imp_inspect.stage,
                 "code": imp_inspect.code,
+                "quality_gate_valid": gate_res.valid,
+                "quality_gate_code": gate_res.code,
             },
             "metrics": {
                 "naturalness": "개선본 우수 (구어체 단문 직결)",
@@ -125,11 +149,12 @@ def run_comparison():
         results.append(entry)
 
         print(f"\n[케이스 {idx} - {domain}] {title}")
+        print(f"  📏 프롬프트 길이: v3.0({len(prompt_v3_0)}자) -> v3.2({len(prompt_v3_2)}자) [{prompt_reduction}% 단축]")
         print(f"  ❌ 기존 초안 ({len(leg_text)}자): \"{leg_text}\"")
         print(f"     -> 검사 판정: stage {leg_inspect.stage} 반려 ({leg_inspect.code})")
         print(f"     -> 지적 사유: {leg_inspect.feedback}")
         print(f"  ✅ 개선 초안 ({len(imp_text)}자): \"{imp_text}\"")
-        print(f"     -> 검사 판정: 통과 (passed={imp_inspect.passed})")
+        print(f"     -> 검사 판정: 통과 (passed={imp_inspect.passed}, gate_valid={gate_res.valid})")
         print(f"     -> 평가: {entry['metrics']['naturalness']} / 편집 부담: {entry['metrics']['edit_burden']}")
 
     # 결과 파일 저장

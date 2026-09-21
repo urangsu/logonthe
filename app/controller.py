@@ -499,6 +499,8 @@ class FeedController:
             sweep_consecutive_already_liked = 0
 
             feed_queue = FeedQueue()
+            consecutive_identical_error_count = 0
+            last_unexpected_error = ""
 
             logger.log("==================================================")
             logger.log(f"🤖 [ASSISTANT] 피드 작업 시작 (목표: 최대 {max_items}개)")
@@ -685,6 +687,8 @@ class FeedController:
                     result: Optional[PostProcessResult] = None
                     try:
                         result = processor.process(detail_page, post, action_plan=action_plan)
+                        consecutive_identical_error_count = 0
+                        last_unexpected_error = ""
                         self.history.record_result(result)
                         self._handle_post_result(result)
 
@@ -726,6 +730,8 @@ class FeedController:
                             try:
                                 detail_page = self.session.get_detail_page()
                                 result = processor.process(detail_page, post, action_plan=action_plan)
+                                consecutive_identical_error_count = 0
+                                last_unexpected_error = ""
                                 self.history.record_result(result)
                                 self._handle_post_result(result)
                                 if neighbor_like_sweep_mode:
@@ -743,20 +749,38 @@ class FeedController:
                             except (StopRequestedException, FatalSessionError):
                                 raise
                             except Exception as rpe2:
-                                logger.log(f"  ⚠️ [POST_RECOVERABLE] 재시도 후 글 처리 오류 격리 ({post.key}): {rpe2}", "WARNING")
+                                stage = getattr(processor, "current_stage", "unknown")
+                                post_key = getattr(processor, "current_post_key", post.key)
+                                rid = getattr(processor, "current_request_id", "none")
+                                logger.log(f"  ⚠️ [POST_RECOVERABLE] 재시도 후 글 처리 오류 격리 stage={stage} post_key={post_key} request_id={rid}: {rpe2}", "WARNING")
+                                preserved_like = LikeProcessResult(state_before=LikeState.UNKNOWN, action_taken=False, state_after=LikeState.UNKNOWN, error=str(rpe2))
+                                curr_res = getattr(processor, "current_result", None)
+                                if curr_res and getattr(curr_res, "like_result", None):
+                                    cand_like = curr_res.like_result
+                                    if cand_like.state_before != LikeState.UNKNOWN or cand_like.action_taken or cand_like.state_after != LikeState.UNKNOWN:
+                                        preserved_like = cand_like
                                 failed_res = PostProcessResult(
                                     post=post,
-                                    like_result=LikeProcessResult(state_before=LikeState.UNKNOWN, action_taken=False, state_after=LikeState.UNKNOWN, error=str(rpe2)),
+                                    like_result=preserved_like,
                                     comment_result=CommentProcessResult(status=CommentSubmitState.FAILED, error=str(rpe2))
                                 )
                                 self.history.record_result(failed_res)
                                 self._handle_post_result(failed_res)
                                 result = failed_res
                         else:
-                            logger.log(f"  ⚠️ [POST_RECOVERABLE] 글 처리 오류 격리 ({post.key}): {rpe}", "WARNING")
+                            stage = getattr(processor, "current_stage", "unknown")
+                            post_key = getattr(processor, "current_post_key", post.key)
+                            rid = getattr(processor, "current_request_id", "none")
+                            logger.log(f"  ⚠️ [POST_RECOVERABLE] 글 처리 오류 격리 stage={stage} post_key={post_key} request_id={rid}: {rpe}", "WARNING")
+                            preserved_like = LikeProcessResult(state_before=LikeState.UNKNOWN, action_taken=False, state_after=LikeState.UNKNOWN, error=str(rpe))
+                            curr_res = getattr(processor, "current_result", None)
+                            if curr_res and getattr(curr_res, "like_result", None):
+                                cand_like = curr_res.like_result
+                                if cand_like.state_before != LikeState.UNKNOWN or cand_like.action_taken or cand_like.state_after != LikeState.UNKNOWN:
+                                    preserved_like = cand_like
                             failed_res = PostProcessResult(
                                 post=post,
-                                like_result=LikeProcessResult(state_before=LikeState.UNKNOWN, action_taken=False, state_after=LikeState.UNKNOWN, error=str(rpe)),
+                                like_result=preserved_like,
                                 comment_result=CommentProcessResult(status=CommentSubmitState.FAILED, error=str(rpe))
                             )
                             self.history.record_result(failed_res)
@@ -764,21 +788,49 @@ class FeedController:
                             result = failed_res
                             continue
                     except Exception as pe:
-                        logger.log(f"  ⚠️ [POST_ERROR] 글 처리 예기치 않은 오류 격리 ({post.key}): {pe}", "WARNING")
+                        stage = getattr(processor, "current_stage", "unknown")
+                        post_key = getattr(processor, "current_post_key", post.key)
+                        rid = getattr(processor, "current_request_id", "none")
+                        tb_str = traceback.format_exc()
+                        logger.log(
+                            f"  ⚠️ [POST_ERROR] 글 처리 예기치 않은 오류 격리 stage={stage} post_key={post_key} request_id={rid}: {pe}\n{tb_str}",
+                            "WARNING"
+                        )
+                        preserved_like = LikeProcessResult(state_before=LikeState.UNKNOWN, action_taken=False, state_after=LikeState.UNKNOWN, error=str(pe))
+                        curr_res = getattr(processor, "current_result", None)
+                        if curr_res and getattr(curr_res, "like_result", None):
+                            cand_like = curr_res.like_result
+                            if cand_like.state_before != LikeState.UNKNOWN or cand_like.action_taken or cand_like.state_after != LikeState.UNKNOWN:
+                                preserved_like = cand_like
                         failed_res = PostProcessResult(
                             post=post,
-                            like_result=LikeProcessResult(state_before=LikeState.UNKNOWN, action_taken=False, state_after=LikeState.UNKNOWN, error=str(pe)),
+                            like_result=preserved_like,
                             comment_result=CommentProcessResult(status=CommentSubmitState.FAILED, error=str(pe))
                         )
                         self.history.record_result(failed_res)
                         self._handle_post_result(failed_res)
                         result = failed_res
 
+                        err_signature = f"{type(pe).__name__}:{stage}:{str(pe).splitlines()[0] if str(pe) else ''}"
+                        if err_signature == last_unexpected_error:
+                            consecutive_identical_error_count += 1
+                        else:
+                            last_unexpected_error = err_signature
+                            consecutive_identical_error_count = 1
+
+                        if consecutive_identical_error_count >= 3:
+                            logger.log(
+                                f"  🛑 [CIRCUIT_BREAKER] 동일 예외 3회 연속 발생 ({err_signature}) -> 무한 루프 방지를 위해 피드 처리를 중단합니다.",
+                                "ERROR"
+                            )
+                            final_close_reason = "consecutive_identical_error_3"
+                            break
+
                     if self.stop_event.is_set():
                         final_close_reason = "user_stop"
                         break
 
-                    if final_close_reason == "SWEEP_CONSECUTIVE_ALREADY_LIKED_4":
+                    if final_close_reason in ("SWEEP_CONSECUTIVE_ALREADY_LIKED_4", "consecutive_identical_error_3"):
                         break
 
                     # 4. 다음 글로 넘어가기 전 Pacing 대기 및 Random Pause
@@ -816,7 +868,7 @@ class FeedController:
                 finally:
                     feed_queue.set_active(None)
 
-                if final_close_reason == "SWEEP_CONSECUTIVE_ALREADY_LIKED_4":
+                if final_close_reason in ("SWEEP_CONSECUTIVE_ALREADY_LIKED_4", "consecutive_identical_error_3"):
                     break
 
             if self.stop_event.is_set():
@@ -834,6 +886,12 @@ class FeedController:
                     f"  - 신규 공감: {neighbor_new_likes}개\n"
                     f"  - 기존 공감: {neighbor_already_liked}개\n"
                 )
+            elif final_close_reason == "consecutive_identical_error_3":
+                self.state_mgr.update(
+                    new_state=FeedState.ERROR,
+                    message="동일 예외 3회 연속 발생으로 작업 중단 (회로 차단)"
+                )
+                logger.log("🛑 [ASSISTANT] 동일 예외 3회 연속 발생으로 회로 차단되어 중단되었습니다.", "ERROR")
             else:
                 st = self.state_mgr.get_state() if self.state_mgr else None
                 sampled_in = st.sampled_in_count if st else 0

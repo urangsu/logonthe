@@ -591,6 +591,37 @@ class FinalQualityGate:
                 if not (allow_soft_emoji and len(emoji_matches) <= max_decorations):
                     return result(False, "emoji", f"emoji or symbol is forbidden: {emoji_matches[0]}", matched=emoji_matches[0])
 
+        # 객관적 사실(무료 제공/주차/영업시간/가격 수치 등) 주장 시 본문 근거 검증
+        if not is_user_source and excerpt:
+            excerpt_norm = cls.normalize(excerpt)
+            # 1. 무료/리필 제공 주장 검증
+            free_claim = re.search(r"(?:무료(?:로)?\s*(?:주|제공|나오|되|리필)|무한\s*리필)", normalized)
+            if free_claim:
+                matched_claim = free_claim.group()
+                if not any(k in excerpt_norm for k in ("무료", "리필", "무한", "서비스", "공짜")):
+                    return result(False, "unverified_service_fact", f"objective service fact requires excerpt evidence: {matched_claim}", matched=matched_claim)
+
+            # 2. 영업시간/심야 주장 검증
+            hours_claim = re.search(r"(?:밤\s*늦게까지|늦게까지\s*열|24시간|새벽까지)", normalized)
+            if hours_claim:
+                matched_claim = hours_claim.group()
+                if not any(k in excerpt_norm for k in ("늦게", "24시간", "새벽", "영업시간", "마감", "밤")):
+                    return result(False, "unverified_service_fact", f"objective operating hours fact requires excerpt evidence: {matched_claim}", matched=matched_claim)
+
+            # 3. 주차 제공 주장 검증
+            parking_claim = re.search(r"(?:무료\s*주차|주차(?:도|가)?\s*(?:무료|되|가능|편하))", normalized)
+            if parking_claim:
+                matched_claim = parking_claim.group()
+                if not any(k in excerpt_norm for k in ("주차", "발렛", "파킹", "주차장")):
+                    return result(False, "unverified_service_fact", f"objective parking fact requires excerpt evidence: {matched_claim}", matched=matched_claim)
+
+            # 4. 가격/할인 수치 날조 검증 (원문 가격 언급 없이 구체적 가격 단정)
+            price_claim = re.search(r"\b(\d+[\d,]*\s*원|\d+\s*만\s*원)", normalized)
+            if price_claim:
+                matched_claim = price_claim.group()
+                if matched_claim.replace(" ", "") not in excerpt_norm.replace(" ", ""):
+                    return result(False, "unverified_service_fact", f"objective price claim requires excerpt evidence: {matched_claim}", matched=matched_claim)
+
         # 욕설(RUDE_SLANG)은 항상 금지
         for phrase in cls.RUDE_SLANG_PHRASES:
             if phrase in normalized.lower():
@@ -649,12 +680,25 @@ class FinalQualityGate:
     @classmethod
     def validate_combined_text(
         cls,
-        final_text: str,
+        body: str,
+        suffix: str,
         preset: PresetLike = CommunityRhythmPreset.COMMUNITY,
         *,
         source: Optional[str] = None,
     ) -> FinalQualityResult:
-        return cls.validate_final_text(final_text, preset=preset, source=source)
+        from services.comments.draft_service import DraftService
+        combined = DraftService.compose_body_and_suffix(body, suffix)
+        return cls.validate_final_text(combined, preset=preset, source=source)
+
+    @classmethod
+    def is_valid(
+        cls,
+        final_text: str,
+        preset: PresetLike = CommunityRhythmPreset.COMMUNITY,
+        *,
+        source: Optional[str] = None,
+    ) -> bool:
+        return cls.validate_final_text(final_text, preset=preset, source=source).valid
 
     @classmethod
     def validate_candidate_text(cls, text: str, *, legacy: bool = False) -> FinalQualityResult:
@@ -676,6 +720,9 @@ class FinalQualityGate:
         preset: PresetLike = CommunityRhythmPreset.COMMUNITY,
         *,
         source: Optional[str] = None,
+        style_profile: Optional[Any] = None,
+        style_policy: Optional[Any] = None,
+        excerpt: Optional[str] = None,
     ) -> "tuple[Optional[str], FinalQualityResult]":
         """
         1-time mechanical repair for AUTO_REPAIRABLE_CODES violations.
@@ -715,7 +762,14 @@ class FinalQualityGate:
             # Nothing changed or empty result after repair — not useful
             return None, gate_result
 
-        new_result = cls.validate_final_text(repaired, preset=preset, source=source)
+        new_result = cls.validate_final_text(
+            repaired,
+            preset=preset,
+            source=source,
+            style_profile=style_profile,
+            style_policy=style_policy,
+            excerpt=excerpt,
+        )
         if new_result.valid:
             return repaired, new_result
         return None, gate_result
