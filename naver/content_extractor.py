@@ -86,7 +86,7 @@ class ContentContextExtractor:
 
     @classmethod
     def clean_text(cls, raw_text: str, max_chars: int = 700) -> str:
-        if not raw_text:
+        if not raw_text or max_chars <= 0:
             return ""
 
         text = raw_text
@@ -124,7 +124,7 @@ class ContentContextExtractor:
         if not scored_paras:
             # 폴백: 단순 공백 정돈
             flat = re.sub(r"\s+", " ", text).strip()
-            return flat[:max_chars].rsplit(" ", 1)[0] + "..." if len(flat) > max_chars else flat
+            return flat[:max_chars]
 
         total_full_len = sum(len(p[2]) + 1 for p in scored_paras)
         if total_full_len <= max_chars:
@@ -136,7 +136,7 @@ class ContentContextExtractor:
         accumulated_len = 0
 
         # 1) 첫 도입 문단(배경 맥락) 1개 우선 포함 검토 (인사말이 아닌 경우)
-        if scored_paras and scored_paras[0][0] >= 0:
+        if scored_paras and scored_paras[0][0] >= 0 and len(scored_paras[0][2]) <= max_chars // 4:
             selected_indices.add(scored_paras[0][1])
             accumulated_len += len(scored_paras[0][2]) + 1
 
@@ -145,10 +145,8 @@ class ContentContextExtractor:
             if orig_idx in selected_indices:
                 continue
             if accumulated_len + len(p_text) + 1 > max_chars:
-                # 앞 문단이 비어있는 경우 일부라도 수용
-                if not selected_indices:
-                    selected_indices.add(orig_idx)
-                break
+                # A large paragraph must not hide shorter useful paragraphs.
+                continue
             selected_indices.add(orig_idx)
             accumulated_len += len(p_text) + 1
 
@@ -157,8 +155,8 @@ class ContentContextExtractor:
         ordered_selected.sort(key=lambda x: x[1])
 
         result_text = "\n".join(p[2] for p in ordered_selected).strip()
-        if len(result_text) > max_chars:
-            result_text = result_text[:max_chars].rsplit(" ", 1)[0] + "..."
+        if not result_text:
+            result_text = sorted_by_score[0][2][:max_chars]
 
         return result_text
 

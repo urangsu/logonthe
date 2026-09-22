@@ -42,6 +42,7 @@
   "ai_clipboard_enabled": true,
   "ai_context_max_chars": 700,
   "ai_prompt_style": "warm_short",
+  "ai_prompt_version": "3.2.0-grounded-human",
   "append_fixed_suffix_to_ai": false,
   "gemini_browser_mode": "extension_existing_chrome",
   "gemini_bridge_port": 43127,

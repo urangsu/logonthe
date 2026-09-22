@@ -2319,7 +2319,7 @@ test('GEM-R17-JS-003: scoreSendCandidate does not disqualify button with aria-di
   assert.ok(score > 0, `Send button with aria-disabled="true" must still score positively, got: ${score}`);
 });
 
-test('GEM-R17-JS-004: triggerSubmission dispatches pointer/mouse click, native .click(), and keyboard Enter events', () => {
+test('SEND-COMMIT: disabled submission does not mutate the button or send Enter', () => {
   const { runtime } = loadRealContentJs();
   let clickCalled = false;
   let dispatchedEvents = [];
@@ -2345,11 +2345,29 @@ test('GEM-R17-JS-004: triggerSubmission dispatches pointer/mouse click, native .
   };
 
   const result = runtime.triggerSubmission(mockTarget, mockBtn);
-  assert.strictEqual(result.clicked, true, 'Click trigger must succeed');
-  assert.strictEqual(result.keyed, true, 'Keyboard trigger must succeed');
-  assert.strictEqual(clickCalled, true, 'Native click() must be invoked');
-  assert.strictEqual(mockBtn.disabled, false, 'Disabled property must be cleared');
-  assert.ok(keyEvents.includes('Enter'), 'Keyboard Enter must be dispatched');
+  assert.strictEqual(result.clicked, false);
+  assert.strictEqual(result.keyed, false);
+  assert.strictEqual(clickCalled, false);
+  assert.strictEqual(mockBtn.disabled, true);
+  assert.strictEqual(keyEvents.length, 0);
+  assert.strictEqual(dispatchedEvents.length, 0);
+});
+
+test('SEND-COMMIT: enabled submission dispatches exactly one click and no keyboard fallback', () => {
+  const { runtime } = loadRealContentJs();
+  let clicks = 0;
+  const button = {
+    isConnected: true, disabled: false,
+    getAttribute: () => null,
+    getBoundingClientRect: () => ({ width: 40, height: 40 }),
+    focus: () => {}, click: () => { clicks++; },
+    dispatchEvent: () => { throw new Error('duplicate synthetic event'); },
+  };
+  const target = { dispatchEvent: () => { throw new Error('keyboard fallback'); } };
+  const result = runtime.triggerSubmission(target, button);
+  assert.strictEqual(result.clicked, true);
+  assert.strictEqual(result.keyed, false);
+  assert.strictEqual(clicks, 1);
 });
 
 test('GEM-R17-JS-005: Python cancel discovered -> background /v1/cancel poll -> NFA_CANCEL_COMMAND dispatched -> inFlight removed -> late result dropped', async () => {
@@ -2573,6 +2591,5 @@ test('GEM-R17-JS-006: background.js acceptance deadline preserves 9s delivery re
   const cancelMsgs = tabMessages.filter(m => m.msg?.type === 'NFA_CANCEL_COMMAND' && m.msg?.requestId === rid);
   assert.strictEqual(cancelMsgs.length, 0, 'No cancel command should be dispatched when completed within acceptance reserve');
 });
-
 
 

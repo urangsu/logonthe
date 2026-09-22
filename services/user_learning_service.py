@@ -4,6 +4,7 @@ import hashlib
 import json
 import os
 import re
+import sys
 import tempfile
 import time
 import unicodedata
@@ -12,7 +13,12 @@ from typing import Optional, Dict, Any, List, Tuple
 from app.models import FeedPost
 from src.logger import logger
 
-USER_LEARNING_FILE = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "data", "user_learning_corpus.json"))
+_TEST_PROCESS = "pytest" in sys.modules or "unittest" in sys.modules
+_DEFAULT_DATA_DIR = (
+    os.path.join(tempfile.gettempdir(), f"naver-learning-tests-{os.getpid()}")
+    if _TEST_PROCESS else os.path.join(os.path.dirname(__file__), "..", "data")
+)
+USER_LEARNING_FILE = os.path.abspath(os.path.join(os.environ.get("NAVER_LEARNING_DATA_DIR", _DEFAULT_DATA_DIR), "user_learning_corpus.json"))
 
 
 class CorpusSource(str, Enum):
@@ -103,6 +109,8 @@ class UserLearningService:
 
     @classmethod
     def normalize_source_type(cls, entry: dict) -> str:
+        if entry.get("decision_origin") == "auto_submit" or entry.get("origin") == "auto_submit":
+            return CorpusSource.AUTO_SUBMIT.value
         explicit = entry.get("source_type")
         if explicit:
             return explicit
@@ -174,6 +182,14 @@ class UserLearningService:
             source_type = CorpusSource.EXTERNAL_COLLECTED.value if source == "external" else source
 
         entry = {
+            "schema_version": 2,
+            "origin": (
+                "test" if _TEST_PROCESS else
+                "auto_submit" if decision_origin == "auto_submit" else
+                "human_reviewed" if decision_origin == "user" and decision in {"adopted", "edited"} else
+                "imported" if decision_origin == "external" else "unknown"
+            ),
+            "context_hash": hashlib.sha256(f"{post.title or ''}\n{post.excerpt or ''}".encode("utf-8")).hexdigest(),
             "timestamp": time.strftime("%Y-%m-%d %H:%M:%S"),
             "post_key_hash": hashlib.sha256((post.key or post.url).encode("utf-8")).hexdigest(),
             "category": category,
@@ -197,8 +213,13 @@ class UserLearningService:
                 try:
                     with open(USER_LEARNING_FILE, "r", encoding="utf-8") as f:
                         existing = json.load(f)
-                except Exception:
-                    existing = []
+                except (OSError, ValueError) as exc:
+                    logger.log(f"[LEARNING] 기존 자료를 읽지 못해 저장을 중단합니다: {type(exc).__name__}", "WARNING")
+                    return
+
+            if not isinstance(existing, list):
+                logger.log("[LEARNING] 기존 자료 형식이 배열이 아니므로 저장을 중단합니다.", "WARNING")
+                return
 
             existing.append(entry)
 
@@ -249,6 +270,9 @@ class UserLearningService:
         cleaned = []
         seen_texts = set()
         for item in raw_entries:
+            # Legacy/imported/test records remain on disk but need explicit review.
+            if not isinstance(item, dict) or item.get("origin") != "human_reviewed":
+                continue
             source_type = cls.normalize_source_type(item)
             # Rule: Never train on auto_submit!
             if source_type == CorpusSource.AUTO_SUBMIT.value:

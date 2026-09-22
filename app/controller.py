@@ -786,6 +786,23 @@ class FeedController:
                             self.history.record_result(failed_res)
                             self._handle_post_result(failed_res)
                             result = failed_res
+
+                            # RecoverablePostError 서킷 브레이커:
+                            # page_closed 아닌 RPE가 동일 시그니처로 3회 연속 발생하면 루프를 차단합니다.
+                            rpe_signature = f"{type(rpe).__name__}:{getattr(rpe, 'reason', '')}:{stage}"
+                            if rpe_signature == last_unexpected_error:
+                                consecutive_identical_error_count += 1
+                            else:
+                                last_unexpected_error = rpe_signature
+                                consecutive_identical_error_count = 1
+                            if consecutive_identical_error_count >= 3:
+                                logger.log(
+                                    f"  🛑 [CIRCUIT_BREAKER] 동일 RecoverablePostError 3회 연속 발생 ({rpe_signature}) ->"
+                                    f" 무한 루프 방지를 위해 피드 처리를 중단합니다.",
+                                    "ERROR"
+                                )
+                                final_close_reason = "consecutive_identical_error_3"
+                                break
                             continue
                     except Exception as pe:
                         stage = getattr(processor, "current_stage", "unknown")

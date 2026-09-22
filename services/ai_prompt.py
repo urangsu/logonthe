@@ -18,7 +18,7 @@ class AIPromptBuilder:
     - v3.1: NAVER_GEMINI38_PROMPT_REVIEW.md에서 제안된 JSON 데이터 격리 및 40% 단축 프롬프트 설계안.
     """
 
-    PROMPT_VERSION = PROMPT_VERSION_V3_0
+    PROMPT_VERSION = PROMPT_VERSION_V3_2
     PROMPT_VERSION_V3_1 = PROMPT_VERSION_V3_1
     PROMPT_VERSION_V3_2 = PROMPT_VERSION_V3_2
 
@@ -107,8 +107,10 @@ class AIPromptBuilder:
         prompt = f"""아래 글을 읽고 남길 자연스러운 댓글 하나를 편한 존댓말로 써줘.
 글에서 눈에 들어온 부분에 감상·기대·가벼운 비유를 자유롭게 섞어도 돼.
 본문 단어를 그대로 넣거나 내용을 요약할 필요는 없어. 글과 자연스럽게 이어지면 돼.
+정보를 다시 설명하기만 하지 말고, 그 부분이 눈에 들어온 이유나 느낌을 네 말로 표현해줘.
 직접 겪지 않은 경험, 글에 없는 가격·서비스·효과 같은 사실은 만들지 마.
 감탄은 가볍게, 과한 최상급이나 억지 칭찬은 피하고 글의 분위기에 맞춰줘.
+아쉽거나 힘든 이야기에는 억지로 긍정적인 반응을 붙이지 마.
 짧은 1~2문장이면 충분해. 어미나 문장 구조는 맞추려 하지 마.
 {style_policy.style_instruction}{rewrite_instruction}{diversity_instruction}
 설명이나 후보 목록 없이 댓글만 출력해.
@@ -204,6 +206,8 @@ class AIPromptBuilder:
         previous_draft: Optional[str] = None,
         version: Optional[str] = None,
     ) -> str:
+        if not version:
+            version = cls.PROMPT_VERSION
         if version in ("3.2", "3.2.0-grounded-human", "v3.2"):
             return cls.build_v3_2(
                 title=title,

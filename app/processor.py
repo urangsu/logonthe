@@ -106,7 +106,7 @@ class GenerationContext:
     max_attempts: int = 3
     rewrite_reasons: List[str] = field(default_factory=list)
     style_policy: Optional[Any] = None
-    prompt_version: str = "3.0.0-grounded-human"
+    prompt_version: str = "3.2.0-grounded-human"
 
     def update_excerpt(self, new_excerpt: str) -> None:
         from services.food_comment_focus import FoodCommentFocus
@@ -271,7 +271,7 @@ class PostProcessor:
         # P1-1 Invariant: if auto_comment_submit_enabled is active, comment pipeline is always enabled
         self.comment_enabled = bool(comment_enabled or self.auto_comment_submit_enabled)
         self._processed_post_keys: set[str] = set()
-        self.ai_prompt_version = str(cfg_dict.get("ai_prompt_version", "3.0.0-grounded-human"))
+        self.ai_prompt_version = str(cfg_dict.get("ai_prompt_version", "3.2.0-grounded-human"))
         self.current_stage: str = "init"
         self.current_post_key: Optional[str] = None
         self.current_request_id: Optional[str] = None
@@ -315,7 +315,7 @@ class PostProcessor:
         )
 
         style_plan = (action_plan.style_plan if action_plan else None)
-        prompt_ver = getattr(self, "ai_prompt_version", "3.0.0-grounded-human")
+        prompt_ver = getattr(self, "ai_prompt_version", "3.2.0-grounded-human")
         gen_ctx = GenerationContext(
             title=post.title or "",
             excerpt=post.excerpt or "",
@@ -404,6 +404,7 @@ class PostProcessor:
         navigation_version = self.navigation_version
         post_key = post.key or post.url
         self.current_post_key = post_key
+        self.current_request_id = None
         self.current_result = result
         self.current_stage = "start"
 
@@ -465,6 +466,7 @@ class PostProcessor:
         if hasattr(self, "run_control") and self.run_control:
             self.run_control.checkpoint("before_detail_goto")
 
+        self.current_stage = "navigation"
         try:
             detail_page.goto(post.url, wait_until="domcontentloaded", timeout=25000)
             if hasattr(self, "run_control") and self.run_control:
@@ -521,9 +523,11 @@ class PostProcessor:
         self._quality_body_retry_done = False
         self._gemini_auto_repair_done = False
         # TargetPostGuard: 대상 글 일치 여부 확인 (Fail-Open 원천 차단)
+        self.current_stage = "target_guard"
         TargetPostGuard.verify(detail_page, post)
 
         # 추천/관심주제는 실제 본문을 한 번 더 확인한 뒤 어떤 상호작용도 수행한다.
+        self.current_stage = "context_extract"
         detail_context = None
         if post.source in {FeedSourceType.RECOMMENDATION, FeedSourceType.TARGETED_SEARCH} and self.config.get("topic_filter_enabled", True):
             detail_context = ContentContextExtractor.extract(detail_page, post, max_chars=self.ai_context_max_chars)
@@ -602,6 +606,7 @@ class PostProcessor:
                 if (post.excerpt or "").strip():
                     if self.gemini_web_enabled and self.gemini_browser_mode == "extension_existing_chrome" and self.gemini_extension_bridge:
                         if not (self.stop_event and self.stop_event.is_set()) and not (self.skip_event and self.skip_event.is_set()):
+                            self.current_stage = "gemini_preflight"
                             preflight = self.gemini_extension_bridge.await_ready(
                                 timeout=3.0,
                                 stop_event=self.stop_event,
@@ -651,6 +656,7 @@ class PostProcessor:
                     self.state_mgr.update(new_state=FeedState.CHECKING_LIKE, message="공감 상태 및 조건 확인 중...")
 
                 # 2-1. 공감 상태 및 신뢰도 우선 판별
+                self.current_stage = "like_resolve"
                 like_state_res = LikeTransactionService.resolve_like_state(detail_page)
 
                 if like_state_res.state == LikeState.LIKED:
@@ -688,6 +694,7 @@ class PostProcessor:
                         )
                     else:
                         # 2-3. 실제 공감 트랜잭션 실행 (2-Path 및 UI Settle 적용)
+                        self.current_stage = "like_commit"
                         if hasattr(self, "run_control") and self.run_control:
                             self.run_control.checkpoint("before_like_click")
                         tx_res = LikeTransactionService.execute_like_transaction(detail_page, self.stop_event, post=post)
@@ -741,6 +748,7 @@ class PostProcessor:
                     self.state_mgr.update(new_state=FeedState.OPENING_COMMENT, message="댓글 레이어 열기 및 서버 중복 확인 중...")
 
                 # 3-1. 댓글 레이어 오픈 Polling
+                self.current_stage = "comment_layer_open"
                 if hasattr(self, "run_control") and self.run_control:
                     self.run_control.checkpoint("before_comment_open")
                 open_ok, open_reason = CommentInteractionService.open_comment_layer(
@@ -776,6 +784,7 @@ class PostProcessor:
                     from services.user_learning_service import UserLearningService
 
                     # 3-2. 서버 사이드 중복 댓글 스캔 (Gemini 호출 전 반드시 선행)
+                    self.current_stage = "duplicate_guard"
                     comment_context = MobileDOMResolver.get_comment_editor_context(detail_page)
                     presence_frame = comment_context["frame"] if comment_context else detail_page
                     presence = ServerCommentDuplicateGuard.scan_page_for_my_comment(presence_frame, stop_event=self.stop_event)
@@ -846,9 +855,9 @@ class PostProcessor:
                         draft_source_label = ""
                         detected_category = "UNKNOWN"
                         local_res = None
-                        food_anchor_fail_closed = False
 
                         # [Tier 1] Gemini 자동 댓글 생성
+                        self.current_stage = "comment_generation"
                         gemini_answer = None
                         use_local_requested = False
                         if self.gemini_web_enabled and ai_prompt:
@@ -1060,14 +1069,20 @@ class PostProcessor:
                                                     return result
 
                                             if gemini_answer:
+                                                self.current_stage = "comment_quality_gate"
                                                 # Step 0: 5단계 초안 검사 (사람 말투, 사실성 검사, 중복 마무리, 설명조 등)
                                                 inspection = CommentDraftInspector.inspect(
                                                     gemini_answer,
                                                     recent_comments=gen_ctx.recent_comments,
                                                     preset=preset,
                                                     excerpt=gen_ctx.excerpt,
+                                                    source="gemini",
+                                                    style_policy=gen_ctx.style_policy,
                                                 )
-                                                if not inspection.passed and inspection.code != "need_more_context":
+                                                advisory = inspection.code in {"explanatory_tone", "repetitive_tail", "repetition_detected", "template_clone"}
+                                                if not inspection.passed and advisory:
+                                                    logger.log(f"[COMMENT][STYLE_ADVISORY] code={inspection.code} post={post.key}")
+                                                if not inspection.passed and not advisory:
                                                     if not getattr(self, "_draft_rewrite_done", False) and gen_ctx.attempt_count < gen_ctx.max_attempts:
                                                         self._draft_rewrite_done = True
                                                         logger.log(
@@ -1096,6 +1111,11 @@ class PostProcessor:
                                                             )
                                                         gemini_answer = None
                                                         continue
+                                                    result.comment_result = CommentProcessResult(
+                                                        status=CommentSubmitState.FAILED,
+                                                        error=f"quality_inspection:{inspection.code}",
+                                                    )
+                                                    return result
 
                                                 # Step 1: Body validation
                                                 body_gate = FinalQualityGate.validate_final_text(
@@ -1104,6 +1124,18 @@ class PostProcessor:
                                                     style_policy=getattr(gen_ctx, "style_policy", None),
                                                     excerpt=gen_ctx.excerpt,
                                                 )
+                                                if not body_gate.valid:
+                                                    if body_gate.code in FinalQualityGate.AUTO_REPAIRABLE_CODES:
+                                                        repaired_body, rep_body_gate = FinalQualityGate.auto_repair(
+                                                            gemini_answer, body_gate, preset=preset, source="gemini_body_repair",
+                                                            style_profile=getattr(gen_ctx, "style_profile", None),
+                                                            style_policy=getattr(gen_ctx, "style_policy", None),
+                                                            excerpt=gen_ctx.excerpt,
+                                                        )
+                                                        if repaired_body and rep_body_gate.valid:
+                                                            logger.log(f"  ✨ [GEMINI/AUTO_REPAIR] 본문 경미 오류({body_gate.code}) 즉시 자동 수정 성공: {gemini_answer!r} -> {repaired_body!r}")
+                                                            gemini_answer = repaired_body
+                                                            body_gate = rep_body_gate
                                                 if not body_gate.valid:
                                                     if not getattr(self, "_quality_body_retry_done", False) and gen_ctx.attempt_count < gen_ctx.max_attempts:
                                                         self._quality_body_retry_done = True
@@ -1149,6 +1181,18 @@ class PostProcessor:
                                                         style_policy=getattr(gen_ctx, "style_policy", None),
                                                         excerpt=gen_ctx.excerpt,
                                                     )
+                                                    if not combined_gate.valid:
+                                                        if combined_gate.code in FinalQualityGate.AUTO_REPAIRABLE_CODES:
+                                                            repaired_comb, rep_comb_gate = FinalQualityGate.auto_repair(
+                                                                candidate_with_suffix, combined_gate, preset=preset, source="gemini_suffix_repair",
+                                                                style_profile=getattr(gen_ctx, "style_profile", None),
+                                                                style_policy=getattr(gen_ctx, "style_policy", None),
+                                                                excerpt=gen_ctx.excerpt,
+                                                            )
+                                                            if repaired_comb and rep_comb_gate.valid:
+                                                                logger.log(f"  ✨ [GEMINI/AUTO_REPAIR] 접미사 결합 경미 오류({combined_gate.code}) 즉시 자동 수정 성공: {candidate_with_suffix!r} -> {repaired_comb!r}")
+                                                                gemini_answer = repaired_comb
+                                                                combined_gate = rep_comb_gate
                                                     if not combined_gate.valid:
                                                         if not getattr(self, "_quality_body_retry_done", False) and gen_ctx.attempt_count < gen_ctx.max_attempts:
                                                             self._quality_body_retry_done = True
@@ -1247,33 +1291,10 @@ class PostProcessor:
                                                         if content_focus != "GENERAL":
                                                             logger.log(f"[FOOD_COMMENT] focus={content_focus} selected_anchor={selected_anchor}")
 
-                                                        # P0-4: Food/Cafe anchor fail-closed check
+                                                        # Lexical overlap is diagnostic, not semantic proof.
                                                         is_food_or_cafe = content_focus in ("FOOD_RESTAURANT", "FOOD_PRODUCT", "CAFE_DESSERT")
                                                         if is_food_or_cafe and gen_ctx.verified_anchors and selected_anchor == "none":
-                                                            if not getattr(self, "_food_anchor_retry_done", False) and gen_ctx.attempt_count < gen_ctx.max_attempts:
-                                                                self._food_anchor_retry_done = True
-                                                                logger.log("⚠️ [FOOD_COMMENT] 맛집/카페 글에 검증 앵커가 누락되어 1회 재생성을 시도합니다 (anchor_missing)", "WARNING")
-                                                                if (self.stop_event and self.stop_event.is_set()) or (self.skip_event and self.skip_event.is_set()):
-                                                                    if self.stop_event and self.stop_event.is_set():
-                                                                        raise StopRequestedException("User stopped before Gemini retry")
-                                                                    result.comment_result = CommentProcessResult(status=CommentSubmitState.SKIPPED, error="user_skipped")
-                                                                    if self.state_mgr:
-                                                                        self.state_mgr.update(new_state=FeedState.SKIPPING, inc_skip=True)
-                                                                    return result
-                                                                request_id = uuid.uuid4().hex
-                                                                anchors_hint = ", ".join(gen_ctx.verified_anchors[:2])
-                                                                ai_prompt = gen_ctx.build_prompt(
-                                                                    rewrite_feedback=f"핵심 소재({anchors_hint})와 직접 연결된 본문의 구체적 사실 하나에 조금 더 가벼운 블로그 이웃 말투로 반응해 주세요. 단어 자체를 억지로 넣을 필요는 없습니다.",
-                                                                    request_id=request_id,
-                                                                )
-                                                                gemini_answer = None
-                                                                continue
-                                                            else:
-                                                                food_anchor_fail_closed = True
-                                                                logger.log(
-                                                                    "⚠️ [FOOD_COMMENT] 앵커 누락 재시도 후에도 selected_anchor=none -> fail-closed (자동등록 해제)",
-                                                                    "WARNING",
-                                                                )
+                                                            logger.log(f"[COMMENT][RELEVANCE_ADVISORY] code=no_lexical_anchor post={post.key}")
 
                                                         # Check if food anchors were available but Gemini only commented on secondary place anchors
                                                         if (
@@ -1281,23 +1302,7 @@ class PostProcessor:
                                                             and not matched_food
                                                             and any(sec in gemini_answer for sec in ("주차", "위치", "인테리어", "매장", "공간", "접근성"))
                                                         ):
-                                                            if not getattr(self, "_food_retry_done", False) and gen_ctx.attempt_count < gen_ctx.max_attempts:
-                                                                self._food_retry_done = True
-                                                                logger.log("⚠️ [FOOD_FOCUS] 음식 정보가 본문에 있음에도 장소 정보에만 반응하여 1회 재시도합니다 (food_focus_missed)", "WARNING")
-                                                                if (self.stop_event and self.stop_event.is_set()) or (self.skip_event and self.skip_event.is_set()):
-                                                                    if self.stop_event and self.stop_event.is_set():
-                                                                        raise StopRequestedException("User stopped before Gemini retry")
-                                                                    result.comment_result = CommentProcessResult(status=CommentSubmitState.SKIPPED, error="user_skipped")
-                                                                    if self.state_mgr:
-                                                                        self.state_mgr.update(new_state=FeedState.SKIPPING, inc_skip=True)
-                                                                    return result
-                                                                request_id = uuid.uuid4().hex
-                                                                ai_prompt = gen_ctx.build_prompt(
-                                                                    rewrite_feedback="장소/시설 언급 대신 본문에 나온 구체적인 음식/메뉴 특징에 반응해 주세요.",
-                                                                    request_id=request_id,
-                                                                )
-                                                                gemini_answer = None
-                                                                continue
+                                                            logger.log(f"[COMMENT][RELEVANCE_ADVISORY] code=place_reaction post={post.key}")
                                             else:
                                                 failure = "empty_cleaned_response"
                                                 logger.log("⚠️ [GEMINI/EXTENSION] 정제 후 응답 본문이 비어있음", "WARNING")
@@ -1501,6 +1506,7 @@ class PostProcessor:
                             return result
 
                         # 에디터에 주입 및 Read-back 검증
+                        self.current_stage = "comment_injection"
                         set_ok = CommentEditorAdapter.set_text(detail_page, draft_text)
                         if not set_ok:
                             logger.log("  ❌ [COMMENT] 에디터 초안 주입 및 Read-back 검증 실패", "ERROR")
@@ -1529,15 +1535,11 @@ class PostProcessor:
 
                             auto_submit_timeout = None
                             if self.auto_comment_submit_enabled:
-                                if food_anchor_fail_closed:
-                                    logger.log("  ✍️ [COMMENT][AUTO_SUBMIT_DISARMED] reason=food_anchor_missing_fail_closed (verified anchors exist but selected_anchor=none)", "WARNING")
-                                    msg = f"댓글 확인 대기 중 ({draft_source_label} 입력됨 / 음식 앵커 미확인으로 자동 등록 해제 / Enter=등록 / Esc=건너뛰기)"
-                                else:
-                                    auto_submit_timeout = random.uniform(
-                                        min(self.auto_comment_delay_min, self.auto_comment_delay_max),
-                                        max(self.auto_comment_delay_min, self.auto_comment_delay_max)
-                                    )
-                                    msg = f"댓글 자동 등록 대기 중 ({draft_source_label} 입력됨 / {auto_submit_timeout:.1f}초 후 자동 등록 / Esc=건너뛰기)"
+                                auto_submit_timeout = random.uniform(
+                                    min(self.auto_comment_delay_min, self.auto_comment_delay_max),
+                                    max(self.auto_comment_delay_min, self.auto_comment_delay_max)
+                                )
+                                msg = f"댓글 자동 등록 대기 중 ({draft_source_label} 입력됨 / {auto_submit_timeout:.1f}초 후 자동 등록 / Esc=건너뛰기)"
                             else:
                                 msg = f"댓글 확인 대기 중 ({draft_source_label} 입력됨 / 수정 후 Enter=등록 / Esc=건너뛰기)"
 
@@ -1582,6 +1584,7 @@ class PostProcessor:
                                         self.state_mgr.update(new_state=FeedState.SKIPPING, inc_skip=True)
                                     break
                                 elif action in (UserAction.SUBMIT, UserAction.NATIVE_SUBMIT, UserAction.AUTO_SUBMIT):
+                                    self.current_stage = "comment_submit"
                                     logger.log(f"[COMMENT][SUBMIT_REQUESTED] post={post.key} action={action.value}")
                                     final_text = CommentInteractionService.read_final_text(detail_page)
                                     submitted_cand = final_text or draft_text
@@ -1647,6 +1650,7 @@ class PostProcessor:
 
                                     if hasattr(self, "run_control") and self.run_control:
                                         self.run_control.checkpoint("before_comment_submit")
+                                    self.current_stage = "submit_verification"
                                     outcome = CommentInteractionService.submit_and_verify(
                                         detail_page,
                                         cmt_res.submitted_text,
@@ -1696,6 +1700,7 @@ class PostProcessor:
 
                             result.comment_result = cmt_res
 
+            self.current_stage = "completed"
             return result
         finally:
             _cancel_early_command("scope_exit_cleanup")

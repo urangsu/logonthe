@@ -47,6 +47,12 @@ class FoodCommentFocus:
         "편의점신상", "신상", "한정판", "한정선"
     ]
 
+    # Non-dining service / wellness signals that should NOT be misclassified as dining
+    NON_DINING_SERVICES = [
+        "마사지", "스웨디시", "아로마", "에스테틱", "피부관리", "피부과", "성형외과", "체형교정",
+        "네일", "네일아트", "미용실", "헤어샵", "왁싱", "필라테스", "피티", "헬스장", "숙소", "호텔", "펜션", "모텔", "게스트하우스"
+    ]
+
     # Secondary / Non-food anchors that should NOT take precedence over food details
     SECONDARY_KEYWORDS = [
         "주차", "주차장", "주차자리", "발렛", "위치", "접근성", "역세권", "매장", "내부",
@@ -63,6 +69,9 @@ class FoodCommentFocus:
 
         food_anchors: List[str] = []
         secondary_anchors: List[str] = []
+
+        # Check for non-dining wellness/services
+        is_non_dining_service = any(kw in combined_text for kw in cls.NON_DINING_SERVICES)
 
         # 1. Search for secondary place/convenience anchors first
         for kw in cls.SECONDARY_KEYWORDS:
@@ -93,9 +102,18 @@ class FoodCommentFocus:
                 "has_food_details": len(food_anchors) > 0,
             }
 
+        # If non-dining wellness service dominates and no actual dining dishes are present, do not classify as food
+        if is_non_dining_service and not matched_restaurant_dishes and not matched_cafe_dishes:
+            return {
+                "focus": "GENERAL",
+                "food_anchors": [],
+                "secondary_anchors": secondary_anchors,
+                "has_food_details": False,
+            }
+
         # 3. Check for Cafe / Dessert
         has_cafe_kw = any(kw in combined_text for kw in cls.CAFE_KEYWORDS)
-        if has_cafe_kw or (matched_cafe_dishes and not matched_restaurant_dishes):
+        if (has_cafe_kw and not is_non_dining_service) or (matched_cafe_dishes and not matched_restaurant_dishes):
             for d in matched_cafe_dishes:
                 if d not in food_anchors:
                     food_anchors.append(d)

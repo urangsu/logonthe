@@ -190,8 +190,8 @@ class TestContentExtractorAndAIPrompt(unittest.TestCase):
         )
         self.assertIn("강릉 순두부 맛집 탐방", prompt_with_excerpt)
         self.assertIn("짬뽕순두부", prompt_with_excerpt)
-        self.assertIn("[말투 기준]", prompt_with_excerpt)
-        self.assertIn("[사실 기준]", prompt_with_excerpt)
+        self.assertIn("편한 존댓말", prompt_with_excerpt)
+        self.assertIn("사실은 만들지 마", prompt_with_excerpt)
 
 
 class TestDraftServiceSuffix(unittest.TestCase):

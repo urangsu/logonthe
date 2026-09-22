@@ -29,7 +29,7 @@
     '[data-test-id="model-response"]', '.response-container-content', 'message-content', '.model-response-text'
   ].join(', ');
   let runtimeContract = {
-    extensionVersion: '13.2.3', runtimeBuild: '13.2.3-r17', protocolVersion: 3, bridgeSchemaVersion: 2
+    extensionVersion: '13.2.4', runtimeBuild: '13.2.4-send-commit', protocolVersion: 3, bridgeSchemaVersion: 2
   };
 
   try {
@@ -261,6 +261,18 @@
     return [{ surface: 'innerText', text: target.innerText || '' }, { surface: 'textContent', text: target.textContent || '' }];
   }
 
+  function composerEmpty(target) {
+    return Boolean(target?.isConnected) && getEditorSurfaces(target).every(s => !canonicalPromptText(s.text));
+  }
+
+  function freshConversationState() {
+    const ed = editor();
+    return Boolean(ed) && composerEmpty(ed) && !activeExecution && !findActiveStopButton()
+      && getUserInventory().visibleUserNodes.length === 0
+      && getCandidateInventory().visibleTurnCandidates === 0
+      && document.readyState !== 'loading';
+  }
+
   function pageStatus() {
     const body = (document.body?.innerText || '').slice(0, 5000);
     if (/captcha|로봇이 아닙니다|비정상적인 트래픽/i.test(body)) return 'captcha';
@@ -287,7 +299,10 @@
   function setEditorText(target, text) {
     clearEditor(target); target.focus();
     if (target instanceof HTMLTextAreaElement || target instanceof HTMLInputElement) {
-      target.value = text;
+      const prototype = target instanceof HTMLTextAreaElement ? HTMLTextAreaElement.prototype : HTMLInputElement.prototype;
+      const setter = Object.getOwnPropertyDescriptor(prototype, 'value')?.set;
+      if (!setter) return false;
+      setter.call(target, text);
       target.dispatchEvent(new Event('input', { bubbles: true, cancelable: true }));
       target.dispatchEvent(new Event('change', { bubbles: true, cancelable: true }));
     } else {
@@ -295,7 +310,7 @@
       try { document.execCommand('insertText', false, text); } catch (_) {}
       const curText = (target.innerText || target.textContent || '').trim();
       if (!curText || curText.length < Math.min(10, text.trim().length)) {
-        try { target.innerText = text; } catch (_) { target.textContent = text; }
+        return false;
       }
       try { target.dispatchEvent(new InputEvent('beforeinput', { bubbles: true, cancelable: true, inputType: 'insertText', data: text })); } catch (_) {}
       try { target.dispatchEvent(new InputEvent('input', { bubbles: true, cancelable: true, inputType: 'insertText', data: text })); } catch (_) {}
@@ -628,28 +643,18 @@
       if (ctrl?.button && !ctrl.button.disabled && ctrl.button.getAttribute('aria-disabled') !== 'true') return ctrl;
       await new Promise(r => setTimeout(r, 150));
     }
-    return findSendControl(input);
+    return null;
   }
 
   function triggerSendViaClick(btn) {
-    if (!btn || !btn.isConnected) return false;
+    if (!btn || !btn.isConnected || btn.disabled || btn.getAttribute('aria-disabled') === 'true') return false;
     try {
-      if (btn.disabled) btn.disabled = false;
-      if (btn.getAttribute('aria-disabled') === 'true') {
-        btn.setAttribute('aria-disabled', 'false');
-      }
+      if (!visible(btn)) return false;
       if (typeof btn.focus === 'function') btn.focus();
-      const MouseEvt = typeof MouseEvent !== 'undefined' ? MouseEvent : Event;
-      const mouseOpts = { bubbles: true, cancelable: true, composed: true, view: window, buttons: 1 };
-      btn.dispatchEvent(new MouseEvt('pointerdown', mouseOpts));
-      btn.dispatchEvent(new MouseEvt('mousedown', mouseOpts));
-      btn.dispatchEvent(new MouseEvt('pointerup', mouseOpts));
-      btn.dispatchEvent(new MouseEvt('mouseup', mouseOpts));
-      btn.dispatchEvent(new MouseEvt('click', mouseOpts));
-      if (typeof btn.click === 'function') btn.click();
+      btn.click();
       return true;
     } catch (_) {
-      try { btn.click(); return true; } catch (_) { return false; }
+      return false;
     }
   }
 
@@ -682,18 +687,14 @@
   }
 
   function triggerSubmission(target, btn) {
-    let clicked = false;
-    if (btn && btn.isConnected) {
-      clicked = triggerSendViaClick(btn);
-    }
-    const keyed = triggerSendViaKeyboard(target);
-    return { clicked, keyed };
+    return { clicked: triggerSendViaClick(btn), keyed: false };
   }
 
   function logSendDiag(diag) {
     try {
       const btn = diag.button;
       const payload = {
+        rid: activeExecution?.requestId || null,
         candidateCount: diag.totalCandidates || 0,
         selectedTag: btn?.tagName || null,
         selectedClass: btn ? String(btn.className || '').slice(0, 50) : null,
@@ -765,7 +766,9 @@
     const initialUserQueries = userQueryNodes(), initialUserQuerySet = new Set(initialUserQueries);
     const baselineUserQueryFingerprints = new Set(initialUserQueries.map(q => canonicalPromptText(extractUserQueryText(q))).filter(Boolean));
     function emitEvent(type,payload={}) { if (isExecutionCancelled()) return; try { chrome.runtime.sendMessage({ type:'NFA_EVENT', event:{ type, rid:command.requestId, ...payload } }); } catch (_) {} }
-    const freshChatVerified = initialResponseList.length === 0 && initialUserQueries.length === 0;
+    const freshChatVerified = initialResponseList.length === 0 && initialUserQueries.length === 0
+      && composerEmpty(editor()) && !findActiveStopButton();
+    if (!freshChatVerified) return {status:'failed',text:'',error:'fresh_chat_not_verified'};
     if (freshChatVerified) {
       console.log('[GEMINI][FRESH_CHAT_EXEC_READY]', JSON.stringify({ tab:command.tabId||null, instance:INSTANCE_ID, epoch:conversationEpoch }));
       emitEvent('FRESH_CHAT_EXEC_READY', { tab:command.tabId||null, instance:INSTANCE_ID, epoch:conversationEpoch });
@@ -785,14 +788,20 @@
       actualSurface:readbackResult?.surface||'unknown',zeroWidthCount:countOccurrences(actualRaw,/[\u200B-\u200D\u2060\uFEFF\uFE0E\uFE0F]/g),nbspCount:countOccurrences(actualRaw,/[\u00A0\u2007\u202F]/g),
       newlineCount:countOccurrences(actualRaw,/\n/g),editorConnected:Boolean(target?.isConnected),readbackOk:Boolean(readbackResult?.ok) }));
     if (!readbackResult?.ok) {
-      const anySurfaceHasText = getEditorSurfaces(target).some(s => isPromptMatch(s.text, command.prompt) || (s.text || '').trim().length >= Math.min(20, (command.prompt || '').trim().length));
-      if (!anySurfaceHasText) return { status:'dom_unsupported',text:'',error:'prompt_exact_readback_failed' };
+      return { status:'dom_unsupported',text:'',error:'prompt_exact_readback_failed' };
     }
     if (!target || !target.isConnected) target=editor();
-    if (!getEditorSurfaces(target).some(s => isPromptMatch(s.text, command.prompt) || (s.text || '').trim().length >= Math.min(20, (command.prompt || '').trim().length))) { logSendDiag({button:null,confirmed:false,boundNode:false}); return {status:'dom_unsupported',text:'',error:'prompt_editor_changed_before_send'}; }
+    if (!getEditorSurfaces(target).some(s => isPromptMatch(s.text, command.prompt))) { logSendDiag({button:null,confirmed:false,boundNode:false}); return {status:'dom_unsupported',text:'',error:'prompt_editor_changed_before_send'}; }
     await new Promise(r=>setTimeout(r,300)); if (isStopped||execState.cancelled) return {status:'failed',text:'',error:'cancelled'};
-    const sendCtrl=await waitForSendReady(target,2500); let selectedBtn=sendCtrl?.button;
-    triggerSubmission(target, selectedBtn);
+    const sendCtrl=await waitForSendReady(target,2500); const selectedBtn=sendCtrl?.button;
+    logSendDiag({button:selectedBtn,totalCandidates:sendCtrl?.totalCandidates||0,confirmed:false,boundNode:false});
+    if (isExecutionCancelled()) return {status:'failed',text:'',error:'cancelled'};
+    target = editor();
+    if (!getEditorSurfaces(target).some(s => isPromptMatch(s.text, command.prompt))) return {status:'failed',text:'',error:'prompt_editor_changed_before_send'};
+    if (!selectedBtn) return {status:'failed',text:'',error:'send_not_ready'};
+    const submission = triggerSubmission(target, selectedBtn);
+    emitEvent('SEND_DISPATCHED', submission);
+    if (!submission.clicked) return {status:'failed',text:'',error:'send_dispatch_unconfirmed'};
 
     let currentUserTurn=null,targetResponseNode=null,boundAtMs=0,reResolveAttempted=false,textNonEmptyLogged=false,textStableLogged=false,staleStreamingLogged=false;
     function bindResponseNode(node,evidence) {
@@ -807,7 +816,7 @@
     function findNewUserQuery() {
       const currentQueries=getUserInventory().visibleUserNodes;
       const exact=currentQueries.find(q=>canonicalPromptText(extractUserQueryText(q))===expectedCanonical&&!initialUserQuerySet.has(q)); if (exact) return exact;
-      return currentQueries.find(q=>!initialUserQuerySet.has(q)&&canonicalPromptText(extractUserQueryText(q))&&!baselineUserQueryFingerprints.has(canonicalPromptText(extractUserQueryText(q)))) || currentQueries.find(q=>!initialUserQuerySet.has(q)) || null;
+      return null;
     }
     function findTurnResponseCandidate() {
       const valid=getCandidateInventory(initialResponseSet,baselineResponseFingerprints,currentUserTurn,{freshChatVerified,conversationEpoch}).validCandidates;
@@ -816,30 +825,41 @@
       if (currentUserTurn?.isConnected) for (const cand of valid) if ((currentUserTurn.compareDocumentPosition(cand.turnNode)&Node.DOCUMENT_POSITION_FOLLOWING)!==0) return cand.turnNode;
       return valid.length ? valid[valid.length-1].turnNode : null;
     }
-    let confirmed=false,userTurnConfirmedLogged=false; const checkDeadline=Date.now()+12000;
+    let confirmed=false, stableUserSince=null;
+    const executionEpoch=conversationEpoch;
+    const checkDeadline=Math.min(Date.now()+12000,execState.generationDeadlineAtMs||execState.deadlineAtMs);
     while(Date.now()<checkDeadline){
-      if(isStopped||execState.cancelled)return{status:'failed',text:'',error:'cancelled'};
-      const newQuery=findNewUserQuery(); if(newQuery){currentUserTurn=newQuery;confirmed=true;if(!userTurnConfirmedLogged){userTurnConfirmedLogged=true;const uInv=getUserInventory();console.log('[GEMINI][USER_TURN_CONFIRMED]',JSON.stringify({rid:command.requestId,userUniqueTurns:uInv.userUniqueTurns}));emitEvent('USER_TURN_CONFIRMED',{userUniqueTurns:uInv.userUniqueTurns});}const c=findTurnResponseCandidate();if(c){bindResponseNode(c,'send_phase_user_correlated');break;}}
-      if(!confirmed&&freshChatVerified&&initialResponseSet.size===0){const c=findTurnResponseCandidate();if(c){confirmed=true;bindResponseNode(c,'send_phase_fresh_fallback');break;}}
-      if(confirmed&&currentUserTurn)break; await new Promise(r=>setTimeout(r,150));
-    }
-    if(!confirmed){
-      if(!target||!target.isConnected)target=editor();const retryCtrl=findSendControl(target);if(retryCtrl?.button){selectedBtn=retryCtrl.button;}
-      triggerSubmission(target, selectedBtn);
-      const retryDeadline=Date.now()+8000;
-      while(Date.now()<retryDeadline){if(isStopped||execState.cancelled)return{status:'failed',text:'',error:'cancelled'};const q=findNewUserQuery();if(q){currentUserTurn=q;confirmed=true;if(!userTurnConfirmedLogged){userTurnConfirmedLogged=true;const uInv=getUserInventory();console.log('[GEMINI][USER_TURN_CONFIRMED]',JSON.stringify({rid:command.requestId,userUniqueTurns:uInv.userUniqueTurns}));emitEvent('USER_TURN_CONFIRMED',{userUniqueTurns:uInv.userUniqueTurns});}const c=findTurnResponseCandidate();if(c){bindResponseNode(c,'send_phase_retry_user_correlated');break;}}if(!confirmed&&freshChatVerified&&initialResponseSet.size===0){const c=findTurnResponseCandidate();if(c){confirmed=true;bindResponseNode(c,'send_phase_retry_fresh_fallback');break;}}if(confirmed&&currentUserTurn)break;await new Promise(r=>setTimeout(r,150));}
+      if(isExecutionCancelled())return{status:'failed',text:'',error:'cancelled'};
+      if(conversationEpoch!==executionEpoch)return{status:'failed',text:'',error:'send_state_lost'};
+      const newQuery=findNewUserQuery();
+      if(newQuery){
+        currentUserTurn=newQuery;
+        if(stableUserSince===null)stableUserSince=Date.now();
+        const c=findTurnResponseCandidate();
+        const cleared=composerEmpty(editor()), generating=Boolean(findActiveStopButton());
+        if(Date.now()-stableUserSince>=650&&(cleared||generating||c)){
+          confirmed=true;
+          emitEvent('USER_TURN_CONFIRMED',{userUniqueTurns:getUserInventory().userUniqueTurns,stableMs:Date.now()-stableUserSince,composerCleared:cleared});
+          emitEvent('SEND_COMMITTED',{stableMs:Date.now()-stableUserSince,composerCleared:cleared,generationStarted:generating});
+          if(c)bindResponseNode(c,'persistent_user_correlated');
+          break;
+        }
+      }else{stableUserSince=null;currentUserTurn=null;}
+      await new Promise(r=>setTimeout(r,150));
     }
     logSendDiag({button:selectedBtn,totalCandidates:sendCtrl?.totalCandidates||0,confirmed,boundNode:Boolean(targetResponseNode)});
-    if(!confirmed)return{status:'failed',text:'',error:selectedBtn?'user_turn_not_created':'send_not_confirmed'};
+    if(!confirmed){emitEvent('SEND_COMMIT_UNKNOWN');return{status:'failed',text:'',error:'send_commit_unknown'};}
     const generationDeadlineAtMs=execState.generationDeadlineAtMs||execState.deadlineAtMs;let lastMutationAtMs=Date.now(),previous='',lastDiagReportAtMs=0;
     function reportWaitDiag(reason='periodic'){
       if(isExecutionCancelled())return;const nowMs=Date.now();if(reason==='periodic'&&nowMs-lastDiagReportAtMs<4800)return;lastDiagReportAtMs=nowMs;
       const curText=targetResponseNode?extractResponseText(targetResponseNode):'',candDiag=getCandidateInventory(initialResponseSet,baselineResponseFingerprints,currentUserTurn,{freshChatVerified,conversationEpoch}),userDiag=getUserInventory();
       const diag={rid:command.requestId,elapsedMs:nowMs-execState.startedAtMs,freshChatVerified:Boolean(freshChatVerified),tabId:command.tabId||null,contentInstanceId:INSTANCE_ID,conversationEpoch,sendConfirmed:Boolean(confirmed),userSelectorMatches:userDiag.userSelectorMatches,userUniqueTurns:userDiag.userUniqueTurns,responseSelectorMatches:candDiag.responseSelectorMatches,responseUniqueTurns:candDiag.responseUniqueTurns,visibleTurnCandidates:candDiag.visibleTurnCandidates,visibleTextCandidates:candDiag.visibleTextCandidates,responseBound:Boolean(targetResponseNode),responseTextLength:curText.length,lastMutationAgeMs:targetResponseNode?(nowMs-lastMutationAtMs):0,generationEvidence:detectGenerationEvidence(targetResponseNode),candidateExcludeReasons:JSON.stringify(candDiag.excluded),runtimeBuild:runtimeContract.runtimeBuild};
+      Object.assign(diag,{postKey:command.postKey,navigationVersion:command.navigationVersion,expectedEpoch:command.conversationEpoch,route:location.pathname,documentReadyState:document.readyState,userTurnConnected:Boolean(currentUserTurn?.isConnected),responseConnected:Boolean(targetResponseNode?.isConnected)});
       console.log('[GEMINI][WAIT_DIAG]',JSON.stringify(diag));try{chrome.runtime.sendMessage({type:'NFA_WAIT_DIAG',diag});}catch(_){}
     }
     return new Promise(resolve=>{
       let resolved=false;
+      let lostEvidenceSince=null;
       let cleanupObserver=null;
       const finish=res=>{
         if(resolved)return;
@@ -854,6 +874,16 @@
         if(nowMs>generationDeadlineAtMs){reportWaitDiag('timeout');const hasText=targetResponseNode&&extractResponseText(targetResponseNode).length>0;return finish({status:'timeout',text:'',error:hasText?'response_stalled':(targetResponseNode?'response_stream_no_text':'response_turn_not_found')});}
         reportWaitDiag('periodic');
         if(!targetResponseNode||!targetResponseNode.isConnected){const c=findTurnResponseCandidate();if(c)bindResponseNode(c,'observer_phase');}
+        const liveUser=findNewUserQuery();
+        if(liveUser)currentUserTurn=liveUser;
+        const evidenceLost=!liveUser&&!targetResponseNode?.isConnected&&!findActiveStopButton();
+        if(evidenceLost){
+          if(lostEvidenceSince===null)lostEvidenceSince=nowMs;
+          if(nowMs-lostEvidenceSince>=3000){
+            confirmed=false;emitEvent('SEND_STATE_LOST',{composerContainsPrompt:getEditorSurfaces(editor()).some(s=>isPromptMatch(s.text,command.prompt))});
+            return finish({status:'failed',text:'',error:'send_state_lost'});
+          }
+        }else{lostEvidenceSince=null;}
         if(!targetResponseNode)return;const current=extractResponseText(targetResponseNode);
         if(!current){if(!boundAtMs)boundAtMs=Date.now();const zeroLenDuration=Date.now()-boundAtMs,localEvidence=detectGenerationEvidence(targetResponseNode),hasStreamingEvidence=localEvidence==='local_streaming'||localEvidence==='composer_stop_button';if(hasStreamingEvidence){if(zeroLenDuration>=15000)return finish({status:'failed',text:'',error:'response_stream_no_text'});}else if(zeroLenDuration>=3500){if(!reResolveAttempted){reResolveAttempted=true;targetResponseNode=null;boundAtMs=0;const c=findTurnResponseCandidate();if(c)bindResponseNode(c,'re_resolve_afterstalled_zero_len');else return finish({status:'failed',text:'',error:'response_text_target_not_found'});return;}return finish({status:'failed',text:'',error:'response_stream_no_text'});}return;}
         const currentCanonical=canonicalPromptText(current);if(baselineResponseFingerprints.has(currentCanonical)){targetResponseNode=null;return;}
@@ -1023,8 +1053,14 @@
     if(isStopped)return false;
     if(message.type==='NFA_RUNTIME_PING'){sendResponse({ok:true,alive:true,build:runtimeContract.runtimeBuild,version:runtimeContract.extensionVersion,instanceId:INSTANCE_ID,status:pageStatus(),url:location.href,title:document.title,busyRequestId:activeExecution?.requestId||null,busySince:activeExecution?.startedAtMs||null,busyDeadlineAt:activeExecution?.overallDeadlineAtMs||activeExecution?.deadlineAtMs||null,busySinceMs:activeExecution?.startedAtMs||null,busyDeadlineAtMs:activeExecution?.overallDeadlineAtMs||activeExecution?.deadlineAtMs||null});return true;}
     if(message.type==='NFA_CANCEL_COMMAND'){const cancelled=cancelExecution(message.requestId,'cancelled_by_bridge');sendResponse({ok:true,cancelled,status:pageStatus()});return true;}
-    if(message.type==='NFA_CHECK_FRESH_CHAT'){const userDiag=getUserInventory(),candDiag=getCandidateInventory(),ed=editor(),isFresh=userDiag.visibleUserNodes.length===0&&candDiag.visibleTurnCandidates===0&&Boolean(ed);sendResponse({ok:true,fresh:isFresh,contentInstanceId:INSTANCE_ID,conversationEpoch,userQueryCount:userDiag.visibleUserNodes.length,userSelectorMatches:userDiag.userSelectorMatches,userUniqueTurns:userDiag.userUniqueTurns,selector_matches:candDiag.responseSelectorMatches,visible_candidates:candDiag.visibleTurnCandidates,responseSelectorMatches:candDiag.responseSelectorMatches,responseUniqueTurns:candDiag.responseUniqueTurns,visibleTurnCandidates:candDiag.visibleTurnCandidates,visibleTextCandidates:candDiag.visibleTextCandidates,bound_response:Boolean(activeExecution&&activeExecution.targetResponseNode),responseCount:candDiag.visibleTurnCandidates,composerAvailable:Boolean(ed)});return true;}
-    if(message.type==='NFA_RESET_FRESH_CHAT'){conversationEpoch++;const sels=['a[href="/app"]','button[aria-label*="새 대화"]','button[aria-label*="New chat"]','[data-test-id="new-chat-button"]','.new-chat-button'];let clicked=false;for(const sel of sels){const btn=document.querySelector(sel);if(btn&&visible(btn)){btn.click();clicked=true;break;}}sendResponse({ok:true,clicked,conversationEpoch,contentInstanceId:INSTANCE_ID});return true;}
+    if(message.type==='NFA_CHECK_FRESH_CHAT'){const userDiag=getUserInventory(),candDiag=getCandidateInventory(),ed=editor(),isFresh=freshConversationState();sendResponse({ok:true,fresh:isFresh,contentInstanceId:INSTANCE_ID,conversationEpoch,userQueryCount:userDiag.visibleUserNodes.length,userSelectorMatches:userDiag.userSelectorMatches,userUniqueTurns:userDiag.userUniqueTurns,selector_matches:candDiag.responseSelectorMatches,visible_candidates:candDiag.visibleTurnCandidates,responseSelectorMatches:candDiag.responseSelectorMatches,responseUniqueTurns:candDiag.responseUniqueTurns,visibleTurnCandidates:candDiag.visibleTurnCandidates,visibleTextCandidates:candDiag.visibleTextCandidates,bound_response:Boolean(activeExecution&&activeExecution.targetResponseNode),responseCount:candDiag.visibleTurnCandidates,composerAvailable:Boolean(ed),composerEmpty:composerEmpty(ed)});return true;}
+    if(message.type==='NFA_RESET_FRESH_CHAT'){
+      if(activeExecution){sendResponse({ok:false,error:'runtime_busy'});return true;}
+      const sels=['a[href="/app"]','button[aria-label*="새 대화"]','button[aria-label*="New chat"]','[data-test-id="new-chat-button"]','.new-chat-button'];
+      let clicked=false;
+      for(const sel of sels){const btn=document.querySelector(sel);if(btn&&visible(btn)&&!btn.disabled&&btn.getAttribute('aria-disabled')!=='true'){btn.click();clicked=true;conversationEpoch++;break;}}
+      sendResponse({ok:clicked,clicked,conversationEpoch,contentInstanceId:INSTANCE_ID});return true;
+    }
     if(message.type==='NFA_EXECUTE_COMMAND'){sendResponse({ok:true,started:true,requestId:message.command?.requestId,protocol:'two-message-v3'});execute(message.command).then(result=>deliverExecutionResult(message.command,result)).catch(err=>deliverExecutionResult(message.command,{status:'failed',text:'',error:String(err?.message||err)}));return false;}
     return false;
   };

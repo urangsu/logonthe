@@ -152,6 +152,21 @@ async function startHeartbeatLoop() {
   }
 }
 
+async function confirmStableFreshChat(tabId, first) {
+  if (!first?.fresh || !first.composerEmpty) return false;
+  await new Promise(resolve => setTimeout(resolve, 650));
+  const second = await new Promise(resolve => {
+    try {
+      chrome.tabs.sendMessage(tabId, { type: 'NFA_CHECK_FRESH_CHAT' }, res => {
+        resolve(chrome.runtime.lastError ? null : res);
+      });
+    } catch (_) { resolve(null); }
+  });
+  return Boolean(second?.ok && second.fresh && second.composerEmpty
+    && second.contentInstanceId === first.contentInstanceId
+    && second.conversationEpoch === first.conversationEpoch);
+}
+
 async function ensureFreshGeminiConversation(tabId) {
   if (typeof tabId !== 'number') return { ok: false, error: 'missing_tab_id' };
   const contract = await getRuntimeContract();
@@ -163,7 +178,7 @@ async function ensureFreshGeminiConversation(tabId) {
         });
       } catch (_) { resolve(null); }
     });
-    if (checkRes && checkRes.fresh) {
+    if (await confirmStableFreshChat(tabId, checkRes)) {
       console.log('[GEMINI][BACKGROUND] FRESH_CHAT_READY (verified empty)', { tabId, contentInstanceId: checkRes.contentInstanceId, conversationEpoch: checkRes.conversationEpoch });
       try { await bridgeFetch('/v1/event', 'POST', { type: 'FRESH_CHAT_RUNTIME_READY', tab: tabId, instance: checkRes.contentInstanceId, epoch: checkRes.conversationEpoch }, 3000); } catch (_) {}
       try {
@@ -201,7 +216,7 @@ async function ensureFreshGeminiConversation(tabId) {
         });
       } catch (_) { resolve(null); }
     });
-    if (checkRes && checkRes.fresh) {
+    if (await confirmStableFreshChat(tabId, checkRes)) {
       console.log('[GEMINI][BACKGROUND] FRESH_CHAT_READY (navigated and verified)', { tabId, contentInstanceId: checkRes.contentInstanceId, conversationEpoch: checkRes.conversationEpoch });
       try { await bridgeFetch('/v1/event', 'POST', { type: 'FRESH_CHAT_RUNTIME_READY', tab: tabId, instance: checkRes.contentInstanceId, epoch: checkRes.conversationEpoch }, 3000); } catch (_) {}
       try {

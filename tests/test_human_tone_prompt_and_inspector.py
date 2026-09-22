@@ -16,6 +16,7 @@ class TestHumanTonePromptAndInspector(unittest.TestCase):
         prompt = AIPromptBuilder.build(
             title="수유 맛집 돈까스 방문기",
             excerpt="경양식 돈까스인데 스프와 밥이 무한리필입니다.",
+            version="3.0.0-grounded-human",
         )
         # 1. 핵심 섹션 존재 여부
         self.assertIn("[말투 기준]", prompt)
@@ -39,6 +40,7 @@ class TestHumanTonePromptAndInspector(unittest.TestCase):
             excerpt="테스트 본문 내용",
             rewrite_feedback=feedback,
             recent_repeats="가봐야겠",
+            version="3.0.0-grounded-human",
         )
         self.assertIn("[수정 요청 (1회 재작성)]", prompt)
         self.assertIn(feedback, prompt)

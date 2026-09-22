@@ -89,6 +89,43 @@ LEGACY_COMMENT_POLICY = CommentLengthPolicy(
 )
 
 
+# ---------------------------------------------------------------------------
+# 검증 실패 코드 분류 테이블
+# 사실 위반(fact_violation): 본문에 없는 사실·경험을 지어내거나 본문과 모순됨. Hard-fail.
+# 스타일 위반(style_penalty): 표현·형식·어조 문제. auto_repair 또는 재작성으로 복구 가능.
+# 형식 오류(format_error): 텍스트 자체 구조 문제 (빈 문자열, 길이 초과 등).
+# ---------------------------------------------------------------------------
+_CODE_CATEGORIES: dict = {
+    # fact_violation — 절대 등록 불가
+    "unverified_service_fact": "fact_violation",
+    "fabricated_texture": "fact_violation",
+    "unsupported_texture": "fact_violation",
+    "invented_causality": "fact_violation",
+    "negation_inversion": "fact_violation",
+    "mismatched_attribute_target": "fact_violation",
+    "fake_experience": "fact_violation",
+    "semantic_mismatch": "fact_violation",
+    # style_penalty — auto_repair/재작성으로 복구 시도 후 실패 시 FAILED
+    "laughter_or_emoticon": "style_penalty",
+    "emoji": "style_penalty",
+    "excessive_tilde": "style_penalty",
+    "excessive_slang": "style_penalty",
+    "excessive_decorations": "style_penalty",
+    "banned_macro": "style_penalty",
+    "formal_register": "style_penalty",
+    "absolute_or_pressure": "style_penalty",
+    "rude_slang": "style_penalty",
+    "forbidden_period": "style_penalty",
+    # format_error — 구조 문제
+    "invalid_text": "format_error",
+    "empty_text": "format_error",
+    "too_short": "format_error",
+    "length_exceeded": "format_error",
+    "length_below_minimum": "format_error",
+    "need_more_context": "format_error",
+}
+
+
 @dataclass(frozen=True)
 class FinalQualityResult:
     """Structured, UI-friendly outcome of final text validation."""
@@ -132,6 +169,13 @@ class FinalQualityResult:
     @property
     def reason_code(self) -> str:
         return self.code
+
+    @property
+    def violation_category(self) -> Optional[str]:
+        """실패 코드의 카테고리: 'fact_violation' | 'style_penalty' | 'format_error' | None(통과)"""
+        if self.valid:
+            return None
+        return _CODE_CATEGORIES.get(self.code, "unknown")
 
 
 @dataclass(frozen=True)
@@ -591,29 +635,70 @@ class FinalQualityGate:
                 if not (allow_soft_emoji and len(emoji_matches) <= max_decorations):
                     return result(False, "emoji", f"emoji or symbol is forbidden: {emoji_matches[0]}", matched=emoji_matches[0])
 
-        # 객관적 사실(무료 제공/주차/영업시간/가격 수치 등) 주장 시 본문 근거 검증
+        # 객관적 사실(무료 제공/리필/주차/영업시간/가격 수치 등) 주장 시 본문 근거 및 모순/부정 검증
         if not is_user_source and excerpt:
             excerpt_norm = cls.normalize(excerpt)
+
             # 1. 무료/리필 제공 주장 검증
-            free_claim = re.search(r"(?:무료(?:로)?\s*(?:주|제공|나오|되|리필)|무한\s*리필)", normalized)
+            refill_claim = re.search(r"(?:리필(?:도|이)?\s*(?:되|가능|무료)|무료(?:로)?\s*리필|무한\s*리필|리필이라니)", normalized)
+            free_claim = re.search(r"(?:무료(?:로)?\s*(?:주|제공|나오|되)|서비스로\s*(?:주|제공|나오))", normalized)
+
+            if refill_claim:
+                matched_claim = refill_claim.group()
+                # 모순 검사: 본문에 리필 불가/안 됨/유료/없음이 명시된 경우
+                if re.search(r"리필(?:은|이|도)?\s*(?:불가|안\s*됨|안\s*되|없|불가능|유료|추가금)", excerpt_norm):
+                    return result(False, "unverified_service_fact", f"contradicts excerpt (refill forbidden): {matched_claim}", matched=matched_claim)
+                # 근거 검사: 본문에 실제로 리필 또는 무한 관련 키워드가 있어야 함
+                if not any(k in excerpt_norm for k in ("리필", "무한")):
+                    return result(False, "unverified_service_fact", f"objective refill fact requires excerpt evidence: {matched_claim}", matched=matched_claim)
+
             if free_claim:
                 matched_claim = free_claim.group()
-                if not any(k in excerpt_norm for k in ("무료", "리필", "무한", "서비스", "공짜")):
-                    return result(False, "unverified_service_fact", f"objective service fact requires excerpt evidence: {matched_claim}", matched=matched_claim)
+                # 모순 검사: 서비스 없음/유료
+                if re.search(r"(?:유료\s*(?:제공|결제)|서비스\s*(?:없|불가))", excerpt_norm):
+                    return result(False, "unverified_service_fact", f"contradicts excerpt (free service not offered): {matched_claim}", matched=matched_claim)
+                if not any(k in excerpt_norm for k in ("무료", "서비스", "공짜", "기본 제공", "기본제공")):
+                    return result(False, "unverified_service_fact", f"objective free service fact requires excerpt evidence: {matched_claim}", matched=matched_claim)
 
             # 2. 영업시간/심야 주장 검증
-            hours_claim = re.search(r"(?:밤\s*늦게까지|늦게까지\s*열|24시간|새벽까지)", normalized)
-            if hours_claim:
-                matched_claim = hours_claim.group()
-                if not any(k in excerpt_norm for k in ("늦게", "24시간", "새벽", "영업시간", "마감", "밤")):
+            h24_claim = re.search(r"(?:24시간|24시\s*운영|올나잇)", normalized)
+            late_claim = re.search(r"(?:밤\s*늦게까지|늦게까지\s*열|새벽까지)", normalized)
+
+            if h24_claim:
+                matched_claim = h24_claim.group()
+                if re.search(r"(?:24시간|24시\s*운영|올나잇)(?:\s*영업)?\s*(?:이\s*)?(?:아니|아닙|아님|안\s*해|하지\s*않)", excerpt_norm):
+                    return result(False, "unverified_service_fact", "contradicts excerpt (not open 24 hours)", matched=matched_claim)
+                # 24시간 주장은 본문에 실제로 24시간/24시/올나잇이 명시되어 있어야 함
+                if not any(k in excerpt_norm for k in ("24시", "24시간", "올나잇")):
+                    return result(False, "unverified_service_fact", f"24-hour claim requires 24h evidence in excerpt: {matched_claim}", matched=matched_claim)
+                # 모순 검사: 본문에 마감시간이 있는 경우 (24시간이 아님)
+                if re.search(r"(?:마감\s*(?:시간|은)?\s*\d+시|\d+시(?:에)?\s*마감|영업\s*종료)", excerpt_norm) and not any(k in excerpt_norm for k in ("24시간", "24시")):
+                    return result(False, "unverified_service_fact", f"contradicts excerpt closing time: {matched_claim}", matched=matched_claim)
+
+            elif late_claim:
+                matched_claim = late_claim.group()
+                # 모순 검사: 이른 마감 (오후 5시~8시 또는 일찍 마감)
+                if re.search(r"(?:오후\s*[5678]시|1[78]시|20시|일찍)\s*(?:에)?\s*마감", excerpt_norm):
+                    return result(False, "unverified_service_fact", f"contradicts excerpt early closing: {matched_claim}", matched=matched_claim)
+                if not any(k in excerpt_norm for k in ("늦게", "새벽", "심야", "야간", "24시", "23시", "24시간", "밤")):
                     return result(False, "unverified_service_fact", f"objective operating hours fact requires excerpt evidence: {matched_claim}", matched=matched_claim)
 
             # 3. 주차 제공 주장 검증
-            parking_claim = re.search(r"(?:무료\s*주차|주차(?:도|가)?\s*(?:무료|되|가능|편하))", normalized)
+            parking_claim = re.search(r"(?:무료\s*주차|주차(?:도|가)?\s*(?:무료|되|가능|편하|있))", normalized)
             if parking_claim:
                 matched_claim = parking_claim.group()
+                # 모순 검사: 본문에 주차 불가/어려움/유료(무료 주장 시) 명시
+                if re.search(r"주차(?:는|가|도)?\s*(?:불가|어렵|안\s*됨|안\s*되|힘들|불가능|없|지원\s*안)", excerpt_norm) or re.search(r"주차장(?:이|은)?\s*(?:없|협소)", excerpt_norm):
+                    return result(False, "unverified_service_fact", f"contradicts excerpt parking limitation: {matched_claim}", matched=matched_claim)
+                # 근거 검사: 주차 관련 키워드 존재
                 if not any(k in excerpt_norm for k in ("주차", "발렛", "파킹", "주차장")):
                     return result(False, "unverified_service_fact", f"objective parking fact requires excerpt evidence: {matched_claim}", matched=matched_claim)
+                # 무료 주장을 했는데 본문에 무료/지원/주차권 근거가 없는 경우
+                if "무료" in matched_claim:
+                    free_parking = re.search(r"무료\s*주차|주차(?:장)?(?:은|는|이|가|도)?\s*(?:\d+\s*시간\s*)?무료", excerpt_norm)
+                    paid_parking = re.search(r"주차(?:장)?(?:은|는|이|가|도)?\s*유료|무료\s*주차(?:가|는)?\s*(?:아니|불가)", excerpt_norm)
+                    if not free_parking or paid_parking:
+                        return result(False, "unverified_service_fact", f"free parking claim requires free parking evidence: {matched_claim}", matched=matched_claim)
 
             # 4. 가격/할인 수치 날조 검증 (원문 가격 언급 없이 구체적 가격 단정)
             price_claim = re.search(r"\b(\d+[\d,]*\s*원|\d+\s*만\s*원)", normalized)
@@ -785,6 +870,21 @@ class DraftInspectionResult:
     feedback: str
     matched: Optional[str] = None
 
+    @property
+    def violation_category(self) -> Optional[str]:
+        """실패 코드의 카테고리: 'fact_violation' | 'style_penalty' | 'format_error' | None(통과)"""
+        if self.passed:
+            return None
+        return _CODE_CATEGORIES.get(self.code, "unknown")
+
+    @property
+    def is_fact_violation(self) -> bool:
+        return self.violation_category == "fact_violation"
+
+    @property
+    def is_style_penalty(self) -> bool:
+        return self.violation_category == "style_penalty"
+
 
 class CommentDraftInspector:
     """
@@ -897,8 +997,10 @@ class CommentDraftInspector:
 
         # 2-1. 본문에 없는 식감 추측 검사
         if norm_excerpt:
+            # Orthographic variants are evidence, not invented sensory details.
+            texture_excerpt = norm_excerpt.replace("바사삭", "바삭")
             for tex_word in cls.UNVERIFIED_TEXTURE_WORDS:
-                if tex_word in normalized and tex_word not in norm_excerpt:
+                if tex_word in normalized and tex_word not in texture_excerpt:
                     return DraftInspectionResult(
                         passed=False, stage=2, code="unsupported_texture",
                         matched=tex_word,
@@ -953,6 +1055,11 @@ class CommentDraftInspector:
             return DraftInspectionResult(passed=True, stage=0, code="ok", feedback="", matched=None)
 
         # 3단계: 상투적인 요약·평가·중복 마무리
+        if any(rc and FinalQualityGate.normalize(rc.strip()) == normalized for rc in (recent_comments or [])[-5:]):
+            return DraftInspectionResult(
+                passed=False, stage=4, code="exact_duplicate",
+                matched=normalized, feedback="최근 댓글과 완전히 같습니다. 현재 글의 다른 부분에 반응해주세요."
+            )
         for phrase in cls.EXPLANATORY_PHRASES:
             if phrase in normalized:
                 return DraftInspectionResult(
@@ -1082,4 +1189,3 @@ __all__ = [
     "DraftInspectionResult",
     "CommentDraftInspector",
 ]
-

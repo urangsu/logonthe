@@ -936,6 +936,13 @@ class GeminiBridgeHTTPServer:
                             f"[GEMINI][USER_TURN_CONFIRMED] rid={payload.get('rid')} "
                             f"userUniqueTurns={payload.get('userUniqueTurns')}"
                         )
+                    elif ev_type in ("SEND_DIAG", "SEND_DISPATCHED", "SEND_COMMITTED", "SEND_COMMIT_UNKNOWN", "SEND_STATE_LOST"):
+                        fields = {key: payload.get(key) for key in (
+                            "rid", "candidateCount", "selectedTag", "disabled", "ariaDisabled",
+                            "sendConfirmed", "boundNode", "clicked", "keyed", "stableMs",
+                            "composerCleared", "generationStarted", "composerContainsPrompt",
+                        ) if key in payload}
+                        logger.log(f"[GEMINI][{ev_type}] " + json.dumps(fields, ensure_ascii=False))
                     elif ev_type == "RESPONSE_TURN_BOUND":
                         logger.log(
                             f"[GEMINI][RESPONSE_TURN_BOUND] responseUniqueTurns={payload.get('responseUniqueTurns')} "
@@ -982,6 +989,12 @@ class GeminiBridgeHTTPServer:
                     )
                     if exclude_reasons:
                         diag_log += f" candidateExcludeReasons={exclude_reasons}"
+                    correlation = {key: payload.get(key) for key in (
+                        "postKey", "navigationVersion", "tabId", "contentInstanceId",
+                        "conversationEpoch", "expectedEpoch", "route", "documentReadyState",
+                        "userTurnConnected", "responseConnected",
+                    )}
+                    diag_log += " correlation=" + json.dumps(correlation, ensure_ascii=False)
                     logger.log(diag_log)
                     return self._json(200, {"ok": True})
                 return self._json(404, {"error": "not_found"})

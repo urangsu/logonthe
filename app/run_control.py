@@ -10,6 +10,8 @@ from typing import Callable, Optional, Set
 
 from browser.session import WaitInterruptionReason
 from app.state import FeedState
+from src.logger import logger
+import uuid
 
 
 class RunControlState(str, Enum):
@@ -64,6 +66,13 @@ class RunControl:
         self.current_stage: str = ""
         self.state_manager = state_manager
         self.on_state_change: Optional[Callable[[RunControlState, str], None]] = None
+        self.control_id = uuid.uuid4().hex
+
+    def _log_transition(self, event: str) -> None:
+        logger.log(
+            f"[RUN_CONTROL] id={self.control_id} event={event} state={self.state.value} "
+            f"stage={self.current_stage} post={self.active_post_key} reason={self.pause_reason}"
+        )
 
     def set_active_post(self, post_key: Optional[str]) -> None:
         with self._lock:
@@ -77,6 +86,7 @@ class RunControl:
             self.pause_reason = reason
             self.pause_requested_event.set()
             self.pause_event.set()
+            self._log_transition("pause_requested")
 
             if self.state_manager and hasattr(self.state_manager, "update"):
                 try:
@@ -97,6 +107,7 @@ class RunControl:
             self.pause_ack_event.clear()
             self.pause_event.clear()
             self._cv.notify_all()
+            self._log_transition("resumed")
 
             if self.state_manager and hasattr(self.state_manager, "update"):
                 try:
@@ -111,6 +122,7 @@ class RunControl:
         with self._lock:
             self.state = RunControlState.STOPPED
             self.stop_event.set()
+            self._log_transition("stopped")
             self.pause_requested_event.clear()
             self.pause_ack_event.clear()
             self.pause_event.clear()
@@ -167,6 +179,7 @@ class RunControl:
             if self.state == RunControlState.PAUSE_REQUESTED or self.pause_requested_event.is_set():
                 self.state = RunControlState.PAUSED
                 self.pause_ack_event.set()
+                self._log_transition("pause_ack")
                 self.pause_requested_event.clear()
 
                 if self.state_manager and hasattr(self.state_manager, "update"):
@@ -182,12 +195,13 @@ class RunControl:
                 if self.on_state_change:
                     self.on_state_change(RunControlState.PAUSED, self.pause_reason or "")
 
-                while self.state == RunControlState.PAUSED and not self.stop_event.is_set():
-                    self._cv.wait(timeout=0.05)
+            # Every caller must wait, including callers arriving after the ACK.
+            while self.state == RunControlState.PAUSED and not self.stop_event.is_set():
+                self._cv.wait(timeout=0.05)
 
-                if self.stop_event.is_set():
-                    self.state = RunControlState.STOPPED
-                    raise StopRequestedException("작업 중지 요청됨")
+            if self.stop_event.is_set():
+                self.state = RunControlState.STOPPED
+                raise StopRequestedException("작업 중지 요청됨")
 
     def interruptible_wait(
         self,
