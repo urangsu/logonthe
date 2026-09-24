@@ -48,13 +48,11 @@ def test_greeting_with_fact_preserved():
 def test_contrast_pair_preserved_together():
     body = "음식이 정말 기대됐어요.\n하지만 생각보다 별로였어요."
     result = select_comment_context("후기", body, max_chars=600)
-    # 긍정(기대)과 부정(별로) 둘 다 살아있어야 함
-    assert "기대" in result.excerpt or "별로" in result.excerpt
-    # contrast가 잘못 잘려 칭찬 댓글이 나오면 안 됨: 두 문장 모두 있어야 함
+    # 긍정(기대)과 부정(별로) 둘 다 살아있어야 함 — 한 쪽만 있으면 왜곡된 칭찬 댓글이 생성됨
     has_setup = "기대" in result.excerpt
     has_contrast = "별로" in result.excerpt or "하지만" in result.excerpt
-    # 최소한 하나는 있어야 함
-    assert has_setup or has_contrast
+    assert has_setup, f"setup 문장이 없음: excerpt={result.excerpt!r}"
+    assert has_contrast, f"contrast 문장이 없음: excerpt={result.excerpt!r}"
 
 
 def test_negation_word_not_stripped():
@@ -96,13 +94,19 @@ def test_no_substring_truncation():
 def test_achievement_mood():
     body = "드디어 목표를 달성했어요! 정말 뿌듯합니다."
     result = select_comment_context("달성", body)
-    assert result.mood_hint in ("achievement", "daily", None)  # achievement가 이상적
+    # 명확한 성취 fixture: achievement가 기대됨 (daily 허용, None은 불가)
+    assert result.mood_hint in ("achievement", "daily"), (
+        f"achievement fixture에서 mood_hint={result.mood_hint!r} 반환됨"
+    )
 
 
 def test_regret_mood():
     body = "맛집이라 기대했는데 실망스러웠어요."
     result = select_comment_context("후기", body)
-    assert result.mood_hint in ("regret", "mixed", None)
+    # 명확한 후회/실망 fixture: None 허용 안 됨
+    assert result.mood_hint in ("regret", "mixed"), (
+        f"regret fixture에서 mood_hint={result.mood_hint!r} 반환됨"
+    )
 
 
 def test_no_forced_mood_for_ambiguous():
@@ -133,3 +137,26 @@ def test_removed_counts_populated():
     # noise 또는 background 제거 있을 수 있음
     assert isinstance(result.removed_counts, dict)
     assert result.source_chars > 0
+
+
+# ---------------------------------------------------------------------------
+# needs_more_context: background만 있으면 근거 부족
+# ---------------------------------------------------------------------------
+
+def test_background_only_body_needs_more_context():
+    """모든 문장이 background로 분류되면 needs_more_context=True여야 함."""
+    # 사실/이벤트/감정/반전 표현 없는 단순 배경 문장
+    body = "날씨가 맑은 날이었습니다.\n하늘이 파랗게 펼쳐져 있었습니다.\n바람도 살랑살랑 불었습니다."
+    result = select_comment_context("일상", body)
+    assert result.needs_more_context is True, (
+        f"background만 있는데 needs_more_context=False: excerpt={result.excerpt!r}"
+    )
+
+
+def test_fact_body_not_needs_more_context():
+    """사실 정보가 포함된 본문은 needs_more_context=False여야 함."""
+    body = "아메리카노 3,500원에 조각케이크 5,800원이었어요.\n재료도 신선해 보였습니다."
+    result = select_comment_context("카페 후기", body)
+    assert result.needs_more_context is False, (
+        f"fact가 있는데 needs_more_context=True: excerpt={result.excerpt!r}"
+    )

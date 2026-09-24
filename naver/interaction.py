@@ -18,6 +18,7 @@ from app.errors import BrowserDisconnectedError
 from naver.resolver import MobileDOMResolver
 from naver.editor_adapter import CommentEditorAdapter
 from naver.comment_guard import ServerCommentDuplicateGuard, CommentPresenceState
+from services.draft import normalize_naver_comment_text
 from services.like_transaction import LikeTransactionService
 from services.clipboard_bridge import ClipboardCommandBridge
 from browser.session import interruptible_wait, ensure_page_alive
@@ -668,13 +669,16 @@ class CommentInteractionService:
 
     @classmethod
     def read_final_text(cls, page: Page) -> str:
-        """마우스 클릭 시 보존된 텍스트 또는 현재 에디터 텍스트 추출"""
+        """마우스 클릭 시 보존된 텍스트 또는 현재 에디터 텍스트 추출.
+        반환 텍스트는 normalize_naver_comment_text() 정규화 기준을 적용한다.
+        CommentEditorAdapter.get_text()도 같은 기준을 사용하므로 두 경로의 계약이 동일하다.
+        """
         try:
             context = MobileDOMResolver.get_comment_editor_context(page)
             frame = context["frame"] if context else page.main_frame
             saved_text = frame.evaluate("() => window.__NAVER_COMMENT_FINAL_TEXT__ || ''")
             if saved_text and saved_text.strip():
-                return saved_text.strip()
+                return normalize_naver_comment_text(saved_text)
         except Exception:
             pass
         return CommentEditorAdapter.get_text(page)
@@ -710,9 +714,15 @@ class CommentInteractionService:
     def _get_editor_state(frame) -> dict:
         """
         현재 댓글 에디터의 가시성, 입력 텍스트, 제출 락 상태 조회.
+
+        반환값:
+          rawText: DOM innerText 원본
+          text:    normalize_naver_comment_text(rawText) — 운영 비교에 사용
+          visible: 에디터 가시성
+          lockHeld: 제출 락 보유 여부
         """
         if not frame:
-            return {"visible": False, "text": "", "lockHeld": False}
+            return {"visible": False, "rawText": "", "text": "", "lockHeld": False}
         try:
             res = frame.evaluate("""() => {
                 const el = document.querySelector(
@@ -720,26 +730,31 @@ class CommentInteractionService:
                 );
                 const rect = el ? el.getBoundingClientRect() : null;
                 const isVis = !!(el && rect && rect.width > 0 && rect.height > 0 && window.getComputedStyle(el).display !== 'none');
-                const txt = el ? (el.innerText || el.value || '').trim() : '';
+                const txt = el ? (el.innerText || el.value || '') : '';
                 const lock = !!(window.__NAVER_SUBMIT_LOCK_ACQUIRED__ || window.__NAVER_COMMENT_STATE__ === 'SUBMITTING');
-                return { visible: isVis, text: txt, lockHeld: lock, dirty: window.__NAVER_COMMENT_USER_DIRTY__ === true };
+                return { visible: isVis, rawText: txt, lockHeld: lock, dirty: window.__NAVER_COMMENT_USER_DIRTY__ === true };
             }""")
             if isinstance(res, dict):
                 vis = res.get("visible")
-                txt = str(res.get("text") or res.get("currentText") or "")
+                raw_val = res.get("rawText")
+                if raw_val is None:
+                    raw_val = res.get("text") if res.get("text") is not None else res.get("currentText")
+                raw_txt = str(raw_val or "")
+                norm_txt = normalize_naver_comment_text(raw_txt)
                 if vis is None:
-                    vis = bool(txt)
+                    vis = bool(norm_txt)
                 lock = res.get("lockHeld")
                 if lock is None:
                     lock = True
                 return {
                     "visible": bool(vis),
-                    "text": txt,
+                    "rawText": raw_txt,
+                    "text": norm_txt,
                     "lockHeld": bool(lock),
                 }
         except Exception:
             pass
-        return {"visible": False, "text": "", "lockHeld": False}
+        return {"visible": False, "rawText": "", "text": "", "lockHeld": False}
 
     @classmethod
     def submit_and_verify(
@@ -816,18 +831,25 @@ class CommentInteractionService:
                             logger.log("  ⚠️ [COMMENT][AUTO_SUBMIT_DISARMED] reason=user_edit")
                             return CommentSubmitOutcome(state=CommentSubmitState.REVIEW_REQUIRED, reason="user_edit", click_dispatched=False, retryable_same_post=True)
                         cur_text = pre_check.get("text", "")
-                        if cur_text and cur_text != final_text.strip():
-                            logger.log(f"  ⚠️ [COMMENT][AUTO_SUBMIT_DISARMED] reason=text_mutation ('{cur_text}' != '{final_text.strip()}')")
+                        cur_norm = normalize_naver_comment_text(cur_text)
+                        expected_norm = normalize_naver_comment_text(final_text)
+                        if cur_norm and cur_norm != expected_norm:
+                            logger.log(
+                                f"  ⚠️ [COMMENT][AUTO_SUBMIT_DISARMED] reason=text_mutation "
+                                f"(normActual={len(cur_norm)} normExpected={len(expected_norm)})"
+                            )
                             return CommentSubmitOutcome(state=CommentSubmitState.REVIEW_REQUIRED, reason="text_mutation", click_dispatched=False, retryable_same_post=True)
                     elif origin == SubmitOrigin.USER_ENTER:
                         if pre_check.get("isComposing"):
                             logger.log("  ⚠️ [COMMENT][IME_COMPOSING] Enter는 한글 조합 확정으로 처리 / 등록 대기 유지", "INFO")
                             return CommentSubmitOutcome(state=CommentSubmitState.PRECLICK_BLOCKED, reason="ime_composing", click_dispatched=False, retryable_same_post=True)
                         cur_text = pre_check.get("text", "")
-                        if not cur_text and not final_text.strip():
+                        cur_norm = normalize_naver_comment_text(cur_text)
+                        expected_norm = normalize_naver_comment_text(final_text)
+                        if not cur_norm and not expected_norm:
                             logger.log("  ❌ [COMMENT][MANUAL_SUBMIT_PRECHECK_FAILED] reason=empty_text retryable=true", "ERROR")
                             return CommentSubmitOutcome(state=CommentSubmitState.PRECLICK_BLOCKED, reason="empty_text", click_dispatched=False, retryable_same_post=True)
-                        if cur_text and cur_text != final_text.strip():
+                        if cur_norm and cur_norm != expected_norm:
                             gate_res_cur = FinalQualityGate.validate_final_text(cur_text, preset=preset, source="user_edit")
                             if not gate_res_cur.valid:
                                 logger.log(f"  ❌ [COMMENT][MANUAL_SUBMIT_PRECHECK_FAILED] reason={gate_res_cur.code} retryable=true", "WARNING")
@@ -873,7 +895,7 @@ class CommentInteractionService:
                         if attempt == 1:
                             editor_info = cls._get_editor_state(comment_frame)
                             if (editor_info.get("visible") and
-                                editor_info.get("text") == final_text.strip() and
+                                normalize_naver_comment_text(editor_info.get("text", "")) == normalize_naver_comment_text(final_text) and
                                 editor_info.get("lockHeld")):
                                 interruptible_wait(stop_event, 0.4)
                                 continue
@@ -956,7 +978,10 @@ class CommentInteractionService:
                 # Step C: 확실한 사전 실패 조건 만족 시 정확히 1회 재시도 (attempt 1 -> 2)
                 if attempt == 1:
                     lock_held = editor_info.get("lockHeld", False)
-                    is_exact_match = (cur_editor_txt == final_text.strip())
+                    is_exact_match = (
+                        normalize_naver_comment_text(cur_editor_txt)
+                        == normalize_naver_comment_text(final_text)
+                    )
                     if (not permit_consumed and
                         presence.state == CommentPresenceState.ABSENT and
                         is_editor_vis and

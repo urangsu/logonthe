@@ -159,23 +159,76 @@ class CommentEditorAdapter:
 
     @classmethod
     def _verify_and_confirm(
-        cls, editor: Locator, clean_t: str, is_textarea: bool, frame, page: Page
+        cls, editor: Locator, clean_t: str, is_textarea: bool, frame, page: Page,
+        stop_flag=None,
     ) -> bool:
         """
         DOM-aware readback + normalize 후 비교.
         raw ±1 문자 차이라도 정규화 후 동일하면 통과.
         진단 로그(EDITOR_READBACK_DIAG)는 항상 기록.
+
+        readback 안정화 polling:
+          - 100ms 간격으로 동일 결과 2회 연속 확인 (stale locator 대비 매번 재연결)
+          - 쳙 대기 상한 1.5초
+
+        submit button polling:
+          - readback OK 후 100ms 간격 최대 400ms
+          - 클릭 안들개 정상 활성화 확인
         """
-        try:
-            raw_read = cls._read_editor_surface(editor, is_textarea)
-        except Exception as e:
-            logger.log(f"⚠️ [NAVER][EDITOR_READBACK_ERROR] {e}", "WARNING")
-            return False
+        import time as _time
 
         norm_expected = normalize_naver_comment_text(clean_t)
-        norm_actual = normalize_naver_comment_text(raw_read)
-        matched = (norm_actual == norm_expected)
 
+        # --- readback stability polling ---
+        POLL_INTERVAL = 0.10   # 100 ms
+        POLL_MAX = 1.5
+        STABLE_REQUIRED = 2
+
+        stable_count = 0
+        norm_actual = ""
+        raw_read = ""
+        poll_start = _time.monotonic()
+
+        while True:
+            if stop_flag and getattr(stop_flag, "is_set", lambda: False)():
+                break
+
+            # Re-resolve editor locator 매번 (콘텐츠에디터블 DOM 교체 대비)
+            try:
+                fresh_ctx = MobileDOMResolver.get_comment_editor_context(page)
+                if fresh_ctx and fresh_ctx.get("editor"):
+                    editor = fresh_ctx["editor"]
+                    frame = fresh_ctx["frame"]
+                    try:
+                        tag_name = editor.evaluate("e => e.tagName.toLowerCase()")
+                        is_textarea = (tag_name == "textarea")
+                    except Exception:
+                        pass
+            except Exception:
+                pass
+
+            try:
+                raw_read = cls._read_editor_surface(editor, is_textarea)
+            except Exception as e:
+                logger.log(f"⚠️ [NAVER][EDITOR_READBACK_ERROR] {e}", "WARNING")
+                raw_read = ""
+
+            norm_actual = normalize_naver_comment_text(raw_read)
+            if norm_actual == norm_expected:
+                stable_count += 1
+            else:
+                stable_count = 0
+
+            if stable_count >= STABLE_REQUIRED:
+                break
+
+            elapsed = _time.monotonic() - poll_start
+            if elapsed >= POLL_MAX:
+                break
+
+            _time.sleep(POLL_INTERVAL)
+
+        matched = (norm_actual == norm_expected)
         cls._readback_diag(clean_t, raw_read, norm_expected, norm_actual, matched)
 
         if not matched:
@@ -187,25 +240,35 @@ class CommentEditorAdapter:
             )
             return False
 
-        logger.log(f"[NAVER][EDITOR_READBACK_OK] chars={len(raw_read)} normChars={len(norm_actual)}")
+        logger.log(f"[NAVER][EDITOR_READBACK_OK] chars={len(raw_read)} normChars={len(norm_actual)} stableRounds={stable_count}")
 
-        submit_context = MobileDOMResolver.get_comment_submit_context(page, frame)
-        if not submit_context:
-            logger.log("[NAVER][COMMENT_SUBMIT_NOT_FOUND]", "ERROR")
-            logger.log("[NAVER][EDITOR_INPUT_FAIL] stage=internal_state", "ERROR")
-            return False
+        # --- submit button enabled polling ---
+        BTN_POLL_INTERVAL = 0.10
+        BTN_POLL_MAX = 0.40
+        btn_start = _time.monotonic()
+        while True:
+            submit_context = MobileDOMResolver.get_comment_submit_context(page, frame)
+            if not submit_context:
+                logger.log("[NAVER][COMMENT_SUBMIT_NOT_FOUND]", "ERROR")
+                logger.log("[NAVER][EDITOR_INPUT_FAIL] stage=internal_state", "ERROR")
+                return False
+            try:
+                disabled = submit_context["button"].is_disabled()
+            except Exception as e:
+                logger.log(f"⚠️ [NAVER][EDITOR_SUBMIT_CHECK_ERROR] {e}", "WARNING")
+                logger.log("[NAVER][EDITOR_INPUT_FAIL] stage=internal_state", "ERROR")
+                return False
 
-        try:
-            disabled = submit_context["button"].is_disabled()
-        except Exception as e:
-            logger.log(f"⚠️ [NAVER][EDITOR_SUBMIT_CHECK_ERROR] {e}", "WARNING")
-            logger.log("[NAVER][EDITOR_INPUT_FAIL] stage=internal_state", "ERROR")
-            return False
+            if not disabled:
+                break
 
-        if disabled:
-            logger.log("[NAVER][EDITOR_FRAMEWORK_STATE_NOT_UPDATED] submitEnabled=false", "ERROR")
-            logger.log("[NAVER][EDITOR_INPUT_FAIL] stage=internal_state", "ERROR")
-            return False
+            elapsed_btn = _time.monotonic() - btn_start
+            if elapsed_btn >= BTN_POLL_MAX:
+                logger.log("[NAVER][EDITOR_FRAMEWORK_STATE_NOT_UPDATED] submitEnabled=false", "ERROR")
+                logger.log("[NAVER][EDITOR_INPUT_FAIL] stage=internal_state", "ERROR")
+                return False
+
+            _time.sleep(BTN_POLL_INTERVAL)
 
         logger.log("[NAVER][EDITOR_INTERNAL_READY] submitEnabled=true")
         return True

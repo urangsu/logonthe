@@ -135,7 +135,10 @@ class StateManager:
         current_ai_prompt: Optional[str] = None,
         ai_clipboard_ready: Optional[bool] = None,
         pause_reason: Optional[str] = None,
-        clear_pause_reason: bool = False
+        clear_pause_reason: bool = False,
+        gemini_phase: Optional[str] = None,
+        gemini_failure_count: Optional[int] = None,
+        gemini_failure_code: Optional[str] = None,
     ):
         with self._lock:
             if new_state is not None:
@@ -180,6 +183,12 @@ class StateManager:
                 self.state.current_ai_prompt = current_ai_prompt
             if ai_clipboard_ready is not None:
                 self.state.ai_clipboard_ready = ai_clipboard_ready
+            if gemini_phase is not None:
+                self.state.gemini_phase = gemini_phase
+            if gemini_failure_count is not None:
+                self.state.gemini_failure_count = gemini_failure_count
+            if gemini_failure_code is not None:
+                self.state.gemini_failure_code = gemini_failure_code
 
             snapshot = copy.deepcopy(self.state)
             listeners_copy = list(self._listeners)

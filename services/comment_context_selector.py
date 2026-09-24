@@ -292,7 +292,12 @@ def select_comment_context(
             selected_units.extend(units)
             accumulated += g_len
 
-    needs_more = len(selected_units) == 0
+    # 의미 근거 기반 needs_more 판단: background만 있으면 근거 부족으로 처리
+    meaningful = [
+        u for u in selected_units
+        if u.kind in {"fact", "event", "feeling", "contrast"}
+    ]
+    needs_more = not meaningful
 
     # 원문 순서로 재조립
     selected_units.sort(key=lambda u: u.source_index)
