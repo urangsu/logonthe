@@ -787,8 +787,8 @@ class TestHighReliabilityMatrix(unittest.TestCase):
         plan_a = StylePlan(reaction_type="짧은 감상", ending_family="~네요", intensity="담백", length_band="짧게")
         plan_b = StylePlan(reaction_type="구체적 디테일 공감", ending_family="~겠어요", intensity="살짝 유쾌", length_band="보통")
 
-        prompt_a = AIPromptBuilder.build("제목", "본문", style_plan=plan_a)
-        prompt_b = AIPromptBuilder.build("제목", "본문", style_plan=plan_b)
+        prompt_a = AIPromptBuilder.build("제목", "본문", style_plan=plan_a, version="3.0.0-grounded-human")
+        prompt_b = AIPromptBuilder.build("제목", "본문", style_plan=plan_b, version="3.0.0-grounded-human")
 
         self.assertIn("짧은 감상", prompt_a)
         self.assertIn("구체적 디테일 공감", prompt_b)
@@ -799,8 +799,8 @@ class TestHighReliabilityMatrix(unittest.TestCase):
         plan = StylePlan(ending_family="~보여요", reaction_type="가벼운 관심")
         action_plan = PostActionPlan(style_plan=plan)
 
-        prompt1 = AIPromptBuilder.build("제목", "본문1", style_plan=action_plan.style_plan)
-        prompt2 = AIPromptBuilder.build("제목", "본문2 확장", style_plan=action_plan.style_plan)
+        prompt1 = AIPromptBuilder.build("제목", "본문1", style_plan=action_plan.style_plan, version="3.0.0-grounded-human")
+        prompt2 = AIPromptBuilder.build("제목", "본문2 확장", style_plan=action_plan.style_plan, version="3.0.0-grounded-human")
 
         self.assertIn("가벼운 관심", prompt1)
         self.assertIn("가벼운 관심", prompt2)

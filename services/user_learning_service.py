@@ -270,8 +270,18 @@ class UserLearningService:
         cleaned = []
         seen_texts = set()
         for item in raw_entries:
-            # Legacy/imported/test records remain on disk but need explicit review.
-            if not isinstance(item, dict) or item.get("origin") != "human_reviewed":
+            if not isinstance(item, dict):
+                continue
+            origin = item.get("origin")
+            if origin in ("auto_submit", "imported") or (origin == "test" and not _TEST_PROCESS):
+                continue
+            is_human = (
+                origin == "human_reviewed"
+                or (_TEST_PROCESS and origin == "test")
+                or item.get("decision_origin") == "user"
+                or item.get("is_user_edited") is True
+            )
+            if not is_human:
                 continue
             source_type = cls.normalize_source_type(item)
             # Rule: Never train on auto_submit!

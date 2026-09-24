@@ -29,7 +29,7 @@
     '[data-test-id="model-response"]', '.response-container-content', 'message-content', '.model-response-text'
   ].join(', ');
   let runtimeContract = {
-    extensionVersion: '13.2.4', runtimeBuild: '13.2.4-send-commit', protocolVersion: 3, bridgeSchemaVersion: 2
+    extensionVersion: '13.2.4', runtimeBuild: '13.2.4-send-harden-v3', protocolVersion: 3, bridgeSchemaVersion: 2
   };
 
   try {
@@ -99,6 +99,25 @@
       .replace(/…/g, '...')
       .replace(/\s+/gu, ' ').trim();
   }
+
+  function strictNormalizePrompt(text) {
+    if (typeof text !== 'string') return '';
+    return text
+      .normalize('NFC')
+      .replace(/\r\n?/g, '\n')
+      .replace(/[\u2028\u2029]/g, '\n')
+      .replace(/[\u200B-\u200D\u2060\uFEFF\u200E\u200F\u202A-\u202E\u2066-\u2069]/g, '')
+      .replace(/[\u00A0\u2007\u202F]/g, ' ')
+      .trim();
+  }
+
+  function isExactPromptMatch(actualText, expectedText) {
+    const act = strictNormalizePrompt(actualText);
+    const exp = strictNormalizePrompt(expectedText);
+    if (!act || !exp) return false;
+    return act === exp;
+  }
+  const isStrictPromptMatch = isExactPromptMatch;
 
   function isPromptMatch(actualText, expectedText) {
     const act = canonicalPromptText(actualText);
@@ -212,23 +231,24 @@
   }
 
   function findSendControl(input) {
-    const composer = findComposer(input);
+    const target = input || editor();
+    const composer = findComposer(target);
+    if (!composer || typeof composer.querySelectorAll !== 'function') return null;
     const rawCandidates = composer.querySelectorAll('button, [role="button"], span.mat-mdc-button-touch-target, mat-icon');
     const buttonSet = new Set();
     for (const raw of rawCandidates) {
-      if (raw.tagName.toLowerCase() === 'button') buttonSet.add(raw);
-      else { const parentBtn = raw.closest('button, [role="button"]'); if (parentBtn) buttonSet.add(parentBtn); }
+      if (raw.tagName && raw.tagName.toLowerCase() === 'button') buttonSet.add(raw);
+      else {
+        const parentBtn = raw.closest('button, [role="button"]');
+        if (parentBtn && composer.contains(parentBtn)) buttonSet.add(parentBtn);
+      }
     }
-    for (const sel of SEND_SELECTORS) {
-      try {
-        for (const el of document.querySelectorAll(sel)) {
-          if (el.tagName.toLowerCase() === 'button' || el.getAttribute('role') === 'button') {
-            buttonSet.add(el);
-          }
-        }
-      } catch (_) {}
-    }
-    const scored = [...buttonSet].map(button => ({ button, score: scoreSendCandidate(button, composer) })).filter(x => x.score > 0).sort((a,b) => b.score - a.score);
+    const scored = [...buttonSet].filter(button => {
+      if (!visibleAndActive(button)) return false;
+      const identity = [button.getAttribute('aria-label'), button.getAttribute('data-test-id'), button.getAttribute('data-testid'), button.className, button.innerText || button.textContent].join(' ');
+      return /send|submit|전송|보내기|제출|arrow_upward|arrow-up/i.test(identity);
+    }).map(button => ({ button, score: scoreSendCandidate(button, composer) })).filter(x => x.score > 0).sort((a,b) => b.score - a.score);
+    if (scored.length > 1 && scored[0].score === scored[1].score) return null;
     return scored.length ? { button: scored[0].button, totalCandidates: scored.length } : null;
   }
 
@@ -267,9 +287,11 @@
 
   function freshConversationState() {
     const ed = editor();
+    const userInv = getUserInventory();
+    const candInv = getCandidateInventory();
     return Boolean(ed) && composerEmpty(ed) && !activeExecution && !findActiveStopButton()
-      && getUserInventory().visibleUserNodes.length === 0
-      && getCandidateInventory().visibleTurnCandidates === 0
+      && userInv.userUniqueTurns === 0
+      && candInv.responseUniqueTurns === 0
       && document.readyState !== 'loading';
   }
 
@@ -328,8 +350,8 @@
       if (!currentTarget) { await new Promise(r => setTimeout(r,100)); continue; }
       resolvedTarget = currentTarget; let matchedThisTick = false;
       for (const s of getEditorSurfaces(currentTarget)) {
-        const canonicalActual = canonicalPromptText(s.text); lastActualRaw = s.text; lastActualCanonical = canonicalActual;
-        if (isPromptMatch(s.text, expectedText)) { matchedThisTick = true; lastMatchedSurface = s.surface; break; }
+        const canonicalActual = strictNormalizePrompt(s.text); lastActualRaw = s.text; lastActualCanonical = canonicalActual;
+        if (isExactPromptMatch(s.text, expectedText)) { matchedThisTick = true; lastMatchedSurface = s.surface; break; }
       }
       if (matchedThisTick) {
         if (!matchStartTimeMs) matchStartTimeMs = Date.now();
@@ -459,10 +481,42 @@
   }
 
   function extractResponseText(node) { if (!node) return ''; const cand = resolveTurnCandidate(node); return cand ? (cand.text || '') : extractCleanText(node); }
+  const USER_QUERY_BODY_SELECTORS = [
+    '.query-text', '.user-query-text', '.user-query-content', '[data-test-id*="user-query"]', '.user-query-body'
+  ].join(', ');
+
   function extractUserQueryText(node) {
     if (!node) return '';
-    const q = (typeof node.querySelector === 'function' ? node.querySelector(USER_TURN_TEXT_SELECTORS) : null) || node;
-    return (q.innerText || q.textContent || '').trim();
+    const textContainer = (typeof node.querySelector === 'function' ? node.querySelector(USER_QUERY_BODY_SELECTORS) : null) || node;
+    const pElements = typeof textContainer.querySelectorAll === 'function' ? [...textContainer.querySelectorAll('p')] : [];
+    if (pElements.length > 0) {
+      return pElements.map(p => (p.innerText || p.textContent || '').trim()).filter(Boolean).join('\n');
+    }
+    return (textContainer.innerText || textContainer.textContent || '').trim();
+  }
+
+  function userTurnMatchesExpected(root, expectedStrict) {
+    if (!root || !expectedStrict) return false;
+    const textContainer = (typeof root.querySelector === 'function' ? root.querySelector(USER_QUERY_BODY_SELECTORS) : null) || root;
+    const candidates = [];
+    try {
+      const pElements = typeof textContainer.querySelectorAll === 'function' ? [...textContainer.querySelectorAll('p')] : [];
+      if (pElements.length > 0) {
+        candidates.push(pElements.map(p => (p.innerText || p.textContent || '').trim()).filter(Boolean).join('\n'));
+        candidates.push(pElements.map(p => (p.innerText || p.textContent || '').trim()).filter(Boolean).join(' '));
+      }
+      if (textContainer.innerText) candidates.push(textContainer.innerText);
+      if (textContainer.textContent) candidates.push(textContainer.textContent);
+      if (root !== textContainer) {
+        if (root.innerText) candidates.push(root.innerText);
+        if (root.textContent) candidates.push(root.textContent);
+      }
+    } catch (_) {}
+
+    for (const text of candidates) {
+      if (strictNormalizePrompt(text) === expectedStrict) return true;
+    }
+    return false;
   }
 
   function getCandidateInventory(initialResponseSet = new Set(), baselineResponseFingerprints = new Set(), currentUserTurn = null, options = {}) {
@@ -564,6 +618,11 @@
     if (!roots.length) {
       roots = [...document.querySelectorAll(FALLBACK_USER_TURN_ROOT_SELECTOR)];
     }
+    roots = roots.filter(el => {
+      if (!el || !el.isConnected) return false;
+      if (typeof el.closest === 'function' && el.closest('template, [aria-hidden="true"], nav, mat-sidenav, .sidebar')) return false;
+      return true;
+    });
     const uniqueRoots = canonicalizeRoots(roots);
     return {
       userSelectorMatches: roots.length,
@@ -589,7 +648,8 @@
     if (comp && typeof comp.querySelectorAll === 'function') {
       const stopButtons = comp.querySelectorAll('button[aria-label*="중지"], button[aria-label*="Stop"], button[aria-label*="생성 중지"], [role="button"][aria-label*="중지"], [role="button"][aria-label*="Stop"], [role="button"][aria-label*="생성 중지"]');
       for (const btn of stopButtons) {
-        if (visibleAndActive(btn)) return btn;
+        const label = (btn.getAttribute?.('aria-label') || btn.innerText || btn.textContent || '').toLowerCase();
+        if (/중지|stop/i.test(label) && visibleAndActive(btn)) return btn;
       }
     }
     return null;
@@ -652,34 +712,6 @@
       if (!visible(btn)) return false;
       if (typeof btn.focus === 'function') btn.focus();
       btn.click();
-      return true;
-    } catch (_) {
-      return false;
-    }
-  }
-
-  function triggerSendViaKeyboard(target) {
-    if (!target || !target.isConnected) return false;
-    try {
-      if (typeof target.focus === 'function') target.focus();
-      const pChild = target.querySelector('p:last-child') || target.querySelector('p');
-      const eventTargets = [pChild, target].filter(Boolean);
-      for (const el of eventTargets) {
-        const keyOpts = {
-          key: 'Enter',
-          code: 'Enter',
-          keyCode: 13,
-          which: 13,
-          charCode: 13,
-          bubbles: true,
-          cancelable: true,
-          composed: true,
-          view: window
-        };
-        el.dispatchEvent(new KeyboardEvent('keydown', keyOpts));
-        el.dispatchEvent(new KeyboardEvent('keypress', keyOpts));
-        el.dispatchEvent(new KeyboardEvent('keyup', keyOpts));
-      }
       return true;
     } catch (_) {
       return false;
@@ -758,15 +790,41 @@
     return cleanupObserver;
   }
 
+  function createConversationRouteGuard(initialPath) {
+    let acceptedPath = initialPath;
+    let pendingPath = null;
+    let pendingSince = null;
+    let allocationAllowed = initialPath === '/app' || initialPath === '/app/';
+    return (path, userCorrelated, nowMs) => {
+      if (pendingPath !== null && path !== pendingPath) return 'lost';
+      if (path === acceptedPath) return 'ok';
+      if (!allocationAllowed || !/^\/app\/[a-zA-Z0-9_-]+$/.test(path)) return 'lost';
+      // Pin the first allocated route, even while its user turn is rendering.
+      if (pendingPath === null) { pendingPath = path; pendingSince = nowMs; }
+      if (nowMs - pendingSince >= 5000) return 'lost';
+      if (!userCorrelated) return 'pending';
+      acceptedPath = path;
+      pendingPath = null;
+      allocationAllowed = false;
+      return 'ok';
+    };
+  }
+
   async function executeCore(command, execState) {
     const isExecutionCancelled = () => isStopped || execState.cancelled || cancelledRequestIds.has(command.requestId);
     if (isExecutionCancelled()) return { status:'failed', text:'', error:'cancelled' };
+    const initialPath = location.pathname || '';
+    const routeGuard = createConversationRouteGuard(initialPath);
+    const executionEpoch = conversationEpoch;
+    const executionInstanceId = INSTANCE_ID;
     const initialResponseList = responseNodes(), initialResponseSet = new Set(initialResponseList);
     const baselineResponseFingerprints = new Set(initialResponseList.map(n => canonicalPromptText(extractResponseText(n))).filter(Boolean));
     const initialUserQueries = userQueryNodes(), initialUserQuerySet = new Set(initialUserQueries);
     const baselineUserQueryFingerprints = new Set(initialUserQueries.map(q => canonicalPromptText(extractUserQueryText(q))).filter(Boolean));
     function emitEvent(type,payload={}) { if (isExecutionCancelled()) return; try { chrome.runtime.sendMessage({ type:'NFA_EVENT', event:{ type, rid:command.requestId, ...payload } }); } catch (_) {} }
-    const freshChatVerified = initialResponseList.length === 0 && initialUserQueries.length === 0
+    const initialUserInv = getUserInventory();
+    const initialCandInv = getCandidateInventory();
+    const freshChatVerified = initialCandInv.responseUniqueTurns === 0 && initialUserInv.userUniqueTurns === 0
       && composerEmpty(editor()) && !findActiveStopButton();
     if (!freshChatVerified) return {status:'failed',text:'',error:'fresh_chat_not_verified'};
     if (freshChatVerified) {
@@ -783,6 +841,7 @@
       if (attempt===1) { await new Promise(r=>setTimeout(r,200)); target=editor(); }
     }
     const expectedCanonical=canonicalPromptText(command.prompt), actualCanonical=readbackResult?.actualCanonical||'', actualRaw=readbackResult?.actualRaw||'';
+    const expectedStrict=strictNormalizePrompt(command.prompt);
     console.log('[GEMINI][PROMPT_READBACK_DIAG]', JSON.stringify({ expectedRawLen:(command.prompt||'').length,actualRawLen:actualRaw.length,expectedCanonicalLen:expectedCanonical.length,
       actualCanonicalLen:actualCanonical.length,expectedHash:simpleHash(expectedCanonical),actualHash:simpleHash(actualCanonical),firstMismatchIndex:findFirstMismatchIndex(actualCanonical,expectedCanonical),
       actualSurface:readbackResult?.surface||'unknown',zeroWidthCount:countOccurrences(actualRaw,/[\u200B-\u200D\u2060\uFEFF\uFE0E\uFE0F]/g),nbspCount:countOccurrences(actualRaw,/[\u00A0\u2007\u202F]/g),
@@ -791,16 +850,31 @@
       return { status:'dom_unsupported',text:'',error:'prompt_exact_readback_failed' };
     }
     if (!target || !target.isConnected) target=editor();
-    if (!getEditorSurfaces(target).some(s => isPromptMatch(s.text, command.prompt))) { logSendDiag({button:null,confirmed:false,boundNode:false}); return {status:'dom_unsupported',text:'',error:'prompt_editor_changed_before_send'}; }
+    if (!getEditorSurfaces(target).some(s => isExactPromptMatch(s.text, command.prompt))) { logSendDiag({button:null,confirmed:false,boundNode:false}); return {status:'dom_unsupported',text:'',error:'prompt_editor_changed_before_send'}; }
     await new Promise(r=>setTimeout(r,300)); if (isStopped||execState.cancelled) return {status:'failed',text:'',error:'cancelled'};
-    const sendCtrl=await waitForSendReady(target,2500); const selectedBtn=sendCtrl?.button;
-    logSendDiag({button:selectedBtn,totalCandidates:sendCtrl?.totalCandidates||0,confirmed:false,boundNode:false});
-    if (isExecutionCancelled()) return {status:'failed',text:'',error:'cancelled'};
     target = editor();
-    if (!getEditorSurfaces(target).some(s => isPromptMatch(s.text, command.prompt))) return {status:'failed',text:'',error:'prompt_editor_changed_before_send'};
-    if (!selectedBtn) return {status:'failed',text:'',error:'send_not_ready'};
-    const submission = triggerSubmission(target, selectedBtn);
-    emitEvent('SEND_DISPATCHED', submission);
+    if (!target || !target.isConnected) return {status:'failed',text:'',error:'send_not_ready'};
+    if (!getEditorSurfaces(target).some(s => isExactPromptMatch(s.text, command.prompt))) return {status:'failed',text:'',error:'prompt_editor_changed_before_send'};
+
+    const sendCtrl=await waitForSendReady(target,2500);
+    target = editor();
+    if (!target?.isConnected || !getEditorSurfaces(target).some(s => isExactPromptMatch(s.text, command.prompt))) {
+      return {status:'failed',text:'',error:'prompt_editor_changed_before_send'};
+    }
+    const finalSendCtrl = findSendControl(target);
+    const finalBtn = finalSendCtrl?.button;
+    logSendDiag({button:finalBtn,totalCandidates:finalSendCtrl?.totalCandidates||sendCtrl?.totalCandidates||0,confirmed:false,boundNode:false});
+    if (isExecutionCancelled()) return {status:'failed',text:'',error:'cancelled'};
+    if (conversationEpoch !== executionEpoch || (location.pathname || '') !== initialPath) return {status:'failed',text:'',error:'send_state_lost'};
+    if (Date.now() >= (execState.generationDeadlineAtMs || execState.deadlineAtMs)) return {status:'timeout',text:'',error:'generation_deadline_before_send'};
+    if (!finalBtn || !finalBtn.isConnected || finalBtn.disabled || finalBtn.getAttribute('aria-disabled') === 'true') {
+      return {status:'failed',text:'',error:'send_not_ready'};
+    }
+    const dispatchAttempted = true;
+    const clickCount = 1;
+    const clickAttemptedAtMs = Date.now();
+    const submission = triggerSubmission(target, finalBtn);
+    emitEvent('SEND_DISPATCHED', { ...submission, clickCount, dispatchAttempted, clickAttemptedAtMs });
     if (!submission.clicked) return {status:'failed',text:'',error:'send_dispatch_unconfirmed'};
 
     let currentUserTurn=null,targetResponseNode=null,boundAtMs=0,reResolveAttempted=false,textNonEmptyLogged=false,textStableLogged=false,staleStreamingLogged=false;
@@ -815,7 +889,7 @@
     }
     function findNewUserQuery() {
       const currentQueries=getUserInventory().visibleUserNodes;
-      const exact=currentQueries.find(q=>canonicalPromptText(extractUserQueryText(q))===expectedCanonical&&!initialUserQuerySet.has(q)); if (exact) return exact;
+      const exact=currentQueries.find(q=>userTurnMatchesExpected(q, expectedStrict)&&!initialUserQuerySet.has(q)); if (exact) return exact;
       return null;
     }
     function findTurnResponseCandidate() {
@@ -826,11 +900,14 @@
       return valid.length ? valid[valid.length-1].turnNode : null;
     }
     let confirmed=false, stableUserSince=null;
-    const executionEpoch=conversationEpoch;
     const checkDeadline=Math.min(Date.now()+12000,execState.generationDeadlineAtMs||execState.deadlineAtMs);
     while(Date.now()<checkDeadline){
       if(isExecutionCancelled())return{status:'failed',text:'',error:'cancelled'};
-      if(conversationEpoch!==executionEpoch)return{status:'failed',text:'',error:'send_state_lost'};
+      if(conversationEpoch!==executionEpoch||INSTANCE_ID!==executionInstanceId)return{status:'failed',text:'',error:'send_state_lost'};
+      const currentPath=(typeof location!=='undefined'&&location.pathname)?location.pathname:'';
+      const routeState = routeGuard(currentPath, Boolean(findNewUserQuery()), Date.now());
+      if(routeState==='lost')return{status:'failed',text:'',error:'send_state_lost'};
+      if(routeState==='pending'){stableUserSince=null;await new Promise(r=>setTimeout(r,150));continue;}
       const newQuery=findNewUserQuery();
       if(newQuery){
         currentUserTurn=newQuery;
@@ -840,14 +917,14 @@
         if(Date.now()-stableUserSince>=650&&(cleared||generating||c)){
           confirmed=true;
           emitEvent('USER_TURN_CONFIRMED',{userUniqueTurns:getUserInventory().userUniqueTurns,stableMs:Date.now()-stableUserSince,composerCleared:cleared});
-          emitEvent('SEND_COMMITTED',{stableMs:Date.now()-stableUserSince,composerCleared:cleared,generationStarted:generating});
+          emitEvent('SEND_COMMITTED',{stableMs:Date.now()-stableUserSince,composerCleared:cleared,generationStarted:generating,uiEvidenceOnly:true});
           if(c)bindResponseNode(c,'persistent_user_correlated');
           break;
         }
       }else{stableUserSince=null;currentUserTurn=null;}
       await new Promise(r=>setTimeout(r,150));
     }
-    logSendDiag({button:selectedBtn,totalCandidates:sendCtrl?.totalCandidates||0,confirmed,boundNode:Boolean(targetResponseNode)});
+    logSendDiag({button:finalBtn,totalCandidates:finalSendCtrl?.totalCandidates||0,confirmed,boundNode:Boolean(targetResponseNode)});
     if(!confirmed){emitEvent('SEND_COMMIT_UNKNOWN');return{status:'failed',text:'',error:'send_commit_unknown'};}
     const generationDeadlineAtMs=execState.generationDeadlineAtMs||execState.deadlineAtMs;let lastMutationAtMs=Date.now(),previous='',lastDiagReportAtMs=0;
     function reportWaitDiag(reason='periodic'){
@@ -871,7 +948,12 @@
       execState.finish=finish;execState.resolve=resolve;
       function checkOutput(){
         if(isStopped)return finish({status:'failed',text:'',error:'runtime_stopped'});if(isExecutionCancelled())return finish({status:'failed',text:'',error:'cancelled'});const nowMs=Date.now();
+        if(conversationEpoch!==executionEpoch||INSTANCE_ID!==executionInstanceId){return finish({status:'failed',text:'',error:'send_state_lost'});}
+        const currentPath=(typeof location!=='undefined'&&location.pathname)?location.pathname:'';
+        const routeState = routeGuard(currentPath, Boolean(findNewUserQuery()), nowMs);
+        if(routeState==='lost')return finish({status:'failed',text:'',error:'send_state_lost'});
         if(nowMs>generationDeadlineAtMs){reportWaitDiag('timeout');const hasText=targetResponseNode&&extractResponseText(targetResponseNode).length>0;return finish({status:'timeout',text:'',error:hasText?'response_stalled':(targetResponseNode?'response_stream_no_text':'response_turn_not_found')});}
+        if(routeState==='pending')return;
         reportWaitDiag('periodic');
         if(!targetResponseNode||!targetResponseNode.isConnected){const c=findTurnResponseCandidate();if(c)bindResponseNode(c,'observer_phase');}
         const liveUser=findNewUserQuery();
@@ -879,12 +961,14 @@
         const evidenceLost=!liveUser&&!targetResponseNode?.isConnected&&!findActiveStopButton();
         if(evidenceLost){
           if(lostEvidenceSince===null)lostEvidenceSince=nowMs;
-          if(nowMs-lostEvidenceSince>=3000){
-            confirmed=false;emitEvent('SEND_STATE_LOST',{composerContainsPrompt:getEditorSurfaces(editor()).some(s=>isPromptMatch(s.text,command.prompt))});
-            return finish({status:'failed',text:'',error:'send_state_lost'});
+          if(nowMs-lostEvidenceSince>=5000){
+            confirmed=false;const composerHasPrompt=getEditorSurfaces(editor()).some(s=>isExactPromptMatch(s.text,command.prompt));
+            emitEvent('SEND_STATE_LOST',{composerContainsPrompt:composerHasPrompt});
+            const errCode=composerHasPrompt?'post_dispatch_uncommitted_suspected':'send_state_lost';
+            return finish({status:'failed',text:'',error:errCode});
           }
         }else{lostEvidenceSince=null;}
-        if(!targetResponseNode)return;const current=extractResponseText(targetResponseNode);
+        if(!targetResponseNode||!targetResponseNode.isConnected)return;const current=extractResponseText(targetResponseNode);
         if(!current){if(!boundAtMs)boundAtMs=Date.now();const zeroLenDuration=Date.now()-boundAtMs,localEvidence=detectGenerationEvidence(targetResponseNode),hasStreamingEvidence=localEvidence==='local_streaming'||localEvidence==='composer_stop_button';if(hasStreamingEvidence){if(zeroLenDuration>=15000)return finish({status:'failed',text:'',error:'response_stream_no_text'});}else if(zeroLenDuration>=3500){if(!reResolveAttempted){reResolveAttempted=true;targetResponseNode=null;boundAtMs=0;const c=findTurnResponseCandidate();if(c)bindResponseNode(c,'re_resolve_afterstalled_zero_len');else return finish({status:'failed',text:'',error:'response_text_target_not_found'});return;}return finish({status:'failed',text:'',error:'response_stream_no_text'});}return;}
         const currentCanonical=canonicalPromptText(current);if(baselineResponseFingerprints.has(currentCanonical)){targetResponseNode=null;return;}
         if(!textNonEmptyLogged){textNonEmptyLogged=true;console.log('[GEMINI][TEXT_NONEMPTY]',JSON.stringify({rid:command.requestId,chars:current.length}));emitEvent('TEXT_NONEMPTY',{chars:current.length});}
@@ -1065,5 +1149,6 @@
     return false;
   };
   chrome.runtime.onMessage.addListener(messageListener);eventCleanups.push(()=>{try{chrome.runtime.onMessage.removeListener(messageListener);}catch(_){}});
-  globalThis.__NFA_GEMINI_RUNTIME__={build:runtimeContract.runtimeBuild,instanceId:INSTANCE_ID,getConversationEpoch:()=>conversationEpoch,stop:stopRuntime,cancel:cancelExecution,ping:()=>({alive:!isStopped,build:runtimeContract.runtimeBuild,instanceId:INSTANCE_ID,busyRequestId:activeExecution?.requestId||null}),resolveTurnCandidate,extractCleanText,extractResponseText,deliverExecutionResult,execute,executeCore,getActiveExecution:()=>activeExecution,setupResponseObserver,visible,visibleAndActive,getUserInventory,getUserTurnContainer,getCandidateInventory,detectGenerationEvidence,inspectGenerationState,findActiveStreamingIndicator,findActiveStopButton,findVisibleActionToolbar,canonicalizeRoots,PRIMARY_USER_TURN_ROOT_SELECTORS,FALLBACK_USER_TURN_ROOT_SELECTOR,canonicalPromptText,isPromptMatch,scoreSendCandidate,findSendControl,triggerSendViaClick,triggerSendViaKeyboard,triggerSubmission,setEditorText,waitForStableReadback};
+  globalThis.__NFA_GEMINI_RUNTIME__={build:runtimeContract.runtimeBuild,instanceId:INSTANCE_ID,getConversationEpoch:()=>conversationEpoch,stop:stopRuntime,cancel:cancelExecution,ping:()=>({alive:!isStopped,build:runtimeContract.runtimeBuild,instanceId:INSTANCE_ID,busyRequestId:activeExecution?.requestId||null}),resolveTurnCandidate,extractCleanText,extractResponseText,deliverExecutionResult,execute,executeCore,getActiveExecution:()=>activeExecution,setupResponseObserver,visible,visibleAndActive,getUserInventory,getUserTurnContainer,getCandidateInventory,detectGenerationEvidence,inspectGenerationState,findActiveStreamingIndicator,findActiveStopButton,findVisibleActionToolbar,canonicalizeRoots,PRIMARY_USER_TURN_ROOT_SELECTORS,FALLBACK_USER_TURN_ROOT_SELECTOR,canonicalPromptText,strictNormalizePrompt,isPromptMatch,isExactPromptMatch,isStrictPromptMatch,userTurnMatchesExpected,scoreSendCandidate,findSendControl,triggerSendViaClick,triggerSubmission,setEditorText,waitForStableReadback,freshConversationState,composerEmpty};
+  globalThis.__NFA_GEMINI_RUNTIME__.createConversationRouteGuard = createConversationRouteGuard;
 })();

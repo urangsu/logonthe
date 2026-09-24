@@ -220,10 +220,11 @@ class TestPersonalizedLearningPipeline(unittest.TestCase):
             excerpt="패티 두께가 2cm에 달하고 트러플 감자튀김이 일품입니다.",
             corpus_examples=custom_examples,
             style_profile=profile,
+            version=AIPromptBuilder.PROMPT_VERSION_V3_0,
         )
 
         # 1. 버전 확인
-        self.assertEqual(AIPromptBuilder.PROMPT_VERSION, "3.0.0-grounded-human")
+        self.assertEqual(AIPromptBuilder.PROMPT_VERSION_V3_0, "3.0.0-grounded-human")
 
         # 2. 사실/예시 분리 경계문 확인
         self.assertIn("[말투 참고 예시]", prompt)

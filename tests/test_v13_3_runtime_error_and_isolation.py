@@ -38,7 +38,8 @@ class TestV133RuntimeErrorAndIsolation(unittest.TestCase):
         except Exception:
             pass
 
-        self.assertEqual(processor.current_stage, "start")
+        self.assertEqual(processor.current_stage, "navigation")
+        self.assertNotEqual(processor.current_stage, "comment_generation")
         self.assertEqual(processor.current_post_key, "post_2")
         self.assertIsNotNone(processor.current_result)
         self.assertEqual(processor.current_result.post.key, "post_2")

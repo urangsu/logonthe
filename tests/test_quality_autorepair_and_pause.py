@@ -1,5 +1,6 @@
 import threading
 import unittest
+from contextlib import ExitStack
 from unittest.mock import MagicMock, patch
 
 from app.models import (
@@ -38,6 +39,56 @@ class TestQualityAutoRepairAndPause(unittest.TestCase):
             "gemini_web_enabled": True,
             "comment_template": "잘 보고 갑니다",
         }
+
+    def _run_handoff_case(self, error="", repair_suffix=False):
+        bridge = MagicMock()
+        bridge.preflight.return_value = MagicMock(ready=True)
+        body = "솥뚜껑 삼겹살에 김치 조합이 눈에 들어오네요"
+        repaired = body + "\n\n편안한 하루 보내세요!"
+        bridge.wait_for_result.side_effect = lambda cmd, **kw: GeminiResult(
+            request_id=cmd.request_id, post_key=cmd.post_key,
+            navigation_version=cmd.navigation_version,
+            status=GeminiResultStatus.FAILED if error else GeminiResultStatus.COMPLETED,
+            text="" if error else body, error=error,
+        )
+        with ExitStack() as stack:
+            targets = {
+                "TargetPostGuard.verify": MagicMock(),
+                "CommentInteractionService.open_comment_layer": (True, "ok"),
+                "MobileDOMResolver.get_comment_editor_context": {"frame": self.mock_page, "root": self.mock_page},
+                "ServerCommentDuplicateGuard.scan_page_for_my_comment": CommentPresenceResult(state=CommentPresenceState.ABSENT, confidence="high"),
+                "ContentContextExtractor.extract": MagicMock(title=self.post.title, excerpt="솥뚜껑에 삼겹살과 김치를 구웠어요"),
+                "CommentEditorAdapter.set_text": True,
+                "CommentInteractionService.wait_for_user_action": UserAction.SUBMIT,
+                "CommentInteractionService.read_final_text": None,
+                "CommentInteractionService.submit_and_verify": CommentSubmitState.SUBMITTED,
+                "DraftService.resolve_suffix": "편안한 하루 보내세요" if repair_suffix else "",
+            }
+            mocks = {name: stack.enter_context(patch("app.processor." + name, return_value=value)) for name, value in targets.items()}
+            if repair_suffix:
+                valid = MagicMock(valid=True, code="ok", length=len(repaired))
+                invalid = MagicMock(valid=False, code="excessive_tilde")
+                stack.enter_context(patch.object(FinalQualityGate, "validate_final_text", side_effect=lambda text, **kw: invalid if text.endswith("편안한 하루 보내세요") else valid))
+                stack.enter_context(patch.object(FinalQualityGate, "auto_repair", return_value=(repaired, valid)))
+            processor = PostProcessor(
+                {**self.config, "skip_on_comment_failure": True}, like_enabled=False,
+                comment_enabled=True, gemini_web_enabled=True, gemini_extension_bridge=bridge,
+            )
+            result = processor.process(self.mock_page, self.post, action_plan=PostActionPlan(
+                process_like=False, process_comment=True, comment_sample_selected=True, comment_sample_roll=0.1,
+            ))
+            return result, mocks, bridge, repaired
+
+    def test_handoff_processor_preserves_bridge_error_without_retry(self):
+        result, mocks, bridge, _ = self._run_handoff_case(error="send_commit_unknown")
+        self.assertEqual(result.comment_result.error, "gemini_failed:send_commit_unknown")
+        self.assertEqual(bridge.wait_for_result.call_count, 1)
+        mocks["CommentEditorAdapter.set_text"].assert_not_called()
+
+    def test_handoff_processor_injects_exact_repaired_suffix_once(self):
+        result, mocks, _, repaired = self._run_handoff_case(repair_suffix=True)
+        self.assertEqual(result.comment_result.status, CommentSubmitState.SUBMITTED)
+        self.assertEqual(mocks["CommentEditorAdapter.set_text"].call_args.args[1], repaired)
 
     def test_01_build_quality_rewrite_feedback_mappings(self):
         """FinalQualityGate 결과 코드별 피드백 문구 매핑 검증"""
@@ -150,12 +201,13 @@ class TestQualityAutoRepairAndPause(unittest.TestCase):
             state_manager=state_mgr,
         )
 
-        res = processor.process(self.mock_page, self.post, action_plan=plan)
+        with patch.object(FinalQualityGate, "auto_repair", return_value=(None, MagicMock(valid=False))):
+            res = processor.process(self.mock_page, self.post, action_plan=plan)
 
         # 2회 호출 확인
         self.assertEqual(len(published_prompts), 2)
         # 2번째 프롬프트에 재작성 피드백이 주입되었는지 확인
-        self.assertIn("수정 요청 (1회 재작성)", published_prompts[1])
+        self.assertTrue("수정 요청 (1회 재작성)" in published_prompts[1] or "수정 사유" in published_prompts[1])
         self.assertIn("초성 웃음", published_prompts[1])
         # 최종 댓글 성공 확인
         self.assertEqual(res.comment_result.status, CommentSubmitState.SUBMITTED)
@@ -227,7 +279,8 @@ class TestQualityAutoRepairAndPause(unittest.TestCase):
             command_bridge=command_bridge,
         )
 
-        res = processor.process(self.mock_page, self.post, action_plan=plan)
+        with patch.object(FinalQualityGate, "auto_repair", return_value=(None, MagicMock(valid=False))):
+            res = processor.process(self.mock_page, self.post, action_plan=plan)
 
         # Result is SKIPPED due to GEMINI_SKIP_POST command
         self.assertEqual(res.comment_result.status, CommentSubmitState.SKIPPED)

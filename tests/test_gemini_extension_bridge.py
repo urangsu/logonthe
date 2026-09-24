@@ -10,6 +10,8 @@ from services.gemini_extension_bridge import (
     GeminiResult,
     GeminiResultStatus,
     GeminiBridgeHTTPServer,
+    classify_gemini_failure,
+    GeminiFailure,
 )
 
 
@@ -155,6 +157,44 @@ class GeminiExtensionBridgeTests(unittest.TestCase):
             conn2.close()
         finally:
             server.stop()
+
+    def test_classify_gemini_failure_pre_dispatch(self):
+        for code in ["send_not_ready", "prompt_exact_readback_failed", "prompt_editor_changed_before_send", "fresh_chat_not_verified", "bridge_not_started"]:
+            failure = classify_gemini_failure("failed", code, dispatch_attempted=False, click_count=0)
+            self.assertEqual(failure.phase, "PRE_DISPATCH", f"Failed for {code}")
+            self.assertTrue(failure.retry_safe, f"Should be retry_safe for {code}")
+            self.assertEqual(failure.click_count, 0, f"Click count should be 0 for {code}")
+
+        dom_fail = classify_gemini_failure("dom_unsupported", "")
+        self.assertEqual(dom_fail.phase, "UNKNOWN")
+        self.assertFalse(dom_fail.retry_safe)
+        self.assertIsNone(dom_fail.click_count)
+
+    def test_classify_gemini_failure_dispatched(self):
+        for code in ["send_dispatch_unconfirmed", "send_commit_unknown"]:
+            failure = classify_gemini_failure("failed", code, dispatch_attempted=True, click_count=1)
+            self.assertEqual(failure.phase, "DISPATCHED", f"Failed for {code}")
+            self.assertFalse(failure.retry_safe, f"Should NOT be retry_safe for {code}")
+            self.assertEqual(failure.click_count, 1, f"Click count should be 1 for {code}")
+
+    def test_classify_gemini_failure_committed(self):
+        for code in ["send_state_lost", "post_dispatch_uncommitted_suspected"]:
+            failure = classify_gemini_failure("failed", code, dispatch_attempted=True, click_count=1, ui_committed=True)
+            self.assertEqual(failure.phase, "UI_COMMITTED", f"Failed for {code}")
+            self.assertFalse(failure.retry_safe, f"Should NOT be retry_safe for {code}")
+            self.assertEqual(failure.click_count, 1, f"Click count should be 1 for {code}")
+
+    def test_classify_gemini_failure_response(self):
+        for code in ["response_turn_not_found", "response_stalled", "response_stream_no_text", "timeout"]:
+            failure = classify_gemini_failure("timeout", code)
+            self.assertEqual(failure.phase, "UNKNOWN", f"Failed for {code}")
+            self.assertFalse(failure.retry_safe, f"Should NOT be retry_safe for {code}")
+            self.assertIsNone(failure.click_count)
+
+    def test_failure_names_do_not_prove_no_dispatch(self):
+        for status in ("failed", "ready", "dom_unsupported"):
+            self.assertFalse(classify_gemini_failure(status, "send_not_ready").retry_safe)
+            self.assertFalse(classify_gemini_failure(status, "send_not_ready", dispatch_attempted=True, click_count=1).retry_safe)
 
 
 if __name__ == "__main__":

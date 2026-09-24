@@ -209,7 +209,8 @@ class TestTargetedDiscoveryV9(unittest.TestCase):
     def test_prompt_builder_v6_rules(self):
         prompt = AIPromptBuilder.build(
             title="남해 독일마을 소세지 플래터 맛집 후기",
-            excerpt="독일식 수제 소세지와 바삭한 감자튀김, 시원한 흑맥주 조합이 훌륭했습니다."
+            excerpt="독일식 수제 소세지와 바삭한 감자튀김, 시원한 흑맥주 조합이 훌륭했습니다.",
+            version="3.0.0-grounded-human",
         )
         self.assertNotIn("찐이웃", prompt)
         self.assertNotIn("~더라구요!", prompt)

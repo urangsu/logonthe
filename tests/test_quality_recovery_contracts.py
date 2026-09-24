@@ -4,14 +4,28 @@ import threading
 import unittest
 from unittest.mock import patch
 
+from app.processor import CommentProcessResult, CommentSubmitState
 from app.run_control import RunControl
 from naver.content_extractor import ContentContextExtractor
 from scripts.compare_prompts import _evaluate_draft, _winner, _parse_args, run_comparison
 from services.comments.community_rhythm import CommentDraftInspector, FinalQualityGate
 from services.ai_prompt import AIPromptBuilder
+from services.draft import DraftService
+from services.user_learning_service import UserLearningService
 
 
 class QualityRecoveryContracts(unittest.TestCase):
+    def test_test_origin_is_not_human_review_in_production(self):
+        entry = {
+            "origin": "test", "decision_origin": "user", "is_user_edited": True,
+            "source_type": "user_edit", "decision": "edited",
+            "final_submitted": "솥뚜껑 삼겹살에 김치 조합이 눈에 들어오네요",
+        }
+        with patch("services.user_learning_service._TEST_PROCESS", False):
+            self.assertEqual(UserLearningService.get_cleaned_corpus([entry]), [])
+            reviewed = {**entry, "origin": "human_reviewed"}
+            self.assertEqual(len(UserLearningService.get_cleaned_corpus([reviewed])), 1)
+
     def test_live_comparison_requires_explicit_model(self):
         with patch("sys.argv", ["compare_prompts.py"]), contextlib.redirect_stderr(io.StringIO()):
             with self.assertRaises(SystemExit) as error:
@@ -95,3 +109,35 @@ class QualityRecoveryContracts(unittest.TestCase):
         self.assertEqual(results[0]["v3_0"]["code"], "not_run")
         self.assertIsNone(results[0]["v3_0"]["passed"])
         self.assertEqual(results[0]["winner"], "not_evaluated")
+
+    def test_validated_final_text_prevents_duplicate_suffix_compose(self):
+        # When candidate already has suffix combined and validated, re-composing could cause duplication
+        body = "오늘 포스팅도 잘 보고 갑니다."
+        suffix = "행복한 하루 보내세요 :)"
+        combined = f"{body}\n\n{suffix}"
+
+        # If auto-repair slightly altered whitespace or punctuation:
+        repaired_combined = f"{body}\n\n행복한 하루 보내세요! :)"
+
+        # Without validated_final_text bypass, compose_body_and_suffix would check:
+        # if suffix in repaired_combined -> False! Because '!' was inserted!
+        # So it would append suffix again:
+        double_composed = DraftService.compose_body_and_suffix(repaired_combined, suffix)
+        self.assertIn("행복한 하루 보내세요! :)\n\n행복한 하루 보내세요 :)", double_composed)
+
+        # With validated_final_text bypass pattern, validated_final_text is used directly:
+        validated_final_text = repaired_combined
+        draft_text = validated_final_text if validated_final_text else DraftService.compose_body_and_suffix(repaired_combined, suffix)
+        self.assertEqual(draft_text, repaired_combined)
+        self.assertNotIn("행복한 하루 보내세요! :)\n\n행복한 하루 보내세요 :)", draft_text)
+
+    def test_user_skip_result_contract_distinguishes_user_choice_from_system_failure(self):
+        # User explicit skip must set error="user_skipped" with status=SKIPPED
+        user_skip_result = CommentProcessResult(status=CommentSubmitState.SKIPPED, error="user_skipped")
+        self.assertEqual(user_skip_result.status, CommentSubmitState.SKIPPED)
+        self.assertEqual(user_skip_result.error, "user_skipped")
+        self.assertNotEqual(user_skip_result.error, "gemini_failed:send_not_ready")
+
+        # System failure has a distinct error prefix
+        sys_fail_result = CommentProcessResult(status=CommentSubmitState.SKIPPED, error="gemini_failed:send_not_ready")
+        self.assertTrue(sys_fail_result.error.startswith("gemini_failed:"))

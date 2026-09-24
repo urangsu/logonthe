@@ -1,6 +1,6 @@
 import unittest
 from unittest.mock import MagicMock, patch
-from services.ai_prompt import AIPromptBuilder
+from services.ai_prompt import AIPromptBuilder, PROMPT_VERSION_V3_0
 from services.comments.community_rhythm import CommunityRhythmPreset
 from services.my_blog_comment_thread_collector import BlogCommentNode, MyBlogCommentThreadCollector, CommentThreadCollectionResult
 from services.my_blog_reply_service import MyBlogReplyService, ReplyQualityGate
@@ -16,7 +16,8 @@ class TestV14ReplyAssistant(unittest.TestCase):
             excerpt="신선한 바게트와 샐러드가 준비되어 있습니다.",
             preset=CommunityRhythmPreset.THOUGHTFUL,
             content_focus="FOOD_RESTAURANT",
-            verified_anchors=["바게트", "샐러드"]
+            verified_anchors=["바게트", "샐러드"],
+            version=PROMPT_VERSION_V3_0,
         )
         self.assertIn("너는 네이버 블로그 이웃", prompt)
         self.assertIn("NEED_MORE_CONTEXT", prompt)
@@ -31,7 +32,8 @@ class TestV14ReplyAssistant(unittest.TestCase):
             preset=CommunityRhythmPreset.THOUGHTFUL,
             content_focus="FOOD_RESTAURANT",
             verified_anchors=["치즈카츠"],
-            secondary_anchors=["주차장"]
+            secondary_anchors=["주차장"],
+            version=PROMPT_VERSION_V3_0,
         )
         self.assertIn("음식/핵심: 치즈카츠", prompt)
         self.assertIn("보조: 주차장", prompt)

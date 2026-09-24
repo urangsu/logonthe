@@ -60,7 +60,8 @@ class TestFoodCommentFocus(unittest.TestCase):
         prompt = AIPromptBuilder.build(
             title="신메뉴 리조또 후기",
             excerpt="신메뉴 새우 비스크 크림 리조또를 먹었습니다.",
-            content_focus="FOOD_RESTAURANT"
+            content_focus="FOOD_RESTAURANT",
+            version="3.0.0-grounded-human",
         )
         self.assertIn("[음식 글 우선 규칙]", prompt)
         self.assertIn("맛이나 식감은 본문에서 직접 확인된 경우에만 말하고", prompt)
@@ -72,7 +73,8 @@ class TestFoodCommentFocus(unittest.TestCase):
         prompt_general = AIPromptBuilder.build(
             title="청주 베이비페어 아기옷 쇼핑 후기",
             excerpt="유모차 카시트 구경하고 아기옷 쇼핑하고 왔어요.",
-            content_focus="GENERAL"
+            content_focus="GENERAL",
+            version="3.0.0-grounded-human",
         )
         self.assertNotIn("[음식 글 우선 규칙]", prompt_general)
 

@@ -108,6 +108,103 @@ function loadRealContentJs(customEnv = {}) {
   };
 }
 
+function prepareEmptyComposer(context, editorEl) {
+  editorEl.innerText = editorEl.textContent = '';
+  context.document.execCommand = (command, _ui, text) => {
+    if (command === 'delete') editorEl.innerText = editorEl.textContent = '';
+    if (command === 'insertText') editorEl.innerText = editorEl.textContent = text;
+    return true;
+  };
+}
+
+function makeSendFixture() {
+  const harness = loadRealContentJs();
+  const { context } = harness;
+  let clicks = 0;
+  const rect = () => ({ top: 500, right: 800, bottom: 600, width: 300, height: 100 });
+  const composer = { isConnected: true, getBoundingClientRect: rect };
+  const editorEl = {
+    tagName: 'DIV', isConnected: true, isContentEditable: true,
+    innerText: '', textContent: '', focus() {}, dispatchEvent() { return true; },
+    getAttribute: k => k === 'contenteditable' ? 'true' : null,
+    closest: sel => sel.includes('composer') ? composer : null,
+    getBoundingClientRect: rect,
+  };
+  const button = {
+    tagName: 'BUTTON', isConnected: true, disabled: false,
+    getAttribute: k => k === 'aria-label' ? 'Send' : null,
+    getBoundingClientRect: rect, querySelector: () => null,
+    click() { clicks++; }, focus() {},
+  };
+  composer.querySelectorAll = () => [button];
+  composer.contains = el => el === button || el === editorEl;
+  context.document.querySelectorAll = sel => sel.includes('contenteditable') ? [editorEl] : [];
+  context.location.pathname = '/app';
+  prepareEmptyComposer(context, editorEl);
+  return { ...harness, editorEl, button, composer, clicks: () => clicks };
+}
+
+test('HANDOFF: executeCore preserves a pre-existing composer draft without clicking', async () => {
+  const f = makeSendFixture();
+  f.editorEl.innerText = f.editorEl.textContent = 'existing draft';
+  const result = await f.runtime.executeCore({ requestId: 'occupied', prompt: 'new prompt' }, { deadlineAtMs: Date.now() + 2000 });
+  assert.strictEqual(result.error, 'fresh_chat_not_verified');
+  assert.strictEqual(f.editorEl.innerText, 'existing draft');
+  assert.strictEqual(f.clicks(), 0);
+});
+
+test('HANDOFF: changed prompt during send-readiness wait never clicks', async t => {
+  const f = makeSendFixture();
+  f.button.disabled = true;
+  const timer = setTimeout(() => {
+    f.editorEl.innerText = f.editorEl.textContent = 'changed draft';
+    f.button.disabled = false;
+  }, 800);
+  t.after(() => clearTimeout(timer));
+  const result = await f.runtime.executeCore({ requestId: 'changed', prompt: 'original prompt' }, { deadlineAtMs: Date.now() + 4000 });
+  assert.strictEqual(result.error, 'prompt_editor_changed_before_send');
+  assert.strictEqual(f.clicks(), 0);
+});
+
+test('HANDOFF: deadline expiry before dispatch prevents clicking', async () => {
+  const f = makeSendFixture();
+  const result = await f.runtime.executeCore({ requestId: 'expired', prompt: 'original prompt' }, { deadlineAtMs: Date.now() + 100 });
+  assert.strictEqual(result.error, 'generation_deadline_before_send');
+  assert.strictEqual(f.clicks(), 0);
+});
+
+test('HANDOFF: route allocation tolerates rendering delay but pins one conversation', () => {
+  const { runtime } = loadRealContentJs();
+  const guard = runtime.createConversationRouteGuard('/app');
+  assert.strictEqual(guard('/app/first', false, 0), 'pending');
+  assert.strictEqual(guard('/app/first', true, 300), 'ok');
+  assert.strictEqual(guard('/app/first', false, 900), 'ok');
+  assert.strictEqual(guard('/app/second', true, 1000), 'lost');
+  const unconfirmed = runtime.createConversationRouteGuard('/app');
+  assert.strictEqual(unconfirmed('/app/first', false, 0), 'pending');
+  assert.strictEqual(unconfirmed('/app/first', true, 5000), 'lost');
+  const switched = runtime.createConversationRouteGuard('/app');
+  assert.strictEqual(switched('/app/first', false, 0), 'pending');
+  assert.strictEqual(switched('/app/second', true, 100), 'lost');
+});
+
+test('HANDOFF: synchronous navigation during click cannot become the accepted baseline', async () => {
+  const f = makeSendFixture();
+  f.button.click = () => { f.context.location.pathname = '/settings'; };
+  const result = await f.runtime.executeCore({ requestId: 'route-on-click', prompt: 'original prompt' }, { deadlineAtMs: Date.now() + 2000 });
+  assert.strictEqual(result.error, 'send_state_lost');
+});
+
+test('HANDOFF: generic icon and ambiguous send buttons are not dispatch targets', () => {
+  const f = makeSendFixture();
+  f.button.getAttribute = () => null;
+  f.button.querySelector = () => ({});
+  assert.strictEqual(f.runtime.findSendControl(f.editorEl), null);
+  f.button.getAttribute = k => k === 'aria-label' ? 'Send' : null;
+  f.composer.querySelectorAll = () => [f.button, { ...f.button }];
+  assert.strictEqual(f.runtime.findSendControl(f.editorEl), null);
+});
+
 function loadRealBackgroundJs(customEnv = {}) {
   const sentMessages = [];
   const tabMessages = [];
@@ -167,6 +264,12 @@ function loadRealBackgroundJs(customEnv = {}) {
           const res = { id: tabId, ...updateProps };
           if (typeof cb === 'function') cb(res);
           return res;
+        },
+        get: async (tabId, cb) => {
+          if (customEnv.onTabGet) return customEnv.onTabGet(tabId, cb);
+          const tab = { id: tabId, status: 'complete', url: 'https://gemini.google.com/app', title: 'Google Gemini' };
+          if (typeof cb === 'function') cb(tab);
+          return tab;
         },
         sendMessage: (tabId, msg, cb) => {
           tabMessages.push({ tabId, msg });
@@ -1595,9 +1698,10 @@ test('GEM-R15-JS-001: generation deadline completes before overall deadline and 
     postKey: 'post_key_01',
     navigationVersion: 1,
     prompt: '테스트 프롬프트',
-    timeout_seconds: 0.2 // 200ms generation timeout
+    timeout_seconds: 1.5 // 1500ms generation timeout (allows 650ms commit check, times out before response)
   };
 
+  prepareEmptyComposer(context, editorEl);
   const result = await runtime.execute(cmd);
   const elapsed = Date.now() - startedAt;
 
@@ -2421,7 +2525,7 @@ test('GEM-R17-JS-005: Python cancel discovered -> background /v1/cancel poll -> 
     },
     onTabSendMessage: (tabId, msg, cb) => {
       if (msg.type === 'NFA_CHECK_FRESH_CHAT') {
-        cb({ ok: true, fresh: true, conversationEpoch: 1, contentInstanceId: 'inst_01' });
+        cb({ ok: true, fresh: true, composerEmpty: true, conversationEpoch: 1, contentInstanceId: 'inst_01' });
       } else if (msg.type === 'NFA_RUNTIME_PING' || msg.type === 'NFA_PING_GEMINI_DOM') {
         cb({ ok: true, alive: true, build: '13.2.3-r17', status: 'ready', conversationEpoch: 1, contentInstanceId: 'inst_01' });
       } else if (msg.type === 'NFA_EXECUTE_COMMAND') {
@@ -2544,7 +2648,7 @@ test('GEM-R17-JS-006: background.js acceptance deadline preserves 9s delivery re
     },
     onTabSendMessage: (tabId, msg, cb) => {
       if (msg.type === 'NFA_CHECK_FRESH_CHAT') {
-        cb({ ok: true, fresh: true, conversationEpoch: 1, contentInstanceId: 'inst_coord_01' });
+        cb({ ok: true, fresh: true, composerEmpty: true, conversationEpoch: 1, contentInstanceId: 'inst_coord_01' });
       } else if (msg.type === 'NFA_RUNTIME_PING' || msg.type === 'NFA_PING_GEMINI_DOM') {
         cb({ ok: true, alive: true, build: '13.2.3-r17', status: 'ready', conversationEpoch: 1, contentInstanceId: 'inst_coord_01' });
       } else if (msg.type === 'NFA_EXECUTE_COMMAND') {
@@ -2557,10 +2661,11 @@ test('GEM-R17-JS-006: background.js acceptance deadline preserves 9s delivery re
     }
   });
 
-  assert.ok(background, 'Background runtime should be initialized');
-
   const cyclePromise = background.runCommandCycle();
-  await new Promise(r => setTimeout(r, 100));
+  const startWait = Date.now();
+  while (!tabMessages.some(m => m.msg?.type === 'NFA_EXECUTE_COMMAND') && Date.now() - startWait < 3000) {
+    await new Promise(r => setTimeout(r, 50));
+  }
 
   // Advance time to T0 + 55.2s (generation deadline passed, but within 9s acceptance delivery reserve)
   simulatedNow = T0 + 55200;
@@ -2592,4 +2697,522 @@ test('GEM-R17-JS-006: background.js acceptance deadline preserves 9s delivery re
   assert.strictEqual(cancelMsgs.length, 0, 'No cancel command should be dispatched when completed within acceptance reserve');
 });
 
+test('SEND-HARDEN-001: isExactPromptMatch requires exact character match and rejects empty or truncated text', () => {
+  const { runtime } = loadRealContentJs();
+  assert.ok(runtime.isExactPromptMatch('블로그 글 잘 읽었습니다.', '블로그 글 잘 읽었습니다.'));
+  assert.ok(runtime.isExactPromptMatch('블로그 글 잘 읽었습니다.\n', '블로그 글 잘 읽었습니다.'));
+  assert.strictEqual(runtime.isExactPromptMatch('블로그  글', '블로그 글'), false);
+  // Rejects truncated prompt (15% missing or 1 word missing)
+  assert.strictEqual(runtime.isExactPromptMatch('블로그 글 잘 읽었습니다.', '블로그 글 잘'), false);
+  assert.strictEqual(runtime.isExactPromptMatch('블로그 글 잘', '블로그 글 잘 읽었습니다.'), false);
+  // Rejects empty actual or expected
+  assert.strictEqual(runtime.isExactPromptMatch('', ''), false);
+  assert.strictEqual(runtime.isExactPromptMatch('', '블로그 글'), false);
+  assert.strictEqual(runtime.isExactPromptMatch('블로그 글', ''), false);
+  assert.strictEqual(runtime.isExactPromptMatch('   ', '블로그 글'), false);
+  // Preserves negation / semantic words
+  assert.strictEqual(runtime.isExactPromptMatch('하지 마세요', '하세요'), false);
+});
 
+test('SEND-HARDEN-002: userTurnMatchesExpected handles multi-paragraph user query containers exactly', () => {
+  const { runtime } = loadRealContentJs();
+  const p1 = { innerText: '첫 번째 단락입니다.', isConnected: true };
+  const p2 = { innerText: '두 번째 단락입니다.', isConnected: true };
+  const queryNode = {
+    isConnected: true,
+    querySelector: () => null,
+    querySelectorAll: (sel) => sel === 'p' ? [p1, p2] : [],
+    innerText: '첫 번째 단락입니다.\n두 번째 단락입니다.'
+  };
+
+  const expectedStrict = runtime.strictNormalizePrompt('첫 번째 단락입니다.\n두 번째 단락입니다.');
+  assert.ok(runtime.userTurnMatchesExpected(queryNode, expectedStrict));
+
+  const truncatedStrict = runtime.strictNormalizePrompt('첫 번째 단락입니다.');
+  assert.strictEqual(runtime.userTurnMatchesExpected(queryNode, truncatedStrict), false);
+});
+
+test('SEND-HARDEN-003: freshConversationState returns false if composer has text', () => {
+  const { runtime, context } = loadRealContentJs();
+  const dirtyEditor = {
+    tagName: 'DIV', isConnected: true,
+    getAttribute: (k) => k === 'contenteditable' ? 'true' : null,
+    closest: () => null,
+    innerText: '이전 작성 중이던 프롬프트',
+    textContent: '이전 작성 중이던 프롬프트',
+    getBoundingClientRect: () => ({ width: 100, height: 40 }),
+    computedStyle: { visibility: 'visible', display: 'block', opacity: '1' }
+  };
+  context.document.querySelectorAll = (sel) => sel.includes('contenteditable') ? [dirtyEditor] : [];
+  assert.strictEqual(runtime.freshConversationState(), false);
+
+  const cleanEditor = {
+    tagName: 'DIV', isConnected: true,
+    getAttribute: (k) => k === 'contenteditable' ? 'true' : null,
+    closest: () => null,
+    innerText: '',
+    textContent: '',
+    getBoundingClientRect: () => ({ width: 100, height: 40 }),
+    computedStyle: { visibility: 'visible', display: 'block', opacity: '1' }
+  };
+  context.document.querySelectorAll = (sel) => sel.includes('contenteditable') ? [cleanEditor] : [];
+  assert.strictEqual(runtime.freshConversationState(), true);
+});
+
+test('SEND-HARDEN-004: freshConversationState returns false if hidden old turns exist in DOM', () => {
+  const { runtime, context } = loadRealContentJs();
+  const cleanEditor = {
+    tagName: 'DIV', isConnected: true,
+    getAttribute: (k) => k === 'contenteditable' ? 'true' : null,
+    closest: () => null,
+    innerText: '',
+    textContent: '',
+    getBoundingClientRect: () => ({ width: 100, height: 40 }),
+    computedStyle: { visibility: 'visible', display: 'block', opacity: '1' }
+  };
+  const hiddenUserTurn = {
+    tagName: 'DIV', isConnected: true,
+    className: 'user-message',
+    getAttribute: () => null,
+    closest: () => null,
+    getBoundingClientRect: () => ({ width: 100, height: 40 }),
+    computedStyle: { display: 'none', visibility: 'hidden' }
+  };
+  context.document.querySelectorAll = (sel) => {
+    if (sel.includes('contenteditable')) return [cleanEditor];
+    if (sel.includes('user-message') || sel.includes('user-query')) return [hiddenUserTurn];
+    return [];
+  };
+  assert.strictEqual(runtime.freshConversationState(), false);
+});
+
+test('SEND-HARDEN-005: waitForStableReadback fails when editor text is truncated (exact match required)', async () => {
+  const { runtime } = loadRealContentJs();
+  const truncatedEditor = {
+    tagName: 'DIV', isConnected: true,
+    innerText: '1000자 프롬프트 중 뒤쪽 150자가 잘린 본문',
+    textContent: '1000자 프롬프트 중 뒤쪽 150자가 잘린 본문'
+  };
+  const fullExpected = '1000자 프롬프트 중 뒤쪽 150자가 잘린 본문입니다. 반드시 완전 일치해야 합니다.';
+  const res = await runtime.waitForStableReadback(() => truncatedEditor, fullExpected, 250);
+  assert.strictEqual(res.ok, false);
+});
+
+test('SEND-HARDEN-006: Pre-click send button re-resolution fails with send_not_ready and 0 clicks if button is disabled', async () => {
+  const { runtime, context } = loadRealContentJs();
+  let clicks = 0;
+  let composer;
+  const editorEl = {
+    tagName: 'DIV', isConnected: true, isContentEditable: true,
+    getAttribute: (k) => k === 'contenteditable' ? 'true' : null,
+    focus: () => {}, dispatchEvent: () => true,
+    closest: (sel) => sel.includes('composer') ? composer : null,
+    getBoundingClientRect: () => ({ top: 500, width: 200, height: 50 }),
+    innerText: '정상 프롬프트', textContent: '정상 프롬프트',
+    computedStyle: { visibility: 'visible', display: 'block', opacity: '1' }
+  };
+  const disabledBtn = {
+    tagName: 'BUTTON', isConnected: true, disabled: true,
+    getAttribute: (k) => k === 'aria-label' ? 'send' : (k === 'aria-disabled' ? 'true' : null),
+    click: () => { clicks++; },
+    querySelector: () => null, querySelectorAll: () => [],
+    closest: () => composer,
+    getBoundingClientRect: () => ({ width: 40, height: 40 }),
+    computedStyle: { visibility: 'visible', display: 'block', opacity: '1' }
+  };
+  composer = {
+    isConnected: true, closest: () => composer,
+    querySelectorAll: (sel) => [disabledBtn],
+    getBoundingClientRect: () => ({ top: 500, right: 800, bottom: 600, width: 300, height: 100 })
+  };
+  context.document.querySelectorAll = (sel) => sel.includes('contenteditable') ? [editorEl] : [];
+
+  const cmd = { requestId: 'req_btn_disabled_01', prompt: '정상 프롬프트', timeout_seconds: 5 };
+  const execState = { requestId: 'req_btn_disabled_01', generationDeadlineAtMs: Date.now() + 5000, deadlineAtMs: Date.now() + 5000 };
+  prepareEmptyComposer(context, editorEl);
+  const res = await runtime.executeCore(cmd, execState);
+
+  assert.strictEqual(res.status, 'failed');
+  assert.strictEqual(res.error, 'send_not_ready');
+  assert.strictEqual(clicks, 0, 'No click should be dispatched when button is disabled on pre-click re-resolve');
+});
+
+test('SEND-HARDEN-007: Send commit requires user turn persistence for >= 650ms; turns vanishing at 300ms fail with send_commit_unknown', async () => {
+  const { runtime, context } = loadRealContentJs();
+  let composer;
+  const editorEl = {
+    tagName: 'DIV', isConnected: true, isContentEditable: true,
+    getAttribute: (k) => k === 'contenteditable' ? 'true' : null,
+    focus: () => {}, dispatchEvent: () => true,
+    closest: (sel) => sel.includes('composer') ? composer : null,
+    getBoundingClientRect: () => ({ top: 500, width: 200, height: 50 }),
+    innerText: '커밋 지속성 테스트', textContent: '커밋 지속성 테스트',
+    computedStyle: { visibility: 'visible', display: 'block', opacity: '1' }
+  };
+  let sent = false;
+  let queryVisible = false;
+  const sendBtn = {
+    tagName: 'BUTTON', isConnected: true, disabled: false,
+    getAttribute: (k) => k === 'aria-label' ? 'send' : null,
+    click: () => {
+      sent = true;
+      queryVisible = true;
+      // Vanish after 300ms (before 650ms commit threshold)
+      setTimeout(() => { queryVisible = false; }, 300);
+    },
+    querySelector: () => null, querySelectorAll: () => [],
+    closest: () => composer,
+    getBoundingClientRect: () => ({ width: 40, height: 40 }),
+    computedStyle: { visibility: 'visible', display: 'block', opacity: '1' }
+  };
+  composer = {
+    isConnected: true, closest: () => composer,
+    querySelectorAll: () => [sendBtn],
+    getBoundingClientRect: () => ({ top: 500, right: 800, bottom: 600, width: 300, height: 100 })
+  };
+
+  const userQueryEl = {
+    tagName: 'DIV', className: 'user-query-container', isConnected: true,
+    closest: (sel) => sel.includes('.user-query-container') ? userQueryEl : null,
+    querySelector: () => ({ innerText: '커밋 지속성 테스트' }),
+    innerText: '커밋 지속성 테스트', textContent: '커밋 지속성 테스트',
+    getBoundingClientRect: () => ({ width: 100, height: 40 }),
+    computedStyle: { visibility: 'visible', display: 'block', opacity: '1' },
+    compareDocumentPosition: () => 4
+  };
+
+  context.document.querySelectorAll = (sel) => {
+    if (sel.includes('contenteditable')) return [editorEl];
+    if (sent && queryVisible && (sel.includes('.user-query-container') || sel.includes('user-query'))) {
+      return [userQueryEl];
+    }
+    return [];
+  };
+
+  const cmd = { requestId: 'req_vanish_01', prompt: '커밋 지속성 테스트', timeout_seconds: 1.2 };
+  const execState = { requestId: 'req_vanish_01', generationDeadlineAtMs: Date.now() + 1200, deadlineAtMs: Date.now() + 1200 };
+  prepareEmptyComposer(context, editorEl);
+  const res = await runtime.executeCore(cmd, execState);
+
+  assert.strictEqual(res.status, 'failed');
+  assert.strictEqual(res.error, 'send_commit_unknown');
+});
+
+test('SEND-HARDEN-008: Send commit succeeds when user turn persists >= 650ms and composer is cleared', async () => {
+  const { runtime, context } = loadRealContentJs();
+  let composer;
+  const editorEl = {
+    tagName: 'DIV', isConnected: true, isContentEditable: true,
+    getAttribute: (k) => k === 'contenteditable' ? 'true' : null,
+    focus: () => {}, dispatchEvent: () => true,
+    closest: (sel) => sel.includes('composer') ? composer : null,
+    getBoundingClientRect: () => ({ top: 500, width: 200, height: 50 }),
+    innerText: '성공 커밋 테스트', textContent: '성공 커밋 테스트',
+    computedStyle: { visibility: 'visible', display: 'block', opacity: '1' }
+  };
+  let sent = false;
+  const sendBtn = {
+    tagName: 'BUTTON', isConnected: true, disabled: false,
+    getAttribute: (k) => k === 'aria-label' ? 'send' : null,
+    click: () => {
+      sent = true;
+      // simulate composer clearing on click
+      setTimeout(() => { editorEl.innerText = ''; editorEl.textContent = ''; }, 200);
+    },
+    querySelector: () => null, querySelectorAll: () => [],
+    closest: () => composer,
+    getBoundingClientRect: () => ({ width: 40, height: 40 }),
+    computedStyle: { visibility: 'visible', display: 'block', opacity: '1' }
+  };
+  composer = {
+    isConnected: true, closest: () => composer,
+    querySelectorAll: () => [sendBtn],
+    getBoundingClientRect: () => ({ top: 500, right: 800, bottom: 600, width: 300, height: 100 })
+  };
+
+  const userQueryEl = {
+    tagName: 'DIV', className: 'user-query-container', isConnected: true,
+    closest: (sel) => sel.includes('.user-query-container') ? userQueryEl : null,
+    querySelector: () => ({ innerText: '성공 커밋 테스트' }),
+    innerText: '성공 커밋 테스트', textContent: '성공 커밋 테스트',
+    getBoundingClientRect: () => ({ width: 100, height: 40 }),
+    computedStyle: { visibility: 'visible', display: 'block', opacity: '1' },
+    compareDocumentPosition: () => 4
+  };
+  const modelResponseEl = {
+    tagName: 'DIV', className: 'model-response-container', isConnected: true,
+    closest: () => modelResponseEl,
+    querySelector: (sel) => sel.includes('.loading-dots') ? { isConnected: true, getBoundingClientRect: () => ({ width: 20, height: 20 }), computedStyle: { visibility: 'visible', display: 'block', opacity: '1' } } : null,
+    querySelectorAll: () => [],
+    innerText: '', textContent: '',
+    getBoundingClientRect: () => ({ width: 100, height: 40 }),
+    computedStyle: { visibility: 'visible', display: 'block', opacity: '1' },
+    compareDocumentPosition: () => 4
+  };
+
+  context.document.querySelectorAll = (sel) => {
+    if (sel.includes('contenteditable')) return [editorEl];
+    if (sent && (sel.includes('.user-query-container') || sel.includes('user-query'))) return [userQueryEl];
+    if (sent && (sel.includes('model-response') || sel.includes('.model-response-container'))) return [modelResponseEl];
+    return [];
+  };
+
+  const cmd = { requestId: 'req_commit_ok_01', prompt: '성공 커밋 테스트', timeout_seconds: 1.5 };
+  const execState = { requestId: 'req_commit_ok_01', generationDeadlineAtMs: Date.now() + 1500, deadlineAtMs: Date.now() + 1500 };
+  prepareEmptyComposer(context, editorEl);
+  const res = await runtime.executeCore(cmd, execState);
+
+  // Reached observation phase and timed out waiting for response, proving commit succeeded!
+  assert.strictEqual(res.status, 'timeout');
+  assert.notStrictEqual(res.error, 'send_commit_unknown');
+});
+
+test('SEND-HARDEN-009: Route transition from /app to /app/<conv_id> with preserved user turn continues normally', async () => {
+  const { runtime, context } = loadRealContentJs();
+  context.location = { pathname: '/app', href: 'https://gemini.google.com/app' };
+  let composer;
+  const editorEl = {
+    tagName: 'DIV', isConnected: true, isContentEditable: true,
+    getAttribute: (k) => k === 'contenteditable' ? 'true' : null,
+    focus: () => {}, dispatchEvent: () => true,
+    closest: (sel) => sel.includes('composer') ? composer : null,
+    getBoundingClientRect: () => ({ top: 500, width: 200, height: 50 }),
+    innerText: '경로 전환 테스트', textContent: '경로 전환 테스트',
+    computedStyle: { visibility: 'visible', display: 'block', opacity: '1' }
+  };
+  let sent = false;
+  const sendBtn = {
+    tagName: 'BUTTON', isConnected: true, disabled: false,
+    getAttribute: (k) => k === 'aria-label' ? 'send' : null,
+    click: () => {
+      sent = true;
+      editorEl.innerText = '';
+      editorEl.textContent = '';
+      // Transition path to normal conversation id after commit check
+      setTimeout(() => {
+        context.location.pathname = '/app/c_conv123456';
+      }, 800);
+    },
+    querySelector: () => null, querySelectorAll: () => [],
+    closest: () => composer,
+    getBoundingClientRect: () => ({ width: 40, height: 40 }),
+    computedStyle: { visibility: 'visible', display: 'block', opacity: '1' }
+  };
+  composer = {
+    isConnected: true, closest: () => composer,
+    querySelectorAll: () => [sendBtn],
+    getBoundingClientRect: () => ({ top: 500, right: 800, bottom: 600, width: 300, height: 100 })
+  };
+
+  const userQueryEl = {
+    tagName: 'DIV', className: 'user-query-container', isConnected: true,
+    closest: (sel) => sel.includes('.user-query-container') ? userQueryEl : null,
+    querySelector: () => ({ innerText: '경로 전환 테스트' }),
+    innerText: '경로 전환 테스트', textContent: '경로 전환 테스트',
+    getBoundingClientRect: () => ({ width: 100, height: 40 }),
+    computedStyle: { visibility: 'visible', display: 'block', opacity: '1' },
+    compareDocumentPosition: () => 4
+  };
+  context.document.querySelectorAll = (sel) => {
+    if (sel.includes('contenteditable')) return [editorEl];
+    if (sent && (sel.includes('.user-query-container') || sel.includes('user-query'))) return [userQueryEl];
+    return [];
+  };
+
+  const cmd = { requestId: 'req_route_ok_01', prompt: '경로 전환 테스트', timeout_seconds: 1.5 };
+  const execState = { requestId: 'req_route_ok_01', generationDeadlineAtMs: Date.now() + 1500, deadlineAtMs: Date.now() + 1500 };
+  prepareEmptyComposer(context, editorEl);
+  const res = await runtime.executeCore(cmd, execState);
+
+  // Transition to /app/c_conv123456 did NOT trigger send_state_lost!
+  assert.notStrictEqual(res.error, 'send_state_lost');
+  assert.strictEqual(res.status, 'timeout');
+});
+
+test('SEND-HARDEN-010: Unrelated route transition triggers send_state_lost', async () => {
+  const { runtime, context } = loadRealContentJs();
+  context.location = { pathname: '/app', href: 'https://gemini.google.com/app' };
+  let composer;
+  const editorEl = {
+    tagName: 'DIV', isConnected: true, isContentEditable: true,
+    getAttribute: (k) => k === 'contenteditable' ? 'true' : null,
+    focus: () => {}, dispatchEvent: () => true,
+    closest: (sel) => sel.includes('composer') ? composer : null,
+    getBoundingClientRect: () => ({ top: 500, width: 200, height: 50 }),
+    innerText: '비정상 경로 전환 테스트', textContent: '비정상 경로 전환 테스트',
+    computedStyle: { visibility: 'visible', display: 'block', opacity: '1' }
+  };
+  let sent = false;
+  const sendBtn = {
+    tagName: 'BUTTON', isConnected: true, disabled: false,
+    getAttribute: (k) => k === 'aria-label' ? 'send' : null,
+    click: () => {
+      sent = true;
+      editorEl.innerText = '';
+      editorEl.textContent = '';
+      // Unrelated route change after commit
+      setTimeout(() => { context.location.pathname = '/settings'; }, 800);
+    },
+    querySelector: () => null, querySelectorAll: () => [],
+    closest: () => composer,
+    getBoundingClientRect: () => ({ width: 40, height: 40 }),
+    computedStyle: { visibility: 'visible', display: 'block', opacity: '1' }
+  };
+  composer = {
+    isConnected: true, closest: () => composer,
+    querySelectorAll: () => [sendBtn],
+    getBoundingClientRect: () => ({ top: 500, right: 800, bottom: 600, width: 300, height: 100 })
+  };
+
+  const userQueryEl = {
+    tagName: 'DIV', className: 'user-query-container', isConnected: true,
+    closest: (sel) => sel.includes('.user-query-container') ? userQueryEl : null,
+    querySelector: () => ({ innerText: '비정상 경로 전환 테스트' }),
+    innerText: '비정상 경로 전환 테스트', textContent: '비정상 경로 전환 테스트',
+    getBoundingClientRect: () => ({ width: 100, height: 40 }),
+    computedStyle: { visibility: 'visible', display: 'block', opacity: '1' },
+    compareDocumentPosition: () => 4
+  };
+  context.document.querySelectorAll = (sel) => {
+    if (sel.includes('contenteditable')) return [editorEl];
+    if (sent && (sel.includes('.user-query-container') || sel.includes('user-query'))) return [userQueryEl];
+    return [];
+  };
+
+  const cmd = { requestId: 'req_route_lost_01', prompt: '비정상 경로 전환 테스트', timeout_seconds: 2.5 };
+  const execState = { requestId: 'req_route_lost_01', generationDeadlineAtMs: Date.now() + 2500, deadlineAtMs: Date.now() + 2500 };
+  prepareEmptyComposer(context, editorEl);
+  const res = await runtime.executeCore(cmd, execState);
+
+  assert.strictEqual(res.status, 'failed');
+  assert.strictEqual(res.error, 'send_state_lost');
+});
+
+test('SEND-HARDEN-011: Evidence lost for >= 5s with composer containing original prompt emits post_dispatch_uncommitted_suspected', async () => {
+  const { runtime, context } = loadRealContentJs();
+  let composer;
+  const editorEl = {
+    tagName: 'DIV', isConnected: true, isContentEditable: true,
+    getAttribute: (k) => k === 'contenteditable' ? 'true' : null,
+    focus: () => {}, dispatchEvent: () => true,
+    closest: (sel) => sel.includes('composer') ? composer : null,
+    getBoundingClientRect: () => ({ top: 500, width: 200, height: 50 }),
+    innerText: '증거 상실 테스트', textContent: '증거 상실 테스트',
+    computedStyle: { visibility: 'visible', display: 'block', opacity: '1' }
+  };
+  let sent = false;
+  let userAlive = true;
+  let responseAlive = true;
+  const sendBtn = {
+    tagName: 'BUTTON', isConnected: true, disabled: false,
+    getAttribute: (k) => k === 'aria-label' ? 'send' : null,
+    click: () => {
+      sent = true;
+      // Keep user and model response for 800ms to confirm commit, then vanish!
+      setTimeout(() => { userAlive = false; responseAlive = false; userQueryEl.isConnected = false; modelResponseEl.isConnected = false; }, 800);
+    },
+    querySelector: () => null, querySelectorAll: () => [],
+    closest: () => composer,
+    getBoundingClientRect: () => ({ width: 40, height: 40 }),
+    computedStyle: { visibility: 'visible', display: 'block', opacity: '1' }
+  };
+  composer = {
+    isConnected: true, closest: () => composer,
+    querySelectorAll: () => [sendBtn],
+    getBoundingClientRect: () => ({ top: 500, right: 800, bottom: 600, width: 300, height: 100 })
+  };
+
+  const userQueryEl = {
+    tagName: 'DIV', className: 'user-query-container', isConnected: true,
+    closest: (sel) => sel.includes('.user-query-container') ? userQueryEl : null,
+    querySelector: () => ({ innerText: '증거 상실 테스트' }),
+    innerText: '증거 상실 테스트', textContent: '증거 상실 테스트',
+    getBoundingClientRect: () => ({ width: 100, height: 40 }),
+    computedStyle: { visibility: 'visible', display: 'block', opacity: '1' },
+    compareDocumentPosition: () => 4
+  };
+  const modelResponseEl = {
+    tagName: 'DIV', className: 'model-response-container', isConnected: true,
+    closest: () => modelResponseEl,
+    querySelector: (sel) => sel.includes('.loading-dots') ? { isConnected: true, getBoundingClientRect: () => ({ width: 20, height: 20 }), computedStyle: { visibility: 'visible', display: 'block', opacity: '1' } } : null,
+    querySelectorAll: () => [],
+    innerText: '', textContent: '',
+    getBoundingClientRect: () => ({ width: 100, height: 40 }),
+    computedStyle: { visibility: 'visible', display: 'block', opacity: '1' },
+    compareDocumentPosition: () => 4
+  };
+
+  context.document.querySelectorAll = (sel) => {
+    if (sel.includes('contenteditable')) return [editorEl];
+    if (sent && userAlive && (sel.includes('.user-query-container') || sel.includes('user-query'))) return [userQueryEl];
+    if (sent && responseAlive && (sel.includes('model-response') || sel.includes('.model-response-container'))) return [modelResponseEl];
+    return [];
+  };
+
+  const cmd = { requestId: 'req_uncommit_susp_01', prompt: '증거 상실 테스트', timeout_seconds: 7 };
+  const execState = { requestId: 'req_uncommit_susp_01', generationDeadlineAtMs: Date.now() + 7000, deadlineAtMs: Date.now() + 7000 };
+  prepareEmptyComposer(context, editorEl);
+  const res = await runtime.executeCore(cmd, execState);
+
+  assert.strictEqual(res.status, 'failed');
+  assert.strictEqual(res.error, 'post_dispatch_uncommitted_suspected');
+});
+
+test('SEND-HARDEN-012: Evidence lost for >= 5s with composer empty emits send_state_lost', async () => {
+  const { runtime, context } = loadRealContentJs();
+  let composer;
+  const editorEl = {
+    tagName: 'DIV', isConnected: true, isContentEditable: true,
+    getAttribute: (k) => k === 'contenteditable' ? 'true' : null,
+    focus: () => {}, dispatchEvent: () => true,
+    closest: (sel) => sel.includes('composer') ? composer : null,
+    getBoundingClientRect: () => ({ top: 500, width: 200, height: 50 }),
+    innerText: '증거 상실 빈 컴포저 테스트', textContent: '증거 상실 빈 컴포저 테스트',
+    computedStyle: { visibility: 'visible', display: 'block', opacity: '1' }
+  };
+  let sent = false;
+  let userAlive = true;
+  const sendBtn = {
+    tagName: 'BUTTON', isConnected: true, disabled: false,
+    getAttribute: (k) => k === 'aria-label' ? 'send' : null,
+    click: () => {
+      sent = true;
+      editorEl.innerText = '';
+      editorEl.textContent = '';
+      // Keep user turn for 800ms to confirm commit, then vanish!
+      setTimeout(() => { userAlive = false; userQueryEl.isConnected = false; }, 800);
+    },
+    querySelector: () => null, querySelectorAll: () => [],
+    closest: () => composer,
+    getBoundingClientRect: () => ({ width: 40, height: 40 }),
+    computedStyle: { visibility: 'visible', display: 'block', opacity: '1' }
+  };
+  composer = {
+    isConnected: true, closest: () => composer,
+    querySelectorAll: () => [sendBtn],
+    getBoundingClientRect: () => ({ top: 500, right: 800, bottom: 600, width: 300, height: 100 })
+  };
+
+  const userQueryEl = {
+    tagName: 'DIV', className: 'user-query-container', isConnected: true,
+    closest: (sel) => sel.includes('.user-query-container') ? userQueryEl : null,
+    querySelector: () => ({ innerText: '증거 상실 빈 컴포저 테스트' }),
+    innerText: '증거 상실 빈 컴포저 테스트', textContent: '증거 상실 빈 컴포저 테스트',
+    getBoundingClientRect: () => ({ width: 100, height: 40 }),
+    computedStyle: { visibility: 'visible', display: 'block', opacity: '1' },
+    compareDocumentPosition: () => 4
+  };
+  context.document.querySelectorAll = (sel) => {
+    if (sel.includes('contenteditable')) return [editorEl];
+    if (sent && userAlive && (sel.includes('.user-query-container') || sel.includes('user-query'))) return [userQueryEl];
+    return [];
+  };
+
+  const cmd = { requestId: 'req_lost_empty_01', prompt: '증거 상실 빈 컴포저 테스트', timeout_seconds: 7 };
+  const execState = { requestId: 'req_lost_empty_01', generationDeadlineAtMs: Date.now() + 7000, deadlineAtMs: Date.now() + 7000 };
+  prepareEmptyComposer(context, editorEl);
+  const res = await runtime.executeCore(cmd, execState);
+
+  assert.strictEqual(res.status, 'failed');
+  assert.strictEqual(res.error, 'send_state_lost');
+});

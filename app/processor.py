@@ -859,6 +859,7 @@ class PostProcessor:
                         # [Tier 1] Gemini 자동 댓글 생성
                         self.current_stage = "comment_generation"
                         gemini_answer = None
+                        validated_final_text = None
                         use_local_requested = False
                         if self.gemini_web_enabled and ai_prompt:
                             if (self.stop_event and self.stop_event.is_set()) or (self.skip_event and self.skip_event.is_set()):
@@ -897,6 +898,8 @@ class PostProcessor:
                                             return result
 
                                     failure = "invalid_response"
+                                    failure_detail = None
+                                    validated_final_text = None
                                     command = None
 
                                     if early_gemini_command is not None:
@@ -1191,7 +1194,7 @@ class PostProcessor:
                                                             )
                                                             if repaired_comb and rep_comb_gate.valid:
                                                                 logger.log(f"  ✨ [GEMINI/AUTO_REPAIR] 접미사 결합 경미 오류({combined_gate.code}) 즉시 자동 수정 성공: {candidate_with_suffix!r} -> {repaired_comb!r}")
-                                                                gemini_answer = repaired_comb
+                                                                candidate_with_suffix = repaired_comb
                                                                 combined_gate = rep_comb_gate
                                                     if not combined_gate.valid:
                                                         if not getattr(self, "_quality_body_retry_done", False) and gen_ctx.attempt_count < gen_ctx.max_attempts:
@@ -1221,6 +1224,7 @@ class PostProcessor:
                                                                     message=f"품질 보정 1회 재작성 중 ({combined_gate.code})...",
                                                                 )
                                                             gemini_answer = None
+                                                            validated_final_text = None
                                                             continue
                                                         failure = f"quality_suffix:{combined_gate.code}"
                                                         logger.log(
@@ -1229,11 +1233,13 @@ class PostProcessor:
                                                             "WARNING",
                                                         )
                                                         gemini_answer = None
+                                                        validated_final_text = None
                                                     else:
                                                         logger.log(
                                                             f"✅ [GEMINI/EXTENSION] 품질 검사 통과: "
                                                             f"length={combined_gate.length} source=gemini"
                                                         )
+                                                        validated_final_text = candidate_with_suffix
                                                         # P0-4: Semantic anchor selection & connection
                                                         selected_anchor = "none"
                                                         matched_food = [d for d in gen_ctx.verified_anchors if d in gemini_answer]
@@ -1319,11 +1325,12 @@ class PostProcessor:
                                     if self.stop_event and self.stop_event.is_set():
                                         raise StopRequestedException("사용자 작업 중지")
 
+                                    failure_code = failure_detail or failure
                                     if self.config.get("skip_on_comment_failure", True):
-                                        logger.log(f"  ⏭️ [COMMENT] Gemini 댓글 생성 실패({failure}) -> 설정에 따라 다음 글로 자동 건너뜁니다.")
+                                        logger.log(f"  ⏭️ [COMMENT] Gemini 댓글 생성 실패({failure_code}) -> 설정에 따라 다음 글로 자동 건너뜁니다.")
                                         result.comment_result = CommentProcessResult(
                                             status=CommentSubmitState.SKIPPED,
-                                            error=f"gemini_failed:{failure}",
+                                            error=f"gemini_failed:{failure_code}",
                                         )
                                         if self.state_mgr:
                                             self.state_mgr.update(new_state=FeedState.SKIPPING, inc_skip=True)
@@ -1334,16 +1341,16 @@ class PostProcessor:
                                     else:
                                         result.comment_result = CommentProcessResult(
                                             status=CommentSubmitState.FAILED,
-                                            error=f"gemini_failed:{failure}",
+                                            error=f"gemini_failed:{failure_code}",
                                         )
                                         return result
 
-                                    is_quality_pause = ("quality_" in failure)
+                                    is_quality_pause = ("quality_" in str(failure))
                                     pause_reason = "gemini_quality_gate" if is_quality_pause else "gemini_generation_failure"
                                     if is_quality_pause:
-                                        msg = f"Gemini 품질 검사 제외 ({failure}) - 아래 [재시도], [로컬초안], [스킵] 또는 [▶️ 작업 재개]를 누르세요"
+                                        msg = f"Gemini 품질 검사 제외 ({failure_code}) - 아래 [재시도], [로컬초안], [스킵] 또는 [▶️ 작업 재개]를 누르세요"
                                     else:
-                                        msg = f"Gemini 생성 실패 ({failure}) - 브라우저 확인 후 아래 [재시도], [로컬초안], [스킵]을 누르세요"
+                                        msg = f"Gemini 생성 실패 ({failure_code}) - 브라우저 확인 후 아래 [재시도], [로컬초안], [스킵]을 누르세요"
                                     if self.state_mgr:
                                         self.state_mgr.update(
                                             new_state=FeedState.PAUSED,
@@ -1355,9 +1362,11 @@ class PostProcessor:
                                             raise StopRequestedException("사용자 작업 중지")
                                         cmd = self.command_bridge.pop_command() if self.command_bridge else None
                                         if cmd and cmd.kind in (WorkerCommandType.GEMINI_SKIP_POST, WorkerCommandType.SKIP_POST):
+                                            cause_code = failure_detail or failure
+                                            logger.log(f"  ⏭️ [COMMENT] 사용자 스킵 (선행 생성 오류 원인: {cause_code})")
                                             result.comment_result = CommentProcessResult(
                                                 status=CommentSubmitState.SKIPPED,
-                                                error=f"gemini_failed:{failure}" if failure else "user_skipped",
+                                                error="user_skipped",
                                             )
                                             self.pause_event.clear()
                                             if self.state_mgr:
@@ -1413,7 +1422,13 @@ class PostProcessor:
 
                         from services.comments.community_rhythm import FinalQualityGate
 
-                        if gemini_answer:
+                        if validated_final_text:
+                            logger.log(f"[GEMINI_GENERATION_SUCCESS] rid={request_id} post={post.key} nav={navigation_version}")
+                            draft_text = validated_final_text
+                            draft_source_label = "Gemini 생성"
+                            if self.state_mgr:
+                                self.state_mgr.update(inc_gen_success=True)
+                        elif gemini_answer:
                             logger.log(f"[GEMINI_GENERATION_SUCCESS] rid={request_id} post={post.key} nav={navigation_version}")
                             cand_composed = DraftService.compose_body_and_suffix(gemini_answer, suffix)
                             gate_res = FinalQualityGate.validate_final_text(

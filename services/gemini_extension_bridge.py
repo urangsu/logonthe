@@ -24,6 +24,68 @@ class GeminiResultStatus(str, Enum):
 
 
 @dataclass(frozen=True)
+class GeminiFailure:
+    status: str
+    code: str
+    phase: str
+    retry_safe: bool
+    click_count: Optional[int] = None
+
+
+def classify_gemini_failure(
+    status: str, error: str, *, dispatch_attempted: Optional[bool] = None,
+    click_count: Optional[int] = None, ui_committed: bool = False,
+) -> GeminiFailure:
+    err = str(error or "").strip()
+    st = str(status or "").strip().lower()
+    code = err or st or "unknown"
+
+    pre_dispatch_codes = {
+        "send_not_ready",
+        "prompt_exact_readback_failed",
+        "prompt_editor_changed_before_send",
+        "fresh_chat_not_verified",
+        "bridge_not_started",
+        "not_ready",
+    }
+    pre_dispatch_codes.add("generation_deadline_before_send")
+    if code in pre_dispatch_codes and dispatch_attempted is False and click_count == 0 and not ui_committed:
+        return GeminiFailure(
+            status=st,
+            code=code,
+            phase="PRE_DISPATCH",
+            retry_safe=True,
+            click_count=0,
+        )
+
+    if ui_committed:
+        return GeminiFailure(
+            status=st,
+            code=code,
+            phase="UI_COMMITTED",
+            retry_safe=False,
+            click_count=click_count,
+        )
+
+    if dispatch_attempted is True or (click_count is not None and click_count > 0):
+        return GeminiFailure(
+            status=st,
+            code=code,
+            phase="DISPATCHED",
+            retry_safe=False,
+            click_count=click_count,
+        )
+
+    return GeminiFailure(
+        status=st,
+        code=code,
+        phase="UNKNOWN",
+        retry_safe=False,
+        click_count=click_count,
+    )
+
+
+@dataclass(frozen=True)
 class GeminiCommand:
     request_id: str
     post_key: str
