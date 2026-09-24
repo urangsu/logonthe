@@ -4,6 +4,44 @@ from typing import Optional
 from app.models import FeedSourceType
 
 
+def normalize_naver_comment_text(text: str) -> str:
+    """
+    Naver contenteditable 댓글 에디터 DOM 직렬화 차이를 정규화한다.
+
+    정규화 허용:
+    - CRLF / CR → LF
+    - NBSP(     ) → 일반 공백
+    - zero-width 문자(​‌‍⁠﻿ 등) 제거
+    - 연속 개행 → 최대 1개 (빈 DOM 문단 정제)
+    - 줄 끝 trailing 공백 제거
+
+    절대 정규화하지 않을 항목:
+    - 단어 사이 정상 공백
+    - 숫자
+    - 부정 표현 ("안" "못" "없" 등)
+    - emoji
+    - 의미 있는 문장부호
+    - 실제 문장 내용
+
+    예):
+      "본문\r\n마무리"  →  "본문\n마무리"  (CRLF 정규화, ✓ OK)
+      "주차 안 됩니다"  ≠  "주차 됩니다"  (부정어 다름, ✗ MISMATCH)
+    """
+    if not isinstance(text, str):
+        return ""
+    t = text
+    t = t.replace("\r\n", "\n").replace("\r", "\n")          # CRLF/CR → LF
+    t = t.replace("\u00A0", " ").replace("\u2007", " ").replace("\u202F", " ")  # NBSP
+    # zero-width characters
+    t = re.sub(r"[\u200B-\u200D\u2060\uFEFF\u200E\u200F\u202A-\u202E\u2066-\u2069]", "", t)
+    # 연속 개행: contenteditable 빈 단락(<p><br></p>)은 추가 빈 줄을 만들 수 있음
+    t = re.sub(r"\n{2,}", "\n", t)
+    # 줄 끝 trailing 공백
+    t = re.sub(r"[ \t]+\n", "\n", t)
+    t = re.sub(r"\n[ \t]+", "\n", t)
+    return t.strip()
+
+
 class DraftService:
     @staticmethod
     def parse_spintax(text: str) -> str:
@@ -115,7 +153,7 @@ class DraftService:
         if s_clean in b_clean:
             return b_clean
 
-        return f"{b_clean}\n\n{s_clean}"
+        return f"{b_clean}\n{s_clean}"
 
     @classmethod
     def generate(cls, template: str, suffix: str = "") -> str:

@@ -1,6 +1,6 @@
 {
   "extensionVersion": "13.2.4",
-  "runtimeBuild": "13.2.4-send-harden-v3",
+  "runtimeBuild": "13.2.4-dom-readback-v4",
   "protocolVersion": 3,
   "bridgeSchemaVersion": 2
 }

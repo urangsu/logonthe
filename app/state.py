@@ -17,6 +17,14 @@ class FeedState(Enum):
     OPENING_COMMENT = auto()
     FILLING_DRAFT = auto()
     WAITING_USER = auto()
+    # Gemini 전송 파이프라인 단계 (계획서 §8)
+    PREPARING_CONTEXT = auto()   # 본문 추출·맥락 선별 중
+    WRITING_PROMPT = auto()      # 에디터에 입력 중
+    VERIFYING_INPUT = auto()     # 입력 내용 검증 중
+    WAITING_SEND_READY = auto()  # 전송 버튼 준비 대기
+    AWAITING_COMMIT = auto()     # 클릭 후 turn 상관관계 확인 중
+    WAITING_RESPONSE = auto()    # Gemini 응답 대기 중
+    QUALITY_CHECK = auto()       # 생성 결과 품질 검사 중
     SUBMITTING = auto()
     VERIFYING = auto()
     RECORDING = auto()
@@ -28,6 +36,7 @@ class FeedState(Enum):
     STOPPED = auto()
     COMPLETED = auto()
     ERROR = auto()
+
 
 
 @dataclass
@@ -55,6 +64,35 @@ class BotRuntimeState:
     current_post_excerpt: str = ""
     current_ai_prompt: str = ""
     ai_clipboard_ready: bool = False
+
+    # Gemini 파이프라인 진단 (계획서 §8)
+    gemini_phase: str = ""           # 현재 단계 코드 (VERIFYING_INPUT 등)
+    gemini_failure_count: int = 0    # 현재 연속 실패 횟수
+    gemini_failure_code: str = ""    # 마지막 실패 코드
+
+
+def make_gemini_phase_message(phase: str, failure_code: str = "", fail_count: int = 0, max_fail: int = 3) -> str:
+    """
+    계획서 §8: Gemini 파이프라인 단계·실패 코드를 UI 메시지로 변환한다.
+    입력 확인 실패 / 전송 미확인 / 응답 대기 / 3회 실패 일시정지를 구분한다.
+    """
+    if phase == "VERIFYING_INPUT":
+        if failure_code == "prompt_exact_readback_failed" and fail_count > 0:
+            return f"Gemini 입력 확인 실패. 아직 전송하지 않았습니다. 연속 실패 {fail_count}/{max_fail}."
+        return "Gemini 입력 내용 확인 중..."
+    if phase == "WAITING_SEND_READY":
+        return "Gemini 전송 버튼 준비 대기 중..."
+    if phase == "AWAITING_COMMIT":
+        if failure_code in ("send_state_lost", "prompt_editor_changed_before_send"):
+            return "Gemini 전송 여부를 확인하지 못했습니다. 자동 재전송하지 않습니다."
+        return "Gemini 전송 확인 중..."
+    if phase == "WAITING_RESPONSE":
+        return "Gemini 응답 대기 중..."
+    if phase == "QUALITY_CHECK":
+        return "생성 결과 품질 검사 중..."
+    if phase == "PAUSED" and failure_code == "prompt_exact_readback_failed":
+        return f"입력 확인이 {max_fail}회 연속 실패해 일시정지했습니다."
+    return ""
 
 
 class StateManager:

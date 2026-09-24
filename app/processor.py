@@ -1114,6 +1114,19 @@ class PostProcessor:
                                                             )
                                                         gemini_answer = None
                                                         continue
+                                                    _attempt_num = getattr(gen_ctx, 'attempt_count', '?')
+                                                    logger.log(
+                                                        f"[COMMENT][QUALITY_FINAL_REJECT] "
+                                                        f"post={post.key} attempt={_attempt_num} "
+                                                        f"stage=draft_inspect code={inspection.code} "
+                                                        f"matched={getattr(inspection, 'matched', None)!r} "
+                                                        f"retry_budget_exhausted=true",
+                                                        "WARNING",
+                                                    )
+                                                    if self.state_mgr:
+                                                        self.state_mgr.update(
+                                                            message=f"댓글 생성은 완료됐지만 최종 품질검사를 통과하지 못해 등록하지 않았습니다. 사유: {inspection.code}"
+                                                        )
                                                     result.comment_result = CommentProcessResult(
                                                         status=CommentSubmitState.FAILED,
                                                         error=f"quality_inspection:{inspection.code}",
@@ -1168,11 +1181,22 @@ class PostProcessor:
                                                             )
                                                         gemini_answer = None
                                                         continue
-                                                    failure = f"quality_body:{body_gate.code}"
+                                                    _attempt_num = getattr(gen_ctx, 'attempt_count', '?')
                                                     logger.log(
-                                                        f"⚠️ [GEMINI/EXTENSION] 응답 수신 완료되었으나 본문 품질 검사에서 제외됨: "
-                                                        f"[{failure}] matched={body_gate.matched!r} length={body_gate.length} source=gemini_body",
+                                                        f"[COMMENT][QUALITY_FINAL_REJECT] "
+                                                        f"post={post.key} attempt={_attempt_num} "
+                                                        f"stage=body code={body_gate.code} "
+                                                        f"matched={body_gate.matched!r} length={body_gate.length} "
+                                                        f"retry_budget_exhausted=true",
                                                         "WARNING",
+                                                    )
+                                                    if self.state_mgr:
+                                                        self.state_mgr.update(
+                                                            message=f"댓글 생성은 완료됐지만 최종 품질검사를 통과하지 못해 등록하지 않았습니다. 사유: {body_gate.code}"
+                                                        )
+                                                    result.comment_result = CommentProcessResult(
+                                                        status=CommentSubmitState.FAILED,
+                                                        error=f"quality_body:{body_gate.code}",
                                                     )
                                                     gemini_answer = None
                                                 else:
@@ -1226,11 +1250,22 @@ class PostProcessor:
                                                             gemini_answer = None
                                                             validated_final_text = None
                                                             continue
-                                                        failure = f"quality_suffix:{combined_gate.code}"
+                                                        _attempt_num = getattr(gen_ctx, 'attempt_count', '?')
                                                         logger.log(
-                                                            f"⚠️ [GEMINI/EXTENSION] 응답 수신 완료되었으나 접미사 결합 품질 검사에서 제외됨: "
-                                                            f"[{failure}] matched={combined_gate.matched!r} length={combined_gate.length} source=gemini_suffix",
+                                                            f"[COMMENT][QUALITY_FINAL_REJECT] "
+                                                            f"post={post.key} attempt={_attempt_num} "
+                                                            f"stage=suffix code={combined_gate.code} "
+                                                            f"matched={combined_gate.matched!r} length={combined_gate.length} "
+                                                            f"retry_budget_exhausted=true",
                                                             "WARNING",
+                                                        )
+                                                        if self.state_mgr:
+                                                            self.state_mgr.update(
+                                                                message=f"댓글 생성은 완료됐지만 최종 품질검사를 통과하지 못해 등록하지 않았습니다. 사유: {combined_gate.code}"
+                                                            )
+                                                        result.comment_result = CommentProcessResult(
+                                                            status=CommentSubmitState.FAILED,
+                                                            error=f"quality_suffix:{combined_gate.code}",
                                                         )
                                                         gemini_answer = None
                                                         validated_final_text = None

@@ -71,6 +71,9 @@ class ContentContextExtractor:
         return candidates
 
     GREETING_PATTERNS = [
+        # 독립적인 인사말만 제거한다.
+        # 인사와 사실이 한 문장에 있으면 사실 부분을 보존해야 하므로
+        # 이 패턴은 줄 전체가 인사말인 경우(단독 문장)에만 감점한다.
         r"^안녕하세요", r"^반갑습니다", r"^오늘도\s*좋은\s*하루",
         r"^다들\s*잘\s*지내셨나요", r"^오랜만에\s*포스팅", r"^서이추\s*환영",
         r"^영업시간\s*:", r"^주소\s*:", r"^전화번호\s*:", r"^연락처\s*:", r"^오시는\s*길\s*:",
@@ -100,7 +103,14 @@ class ContentContextExtractor:
         for idx, p in enumerate(raw_paras):
             # 너무 짧거나 단순 기호 문단 제외
             cleaned_p = re.sub(r"\s+", " ", p).strip()
-            if len(cleaned_p) < 8:
+
+            # 감정·부정 표현은 짧아도 보존한다 (아쉬웠어요, 못 먹었어요 등)
+            _KEEP_SHORT_RE = re.compile(
+                r"(?:아쉽|못\s|안\s|없었|없어요|별로|실망|아니|힘들|뿌듯|기대|놀라)"
+            )
+            is_meaningful_short = len(cleaned_p) < 8 and _KEEP_SHORT_RE.search(cleaned_p)
+            # 8자 미만이고 감정·부정 표현도 없으면 제외 (기호·숫자 단편)
+            if len(cleaned_p) < 8 and not is_meaningful_short:
                 continue
 
             score = 10
@@ -156,13 +166,18 @@ class ContentContextExtractor:
 
         result_text = "\n".join(p[2] for p in ordered_selected).strip()
         if not result_text:
-            result_text = sorted_by_score[0][2][:max_chars]
+            # 폴백: 가장 높은 점수 단 하나의 문단 (substring 절단 하지 않음)
+            result_text = sorted_by_score[0][2] if sorted_by_score else ""
 
         return result_text
 
     @classmethod
-    def extract(cls, page: Page, post: FeedPost, max_chars: int = 700) -> PostContext:
-        """게시글 페이지로부터 후보 평가를 통해 정제된 제목과 본문 핵심 추출"""
+    def extract(cls, page: Page, post: FeedPost, max_chars: int = 6000) -> PostContext:
+        """게시글 페이지로부터 후보 평가를 통해 정제된 제목과 본문 핵심 추출.
+
+        max_chars 기본값 6000: 후반 결말·감정을 살리기 위해 넓게 수집한다.
+        실제 AI 프롬프트 발췌는 comment_context_selector.select_comment_context()에서 담당.
+        """
         # 1. 제목 추출
         title = post.title
         if not title:

@@ -29,7 +29,7 @@
     '[data-test-id="model-response"]', '.response-container-content', 'message-content', '.model-response-text'
   ].join(', ');
   let runtimeContract = {
-    extensionVersion: '13.2.4', runtimeBuild: '13.2.4-send-harden-v3', protocolVersion: 3, bridgeSchemaVersion: 2
+    extensionVersion: '13.2.4', runtimeBuild: '13.2.4-dom-readback-v4', protocolVersion: 3, bridgeSchemaVersion: 2
   };
 
   try {
@@ -111,11 +111,134 @@
       .trim();
   }
 
+  /**
+   * normalizeForReadbackComparison:
+   * DOM contenteditable 편집기(Gemini .ql-editor)는 <p>/<br> 블록 구조를 사용해서
+   * 개행 표현이 Python에서 보낸 \n과 미묘하게 다를 수 있다.
+   * 이 함수는 검증된 편집기 표현 차이(블록 경계 개행 중복, NBSP, 제로폭 문자)만
+   * 정규화하고, 단어 사이 공백·단어·숫자·부정표현은 건드리지 않는다.
+   */
+  function normalizeForReadbackComparison(text) {
+    if (typeof text !== 'string') return '';
+    return text
+      .normalize('NFC')
+      .replace(/\r\n?/g, '\n')                        // CRLF → LF
+      .replace(/[\u2028\u2029]/g, '\n')               // LS/PS → LF
+      .replace(/[\u200B-\u200D\u2060\uFEFF\u200E\u200F\u202A-\u202E\u2066-\u2069]/g, '') // 제로폭
+      .replace(/[\u00A0\u2007\u202F]/g, ' ')          // NBSP 종류 → 일반 공백
+      .replace(/\n{2,}/g, '\n')                       // 블록 경계 이중 개행 → 단일 (편집기 차이)
+      .replace(/[ \t]+\n/g, '\n')                     // 줄 끝 공백 제거
+      .replace(/\n[ \t]+/g, '\n')                     // 줄 시작 공백 제거
+      .trim();
+  }
+
+  /**
+   * readDomBlocks:
+   * contenteditable 엘리먼트에서 <p>/<div>/<br> DOM 구조를 직접 순회해
+   * 텍스트 노드와 블록 경계를 정확하게 복원한다.
+   * - 중첩 노드 텍스트 중복 합산 방지
+   * - 빈 문단(<p><br></p>)과 trailing placeholder br 구분
+   * - 블록-개행과 br-개행 이중 생성 방지
+   */
+  function readDomBlocks(root) {
+    if (!root || !root.isConnected) return null;
+    const BLOCK_TAGS = new Set(['p','div','li','blockquote','h1','h2','h3','h4','h5','h6','pre','tr','td','th']);
+    const result = [];
+    let currentLine = '';
+    let lastWasBlock = false;
+
+    function walk(node) {
+      if (!node) return;
+      if (node.nodeType === 3 /* TEXT_NODE */) {
+        const txt = node.nodeValue || '';
+        currentLine += txt;
+        lastWasBlock = false;
+        return;
+      }
+      if (node.nodeType !== 1 /* ELEMENT_NODE */) return;
+      const tag = node.tagName ? node.tagName.toLowerCase() : '';
+      // placeholder <br> (빈 줄 표시용) vs 실제 줄바꿈 <br>
+      if (tag === 'br') {
+        // Quill 에디터는 <p><br></p>에서 빈 문단을 표현한다.
+        // 부모 <p>가 자식 <br> 하나만 가지면 빈 줄로 처리 (실제 개행 1회)
+        const parent = node.parentElement;
+        if (parent && parent.tagName && parent.tagName.toLowerCase() === 'p'
+            && parent.childNodes.length === 1) {
+          // 빈 문단: 부모 p의 walk 진입 시 개행을 남기므로 여기서는 추가 개행 없음
+          return;
+        }
+        // 실제 <br> 줄바꿈
+        result.push(currentLine);
+        currentLine = '';
+        lastWasBlock = true;
+        return;
+      }
+      const isBlock = BLOCK_TAGS.has(tag);
+      if (isBlock && currentLine.length > 0 && !lastWasBlock) {
+        result.push(currentLine);
+        currentLine = '';
+        lastWasBlock = true;
+      }
+      // 자식 순회 (중첩 중복 방지: 이 노드의 직계 자식만 처리)
+      for (const child of node.childNodes) walk(child);
+      if (isBlock) {
+        if (currentLine.length > 0 || !lastWasBlock) {
+          result.push(currentLine);
+          currentLine = '';
+          lastWasBlock = true;
+        }
+      }
+    }
+
+    try {
+      walk(root);
+      if (currentLine.length > 0) result.push(currentLine);
+    } catch (_) {
+      return null; // 구조 진단 필요 시 null 반환, 임의 평탄화 금지
+    }
+    return result.join('\n');
+  }
+
+  /**
+   * readPromptSurfaces:
+   * 에디터 엘리먼트에서 가능한 모든 읽기 표면을 반환한다.
+   * 우선순위: dom_blocks > innerText > textContent > value (input/textarea만)
+   */
+  function readPromptSurfaces(root) {
+    if (!root || !root.isConnected) return [];
+    const surfaces = [];
+    if (root instanceof HTMLTextAreaElement || root instanceof HTMLInputElement) {
+      surfaces.push({ source: 'value', text: root.value || '' });
+      return surfaces;
+    }
+    const domBlocksText = readDomBlocks(root);
+    if (domBlocksText !== null) surfaces.push({ source: 'dom_blocks', text: domBlocksText });
+    if (root.innerText !== undefined) surfaces.push({ source: 'innerText', text: root.innerText || '' });
+    if (root.textContent !== undefined) surfaces.push({ source: 'textContent', text: root.textContent || '' });
+    return surfaces;
+  }
+
+  /**
+   * comparePromptSurface:
+   * 두 텍스트를 normalizeForReadbackComparison 기준으로 비교한다.
+   * 빈 문자열끼리 일치는 전송 가능 입력으로 인정하지 않는다.
+   */
+  function comparePromptSurface(actualText, expectedText) {
+    const act = normalizeForReadbackComparison(actualText);
+    const exp = normalizeForReadbackComparison(expectedText);
+    const matched = Boolean(act && exp && act === exp);
+    return {
+      matched,
+      expectedLength: exp.length,
+      actualLength: act.length,
+      firstMismatchIndex: matched ? -1 : findFirstMismatchIndex(act, exp),
+    };
+  }
+
   function isExactPromptMatch(actualText, expectedText) {
-    const act = strictNormalizePrompt(actualText);
-    const exp = strictNormalizePrompt(expectedText);
-    if (!act || !exp) return false;
-    return act === exp;
+    // dom_blocks 표면은 normalizeForReadbackComparison 기준으로 비교한다.
+    // innerText/textContent/value는 strictNormalizePrompt로 비교 (기존 동작 유지).
+    return comparePromptSurface(actualText, expectedText).matched;
   }
   const isStrictPromptMatch = isExactPromptMatch;
 
@@ -278,7 +401,13 @@
   function getEditorSurfaces(target) {
     if (!target) return [];
     if (target instanceof HTMLTextAreaElement || target instanceof HTMLInputElement) return [{ surface: 'value', text: target.value || '' }];
-    return [{ surface: 'innerText', text: target.innerText || '' }, { surface: 'textContent', text: target.textContent || '' }];
+    const surfaces = [];
+    // dom_blocks: <p>/<br> 구조 직접 복원 (Gemini .ql-editor용) - 최우선
+    const domBlocksText = readDomBlocks(target);
+    if (domBlocksText !== null) surfaces.push({ surface: 'dom_blocks', text: domBlocksText });
+    surfaces.push({ surface: 'innerText', text: target.innerText || '' });
+    surfaces.push({ surface: 'textContent', text: target.textContent || '' });
+    return surfaces;
   }
 
   function composerEmpty(target) {
@@ -344,22 +473,46 @@
   async function waitForStableReadback(getTargetFn, expectedText, maxWaitMs = 1500) {
     const deadlineAtMs = Date.now() + maxWaitMs;
     let matchStartTimeMs = null, lastMatchedSurface = null, lastActualRaw = '', lastActualCanonical = '', resolvedTarget = null;
+    // 각 표면별 마지막 정규화 결과 보존 (진단용)
+    let surfaceLengths = {};
     while (Date.now() < deadlineAtMs) {
       if (isStopped || activeExecution?.cancelled) return { ok: false, reason: 'cancelled' };
       let currentTarget = getTargetFn(); if (!currentTarget || !currentTarget.isConnected) currentTarget = editor();
       if (!currentTarget) { await new Promise(r => setTimeout(r,100)); continue; }
       resolvedTarget = currentTarget; let matchedThisTick = false;
+      surfaceLengths = {};
       for (const s of getEditorSurfaces(currentTarget)) {
-        const canonicalActual = strictNormalizePrompt(s.text); lastActualRaw = s.text; lastActualCanonical = canonicalActual;
-        if (isExactPromptMatch(s.text, expectedText)) { matchedThisTick = true; lastMatchedSurface = s.surface; break; }
+        // dom_blocks는 normalizeForReadbackComparison, 그 외는 strictNormalizePrompt 로 기록
+        const normalizedActual = s.surface === 'dom_blocks'
+          ? normalizeForReadbackComparison(s.text)
+          : strictNormalizePrompt(s.text);
+        surfaceLengths[s.surface] = normalizedActual.length;
+        // best-match surface 추적 (마지막 표면의 raw/canonical 저장)
+        lastActualRaw = s.text;
+        lastActualCanonical = normalizedActual;
+        if (isExactPromptMatch(s.text, expectedText)) {
+          matchedThisTick = true;
+          lastMatchedSurface = s.surface;
+          // 일치한 표면의 raw/canonical 최종 저장
+          lastActualRaw = s.text;
+          lastActualCanonical = normalizedActual;
+          break;
+        }
       }
       if (matchedThisTick) {
         if (!matchStartTimeMs) matchStartTimeMs = Date.now();
-        else if (Date.now() - matchStartTimeMs >= 200) return { ok: true, target: resolvedTarget, surface: lastMatchedSurface, actualRaw: lastActualRaw, actualCanonical: lastActualCanonical };
+        else if (Date.now() - matchStartTimeMs >= 200) return {
+          ok: true, target: resolvedTarget, surface: lastMatchedSurface,
+          actualRaw: lastActualRaw, actualCanonical: lastActualCanonical, surfaceLengths
+        };
       } else matchStartTimeMs = null;
       await new Promise(r => setTimeout(r,100));
     }
-    return { ok: false, target: resolvedTarget, reason: 'readback_mismatch', surface: lastMatchedSurface || 'none', actualRaw: lastActualRaw, actualCanonical: lastActualCanonical };
+    return {
+      ok: false, target: resolvedTarget, reason: 'readback_mismatch',
+      surface: lastMatchedSurface || 'none',
+      actualRaw: lastActualRaw, actualCanonical: lastActualCanonical, surfaceLengths
+    };
   }
 
   function getUserTurnContainer(el) {
@@ -500,21 +653,27 @@
     const textContainer = (typeof root.querySelector === 'function' ? root.querySelector(USER_QUERY_BODY_SELECTORS) : null) || root;
     const candidates = [];
     try {
+      // dom_blocks 표면 우선 시도 (사용자 turn은 제출 후 <p> 구조로 렌더링됨)
+      const domBlocks = readDomBlocks(textContainer);
+      if (domBlocks !== null) candidates.push(domBlocks);
       const pElements = typeof textContainer.querySelectorAll === 'function' ? [...textContainer.querySelectorAll('p')] : [];
       if (pElements.length > 0) {
         candidates.push(pElements.map(p => (p.innerText || p.textContent || '').trim()).filter(Boolean).join('\n'));
-        candidates.push(pElements.map(p => (p.innerText || p.textContent || '').trim()).filter(Boolean).join(' '));
       }
       if (textContainer.innerText) candidates.push(textContainer.innerText);
       if (textContainer.textContent) candidates.push(textContainer.textContent);
       if (root !== textContainer) {
+        const rootBlocks = readDomBlocks(root);
+        if (rootBlocks !== null) candidates.push(rootBlocks);
         if (root.innerText) candidates.push(root.innerText);
         if (root.textContent) candidates.push(root.textContent);
       }
     } catch (_) {}
 
+    // 모든 후보에 동일한 normalizeForReadbackComparison 기준 적용
+    const expNorm = normalizeForReadbackComparison(expectedStrict);
     for (const text of candidates) {
-      if (strictNormalizePrompt(text) === expectedStrict) return true;
+      if (normalizeForReadbackComparison(text) === expNorm) return true;
     }
     return false;
   }
@@ -841,13 +1000,27 @@
       if (attempt===1) { await new Promise(r=>setTimeout(r,200)); target=editor(); }
     }
     const expectedCanonical=canonicalPromptText(command.prompt), actualCanonical=readbackResult?.actualCanonical||'', actualRaw=readbackResult?.actualRaw||'';
-    const expectedStrict=strictNormalizePrompt(command.prompt);
-    console.log('[GEMINI][PROMPT_READBACK_DIAG]', JSON.stringify({ expectedRawLen:(command.prompt||'').length,actualRawLen:actualRaw.length,expectedCanonicalLen:expectedCanonical.length,
-      actualCanonicalLen:actualCanonical.length,expectedHash:simpleHash(expectedCanonical),actualHash:simpleHash(actualCanonical),firstMismatchIndex:findFirstMismatchIndex(actualCanonical,expectedCanonical),
-      actualSurface:readbackResult?.surface||'unknown',zeroWidthCount:countOccurrences(actualRaw,/[\u200B-\u200D\u2060\uFEFF\uFE0E\uFE0F]/g),nbspCount:countOccurrences(actualRaw,/[\u00A0\u2007\u202F]/g),
-      newlineCount:countOccurrences(actualRaw,/\n/g),editorConnected:Boolean(target?.isConnected),readbackOk:Boolean(readbackResult?.ok) }));
+    const expectedStrict=normalizeForReadbackComparison(command.prompt);
+    const expectedRawLen=(command.prompt||'').length;
+    const surfaceLengths=readbackResult?.surfaceLengths||{};
+    const diagCmp=comparePromptSurface(actualRaw,command.prompt);
+    console.log('[GEMINI][PROMPT_READBACK_DIAG]', JSON.stringify({
+      build:runtimeContract.runtimeBuild,
+      expectedRawLen, actualRawLen:actualRaw.length,
+      expectedNormLen:expectedStrict.length, actualNormLen:actualCanonical.length,
+      surfaceLengths,
+      firstMismatchIndex:diagCmp.firstMismatchIndex,
+      actualSurface:readbackResult?.surface||'unknown',
+      paragraphCount:countOccurrences(command.prompt,/\n/g)+1,
+      zeroWidthCount:countOccurrences(actualRaw,/[\u200B-\u200D\u2060\uFEFF\uFE0E\uFE0F]/g),
+      nbspCount:countOccurrences(actualRaw,/[\u00A0\u2007\u202F]/g),
+      newlineCount:countOccurrences(actualRaw,/\n/g),
+      editorConnected:Boolean(target?.isConnected),
+      readbackOk:Boolean(readbackResult?.ok)
+    }));
     if (!readbackResult?.ok) {
-      return { status:'dom_unsupported',text:'',error:'prompt_exact_readback_failed' };
+      // 전송하지 않았음을 명시한다. 자동 재전송 금지.
+      return { status:'dom_unsupported', text:'', error:'prompt_exact_readback_failed' };
     }
     if (!target || !target.isConnected) target=editor();
     if (!getEditorSurfaces(target).some(s => isExactPromptMatch(s.text, command.prompt))) { logSendDiag({button:null,confirmed:false,boundNode:false}); return {status:'dom_unsupported',text:'',error:'prompt_editor_changed_before_send'}; }

@@ -2,7 +2,7 @@ name: Test & Stabilization Gates
 
 on:
   push:
-    branches: [ main, refactor/* ]
+    branches: [ main, refactor/*, codex/* ]
   pull_request:
     branches: [ main ]
 
