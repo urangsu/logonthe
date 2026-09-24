@@ -164,10 +164,16 @@ class ContentContextExtractor:
         ordered_selected = [p for p in scored_paras if p[1] in selected_indices]
         ordered_selected.sort(key=lambda x: x[1])
 
+        if max_chars <= 0:
+            return ""
+
         result_text = "\n".join(p[2] for p in ordered_selected).strip()
         if not result_text:
-            # 폴백: 가장 높은 점수 단 하나의 문단 (substring 절단 하지 않음)
+            # 폴백: 가장 높은 점수 단 하나의 문단
             result_text = sorted_by_score[0][2] if sorted_by_score else ""
+
+        if len(result_text) > max_chars:
+            result_text = result_text[:max_chars]
 
         return result_text
 

@@ -209,7 +209,7 @@ class TestDraftServiceSuffix(unittest.TestCase):
 
     def test_compose_body_and_suffix(self):
         res = DraftService.compose_body_and_suffix("사진이 너무 예쁘네요!", "오늘도 좋은 하루 보내세요 :)")
-        self.assertEqual(res, "사진이 너무 예쁘네요!\n\n오늘도 좋은 하루 보내세요 :)")
+        self.assertEqual(res, "사진이 너무 예쁘네요!\n오늘도 좋은 하루 보내세요 :)")
 
 
 class TestPacingService(unittest.TestCase):

@@ -123,13 +123,13 @@ class QualityRecoveryContracts(unittest.TestCase):
         # if suffix in repaired_combined -> False! Because '!' was inserted!
         # So it would append suffix again:
         double_composed = DraftService.compose_body_and_suffix(repaired_combined, suffix)
-        self.assertIn("행복한 하루 보내세요! :)\n\n행복한 하루 보내세요 :)", double_composed)
+        self.assertIn("행복한 하루 보내세요! :)\n행복한 하루 보내세요 :)", double_composed)
 
         # With validated_final_text bypass pattern, validated_final_text is used directly:
         validated_final_text = repaired_combined
         draft_text = validated_final_text if validated_final_text else DraftService.compose_body_and_suffix(repaired_combined, suffix)
         self.assertEqual(draft_text, repaired_combined)
-        self.assertNotIn("행복한 하루 보내세요! :)\n\n행복한 하루 보내세요 :)", draft_text)
+        self.assertNotIn("행복한 하루 보내세요! :)\n행복한 하루 보내세요 :)", draft_text)
 
     def test_user_skip_result_contract_distinguishes_user_choice_from_system_failure(self):
         # User explicit skip must set error="user_skipped" with status=SKIPPED

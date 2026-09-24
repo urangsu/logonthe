@@ -12,8 +12,12 @@ class TestNaverEditorAdapter(unittest.TestCase):
 
         self.mock_editor = MagicMock()
         self.mock_editor.count.return_value = 1
-        self.mock_editor.is_visible.return_value = True
-        self.mock_editor.evaluate.side_effect = lambda script, *args: "div"
+        def _mock_eval(script, *args):
+            if "tagName" in script:
+                return "div"
+            return None
+
+        self.mock_editor.evaluate.side_effect = _mock_eval
 
         self.mock_submit_button = MagicMock()
         self.mock_submit_button.is_disabled.return_value = False
