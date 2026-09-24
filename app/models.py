@@ -157,6 +157,7 @@ class CommentProcessResult:
     draft_text: Optional[str] = None
     submitted_text: Optional[str] = None
     error: Optional[str] = None
+    suffix_applied: bool = False
 
 
 @dataclass

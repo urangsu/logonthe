@@ -24,7 +24,7 @@ from naver.interaction import LikeInteractionService, CommentInteractionService
 from naver.editor_adapter import CommentEditorAdapter
 from naver.comment_guard import ServerCommentDuplicateGuard, CommentPresenceState
 from naver.content_extractor import ContentContextExtractor
-from services.draft import DraftService
+from services.draft import DraftService, normalize_naver_comment_text
 from services.contextual_draft import ContextualDraftEngine
 from services.like_eligibility import LikeEligibilityService, LikeEligibility
 from services.like_transaction import LikeTransactionService, LikeConfidence, LikeCircuitBreaker
@@ -286,6 +286,27 @@ class PostProcessor:
     ) -> Tuple[GenerationContext, str, str, str, str]:
         preset = preset or self.config.get("comment_style_preset", "community")
         suffix = DraftService.resolve_suffix(post.source, self.config)
+
+        # 서로이웃 피드에서는 같은 블로그에 꼬리말을 서버 확인 기준으로 1회만 보낸다.
+        if (
+            suffix
+            and post.source == FeedSourceType.NEIGHBOR
+            and post.blog_id
+            and self.history_store
+            and hasattr(self.history_store, "has_suffix_applied_for_blog")
+        ):
+            try:
+                if self.history_store.has_suffix_applied_for_blog(post.blog_id, suffix):
+                    logger.log(
+                        f"[COMMENT][SUFFIX_SUPPRESSED] blog={post.blog_id} "
+                        "reason=already_applied_for_neighbor"
+                    )
+                    suffix = ""
+            except Exception as exc:
+                logger.log(
+                    f"⚠️ [COMMENT][SUFFIX_HISTORY_CHECK_FAILED] blog={post.blog_id} error={exc}",
+                    "WARNING",
+                )
 
         from services.food_comment_focus import FoodCommentFocus
         food_focus_info = FoodCommentFocus.analyze(post.title or "", post.excerpt or "")
@@ -1581,7 +1602,17 @@ class PostProcessor:
                             CommentInteractionService.install_keyboard_listener(detail_page, post_key=post.key)
                             CommentEditorAdapter.focus(detail_page)
 
-                            cmt_res = CommentProcessResult(status=CommentSubmitState.DRAFTED, draft_text=draft_text)
+                            suffix_norm = normalize_naver_comment_text(suffix)
+                            draft_norm = normalize_naver_comment_text(draft_text)
+                            suffix_applied = bool(
+                                suffix_norm
+                                and (draft_norm == suffix_norm or draft_norm.endswith("\n" + suffix_norm))
+                            )
+                            cmt_res = CommentProcessResult(
+                                status=CommentSubmitState.DRAFTED,
+                                draft_text=draft_text,
+                                suffix_applied=suffix_applied,
+                            )
 
                             auto_submit_timeout = None
                             if self.auto_comment_submit_enabled:
@@ -1679,6 +1710,15 @@ class PostProcessor:
                                         )
 
                                     cmt_res.submitted_text = submitted_cand
+                                    submitted_norm = normalize_naver_comment_text(submitted_cand)
+                                    suffix_norm = normalize_naver_comment_text(suffix)
+                                    cmt_res.suffix_applied = bool(
+                                        suffix_norm
+                                        and (
+                                            submitted_norm == suffix_norm
+                                            or submitted_norm.endswith("\n" + suffix_norm)
+                                        )
+                                    )
 
                                     if self.state_mgr:
                                         self.state_mgr.update(new_state=FeedState.SUBMITTING, message="댓글 등록 및 검증 중...")
@@ -1686,7 +1726,13 @@ class PostProcessor:
                                     if self.history_store and hasattr(self.history_store, "record_pre_submit"):
                                         if origin != SubmitOrigin.NATIVE_CLICK:
                                             try:
-                                                self.history_store.record_pre_submit(post.key, cmt_res.submitted_text, url=post.url)
+                                                self.history_store.record_pre_submit(
+                                                    post.key,
+                                                    cmt_res.submitted_text,
+                                                    url=post.url,
+                                                    blog_id=post.blog_id,
+                                                    suffix_applied=cmt_res.suffix_applied,
+                                                )
                                             except Exception as e:
                                                 logger.log(f"❌ [HISTORY] pre_submit 영속 저장 실패 -> 중복 등록 방지를 위해 제출을 중단합니다: {e}", "ERROR")
                                                 cmt_res.status = CommentSubmitState.FAILED
@@ -1694,7 +1740,13 @@ class PostProcessor:
                                                 break
                                         else:
                                             try:
-                                                self.history_store.record_pre_submit(post.key, cmt_res.submitted_text, url=post.url)
+                                                self.history_store.record_pre_submit(
+                                                    post.key,
+                                                    cmt_res.submitted_text,
+                                                    url=post.url,
+                                                    blog_id=post.blog_id,
+                                                    suffix_applied=cmt_res.suffix_applied,
+                                                )
                                             except Exception as e:
                                                 logger.log(f"⚠️ [HISTORY] pre_submit 기록 실패 (네이티브 클릭 후, 서버 검증 계속 진행): {e}", "WARNING")
 
