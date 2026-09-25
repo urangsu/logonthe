@@ -138,7 +138,7 @@ class TestQualityAutoRepairAndPause(unittest.TestCase):
         self, mock_submit, mock_read_final, mock_wait, mock_set_text, mock_extract,
         mock_dup_scan, mock_ctx, mock_open, mock_guard
     ):
-        """1차 응답에 ㅎㅎ 포함 시 1회 auto-repair 피드백 반영 후 2차 정상 통과"""
+        """1차 응답에 허용되지 않은 그림 이모지 포함 시 1회 재작성 후 통과"""
         mock_ctx.return_value = {"frame": self.mock_page, "root": self.mock_page}
         mock_dup_scan.return_value = CommentPresenceResult(state=CommentPresenceState.ABSENT, confidence="high")
         mock_extract.return_value = MagicMock(
@@ -161,13 +161,13 @@ class TestQualityAutoRepairAndPause(unittest.TestCase):
         def mock_wait_result(cmd, **kwargs):
             attempt_counter[0] += 1
             if attempt_counter[0] == 1:
-                # 1차 시도: ㅎㅎ 포함 (FinalQualityGate 탈락)
+                # 1차 시도: 그림 이모지 포함 (FinalQualityGate 탈락)
                 return GeminiResult(
                     request_id=cmd.request_id,
                     post_key=cmd.post_key,
                     navigation_version=cmd.navigation_version,
                     status=GeminiResultStatus.COMPLETED,
-                    text="솥뚜껑 삼겹살에 김치 조합 너무 맛있어 보여요 ㅎㅎ",
+                    text="솥뚜껑 삼겹살에 김치 조합 너무 맛있어 보여요 ❤️",
                     error="",
                 )
             else:
@@ -208,7 +208,7 @@ class TestQualityAutoRepairAndPause(unittest.TestCase):
         self.assertEqual(len(published_prompts), 2)
         # 2번째 프롬프트에 재작성 피드백이 주입되었는지 확인
         self.assertTrue("수정 요청 (1회 재작성)" in published_prompts[1] or "수정 사유" in published_prompts[1])
-        self.assertIn("초성 웃음", published_prompts[1])
+        self.assertIn("그림 이모지", published_prompts[1])
         # 최종 댓글 성공 확인
         self.assertEqual(res.comment_result.status, CommentSubmitState.SUBMITTED)
         self.assertEqual(processor._quality_body_retry_done, True)
@@ -232,14 +232,14 @@ class TestQualityAutoRepairAndPause(unittest.TestCase):
         mock_gemini_bridge = MagicMock()
         mock_gemini_bridge.preflight.return_value = MagicMock(ready=True)
 
-        # 1차, 2차 모두 ㅎㅎ / ㅋㅋ 로 탈락
+        # 1차, 2차 모두 허용되지 않은 그림 이모지로 탈락
         mock_gemini_bridge.wait_for_result.side_effect = [
             GeminiResult(
                 request_id="r1",
                 post_key="testuser:12345",
                 navigation_version=1,
                 status=GeminiResultStatus.COMPLETED,
-                text="솥뚜껑 삼겹살 너무 맛있겠어요 ㅎㅎ",
+                text="솥뚜껑 삼겹살 너무 맛있겠어요 ❤️",
                 error="",
             ),
             GeminiResult(
@@ -247,7 +247,7 @@ class TestQualityAutoRepairAndPause(unittest.TestCase):
                 post_key="testuser:12345",
                 navigation_version=1,
                 status=GeminiResultStatus.COMPLETED,
-                text="솥뚜껑 삼겹살 최고네요 ㅋㅋ",
+                text="솥뚜껑 삼겹살 최고네요 😊",
                 error="",
             ),
         ]
@@ -517,4 +517,3 @@ class TestQualityAutoRepairAndPause(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
-

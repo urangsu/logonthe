@@ -41,7 +41,7 @@ class CommentStylePolicy:
 
         # 검토된 학습 데이터가 충분하거나(5건 이상) 명시적 설정이 있는 경우에만 소프트 스타일 허용
         total_samples = getattr(style_profile, "total_samples", 0) if style_profile else 0
-        cfg_allow_laughter = cfg.get("allow_soft_laughter", False)
+        cfg_allow_laughter = cfg.get("allow_soft_laughter", not is_thoughtful)
         cfg_allow_emoji = cfg.get("allow_soft_emoji", False)
 
         learned_laughter = bool(
@@ -60,15 +60,16 @@ class CommentStylePolicy:
         max_decorations = 1 if (allow_laughter or allow_emoji) else 0
 
         if allow_laughter and allow_emoji:
-            decor_instruction = "ㅎㅎ 또는 이모지는 어울릴 때 선택적으로 합계 최대 1개 가능"
+            decor_instruction = "말하듯 편한 존댓말로 쓰고, 어울릴 때만 ㅎㅎ·ㅠㅠ·ㅜㅜ 또는 이모지를 합계 최대 1개 사용"
         elif allow_laughter:
-            decor_instruction = "ㅎㅎ는 어울릴 때 선택적으로 1회 가능, 이모지는 사용 안 함"
+            decor_instruction = "말하듯 편한 존댓말로 쓰고, 어울릴 때만 ㅎㅎ·ㅠㅠ·ㅜㅜ 중 하나를 최대 1회 사용"
         elif allow_emoji:
-            decor_instruction = "이모지는 어울릴 때 선택적으로 1개 가능, 웃음 문자는 사용 안 함"
+            decor_instruction = "말하듯 편한 존댓말로 쓰고, 어울릴 때만 이모지를 최대 1개 사용"
         else:
-            decor_instruction = "장식 없음 (웃음·이모지 사용 안 함)"
+            decor_instruction = "말하듯 편한 존댓말로 쓰고 문장 끝을 부드럽게 마무리"
 
-        style_instruction = f"보통 1문장, 필요하면 2문장 ({target_desc} 내외). {decor_instruction}"
+        punctuation_instruction = "마침표 없이 ~·!·대화체 어미를 자연스럽게 선택" if not is_thoughtful else "문장부호는 문맥에 맞게 사용"
+        style_instruction = f"보통 1문장, 필요하면 2문장 ({target_desc} 내외). {decor_instruction}. {punctuation_instruction}"
 
         return cls(
             preset="thoughtful" if is_thoughtful else "community",
@@ -76,7 +77,7 @@ class CommentStylePolicy:
             max_sentences=2,
             min_length=min_len,
             max_length=max_len,
-            allow_period=True,  # 자연스러운 1~2문장에 표준 마침표 전면 허용
+            allow_period=is_thoughtful,
             allow_soft_laughter=allow_laughter,
             allow_soft_emoji=allow_emoji,
             max_combined_decorations=max_decorations,

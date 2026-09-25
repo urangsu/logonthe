@@ -29,8 +29,9 @@
     '[data-test-id="model-response"]', '.response-container-content', 'message-content', '.model-response-text'
   ].join(', ');
   let runtimeContract = {
-    extensionVersion: '13.2.4', runtimeBuild: '13.2.4-dom-readback-v4', protocolVersion: 3, bridgeSchemaVersion: 2
+    extensionVersion: '13.2.5', runtimeBuild: '13.2.5-route-grace-v1', protocolVersion: 3, bridgeSchemaVersion: 2
   };
+  const ROUTE_ALLOCATION_GRACE_MS = 11000;
 
   try {
     chrome.runtime.sendMessage({ type: 'getRuntimeContract' }, (res) => {
@@ -960,7 +961,10 @@
       if (!allocationAllowed || !/^\/app\/[a-zA-Z0-9_-]+$/.test(path)) return 'lost';
       // Pin the first allocated route, even while its user turn is rendering.
       if (pendingPath === null) { pendingPath = path; pendingSince = nowMs; }
-      if (nowMs - pendingSince >= 5000) return 'lost';
+      // Gemini can render the correlated user turn several seconds after assigning
+      // the new conversation route. Keep the strict correlation requirement, but
+      // do not declare the route lost before the 12-second commit window closes.
+      if (nowMs - pendingSince >= ROUTE_ALLOCATION_GRACE_MS) return 'lost';
       if (!userCorrelated) return 'pending';
       acceptedPath = path;
       pendingPath = null;

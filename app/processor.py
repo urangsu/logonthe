@@ -106,7 +106,7 @@ class GenerationContext:
     max_attempts: int = 3
     rewrite_reasons: List[str] = field(default_factory=list)
     style_policy: Optional[Any] = None
-    prompt_version: str = "3.2.0-grounded-human"
+    prompt_version: str = "3.4.0-youthful-mobile"
 
     def update_excerpt(self, new_excerpt: str) -> None:
         from services.food_comment_focus import FoodCommentFocus
@@ -274,7 +274,7 @@ class PostProcessor:
         # P1-1 Invariant: if auto_comment_submit_enabled is active, comment pipeline is always enabled
         self.comment_enabled = bool(comment_enabled or self.auto_comment_submit_enabled)
         self._processed_post_keys: set[str] = set()
-        self.ai_prompt_version = str(cfg_dict.get("ai_prompt_version", "3.2.0-grounded-human"))
+        self.ai_prompt_version = str(cfg_dict.get("ai_prompt_version", "3.4.0-youthful-mobile"))
         self.current_stage: str = "init"
         self.current_post_key: Optional[str] = None
         self.current_request_id: Optional[str] = None
@@ -333,7 +333,7 @@ class PostProcessor:
         )
 
         style_plan = (action_plan.style_plan if action_plan else None)
-        prompt_ver = getattr(self, "ai_prompt_version", "3.2.0-grounded-human")
+        prompt_ver = getattr(self, "ai_prompt_version", "3.4.0-youthful-mobile")
         gen_ctx = GenerationContext(
             title=post.title or "",
             excerpt=post.excerpt or "",

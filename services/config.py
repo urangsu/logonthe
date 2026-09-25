@@ -60,7 +60,9 @@ DEFAULT_CONFIG_V2: Dict[str, Any] = {
     "ai_clipboard_enabled": True,
     "ai_context_max_chars": 700,
     "ai_prompt_style": "warm_short",
-    "ai_prompt_version": "3.2.0-grounded-human",
+    "ai_prompt_version": "3.4.0-youthful-mobile",
+    "allow_soft_laughter": True,
+    "allow_soft_emoji": False,
     "append_fixed_suffix_to_ai": False,
 
     # Gemini Browser Mode: 기본은 일반 Chrome 확장 브리지,
@@ -68,7 +70,7 @@ DEFAULT_CONFIG_V2: Dict[str, Any] = {
     "gemini_browser_mode": "extension_existing_chrome",
     "gemini_web_enabled": True,
     "gemini_bridge_port": 43127,
-    "gemini_extension_version": "13.2.4",
+    "gemini_extension_version": "13.2.5",
     "gemini_response_timeout": 55.0,
     "allow_local_draft_on_gemini_failure": False,
     "gemini_mode": "new",
@@ -122,11 +124,16 @@ def migrate_comment_style_preset(data: Dict[str, Any]) -> Dict[str, Any]:
 
 
 def migrate_ai_prompt_version(data: Dict[str, Any]) -> Dict[str, Any]:
-    """프롬프트 버전이 비어있거나 이전 기본값(v3.0, v3.1)인 경우 새 기본값('3.2.0-grounded-human')으로 승격하고 사용자 명시 선택은 보존"""
+    """이전 기본 프롬프트를 20대 모바일 대화체 기본값으로 승격한다."""
     migrated = dict(data)
     ver = str(migrated.get("ai_prompt_version") or "").strip()
-    if not ver or ver in ("3.0.0-grounded-human", "3.1.0-grounded-human"):
-        migrated["ai_prompt_version"] = "3.2.0-grounded-human"
+    if not ver or ver in (
+        "3.0.0-grounded-human",
+        "3.1.0-grounded-human",
+        "3.2.0-grounded-human",
+        "3.3.0-context-lean",
+    ):
+        migrated["ai_prompt_version"] = "3.4.0-youthful-mobile"
     return migrated
 
 

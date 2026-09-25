@@ -1,6 +1,6 @@
 {
-  "extensionVersion": "13.2.4",
-  "runtimeBuild": "13.2.4-dom-readback-v4",
+  "extensionVersion": "13.2.5",
+  "runtimeBuild": "13.2.5-route-grace-v1",
   "protocolVersion": 3,
   "bridgeSchemaVersion": 2
 }

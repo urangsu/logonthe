@@ -182,7 +182,11 @@ test('HANDOFF: route allocation tolerates rendering delay but pins one conversat
   assert.strictEqual(guard('/app/second', true, 1000), 'lost');
   const unconfirmed = runtime.createConversationRouteGuard('/app');
   assert.strictEqual(unconfirmed('/app/first', false, 0), 'pending');
-  assert.strictEqual(unconfirmed('/app/first', true, 5000), 'lost');
+  assert.strictEqual(unconfirmed('/app/first', false, 10999), 'pending');
+  assert.strictEqual(unconfirmed('/app/first', false, 11000), 'lost');
+  const delayed = runtime.createConversationRouteGuard('/app');
+  assert.strictEqual(delayed('/app/first', false, 0), 'pending');
+  assert.strictEqual(delayed('/app/first', true, 8000), 'ok');
   const switched = runtime.createConversationRouteGuard('/app');
   assert.strictEqual(switched('/app/first', false, 0), 'pending');
   assert.strictEqual(switched('/app/second', true, 100), 'lost');
