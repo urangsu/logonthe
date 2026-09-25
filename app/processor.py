@@ -251,7 +251,10 @@ class PostProcessor:
         if auto_comment_submit_enabled is not None:
             self.auto_comment_submit_enabled = bool(auto_comment_submit_enabled)
         else:
-            self.auto_comment_submit_enabled = bool(cfg_dict.get("auto_comment_submit_enabled", False))
+            self.auto_comment_submit_enabled = bool(
+                cfg_dict.get("auto_comment_submit_enabled", False)
+                or cfg_dict.get("auto_comment_submit", False)
+            )
 
         if auto_comment_chance is not None:
             self.auto_comment_chance = float(auto_comment_chance)
@@ -1156,6 +1159,17 @@ class PostProcessor:
                                                         f"retry_budget_exhausted=true",
                                                         "WARNING",
                                                     )
+                                                    should_skip = self.auto_comment_submit_enabled or self.config.get("skip_on_comment_failure", True)
+                                                    if should_skip:
+                                                        logger.log(f"  ⏭️ [COMMENT] 초안 품질 탈락({inspection.code}) -> 다음 글로 건너뜁니다.")
+                                                        result.comment_result = CommentProcessResult(
+                                                            status=CommentSubmitState.SKIPPED,
+                                                            error=f"quality_inspection:{inspection.code}",
+                                                        )
+                                                        if self.state_mgr:
+                                                            self.state_mgr.update(new_state=FeedState.SKIPPING, inc_skip=True)
+                                                        return result
+
                                                     if self.state_mgr:
                                                         self.state_mgr.update(
                                                             message=f"댓글 생성은 완료됐지만 최종 품질검사를 통과하지 못해 등록하지 않았습니다. 사유: {inspection.code}"
@@ -1393,9 +1407,10 @@ class PostProcessor:
                                     if self.stop_event and self.stop_event.is_set():
                                         raise StopRequestedException("사용자 작업 중지")
 
-                                    failure_code = failure_detail or failure
-                                    if self.config.get("skip_on_comment_failure", True):
-                                        logger.log(f"  ⏭️ [COMMENT] Gemini 댓글 생성 실패({failure_code}) -> 설정에 따라 다음 글로 자동 건너뜁니다.")
+                                    failure_code = failure_detail or failure or (result.comment_result.error if result and result.comment_result else "generation_failed")
+                                    should_skip = self.auto_comment_submit_enabled or self.config.get("skip_on_comment_failure", True)
+                                    if should_skip:
+                                        logger.log(f"  ⏭️ [COMMENT] Gemini 댓글 생성/품질 검사 실패({failure_code}) -> 다음 글로 자동 건너뜁니다.")
                                         result.comment_result = CommentProcessResult(
                                             status=CommentSubmitState.SKIPPED,
                                             error=f"gemini_failed:{failure_code}",
@@ -1557,6 +1572,11 @@ class PostProcessor:
                         if not draft_text:
                             logger.log("  ⚠️ [COMMENT] 유효한 앵커 기반 댓글 초안을 생성하지 못했습니다. (작성 스킵)", "WARNING")
                             result.comment_result = CommentProcessResult(status=CommentSubmitState.FAILED, error="no_valid_draft_candidate")
+                            should_skip = self.auto_comment_submit_enabled or self.config.get("skip_on_comment_failure", True)
+                            if should_skip:
+                                result.comment_result.status = CommentSubmitState.SKIPPED
+                                if self.state_mgr:
+                                    self.state_mgr.update(new_state=FeedState.SKIPPING, inc_skip=True)
                             return result
 
                         # 에디터 주입 전 Gate 재검증
@@ -1565,7 +1585,8 @@ class PostProcessor:
                         if contam_pre_gate.is_contaminated:
                             logger.log(f"  ❌ [COMMENT] 에디터 주입 전 UI 오염 차단: [{contam_pre_gate.code}] {contam_pre_gate.reason}", "ERROR")
                             result.comment_result = CommentProcessResult(status=CommentSubmitState.FAILED, error=contam_pre_gate.code)
-                            if self.config.get("skip_on_comment_failure", True):
+                            should_skip = self.auto_comment_submit_enabled or self.config.get("skip_on_comment_failure", True)
+                            if should_skip:
                                 logger.log("  ⏭️ [COMMENT] UI 오염 초안 주입 차단 -> 다음 글로 건너뜁니다.")
                                 result.comment_result.status = CommentSubmitState.SKIPPED
                                 if self.state_mgr:
@@ -1579,9 +1600,23 @@ class PostProcessor:
                             excerpt=gen_ctx.excerpt,
                         )
                         if not pre_inject_gate.valid:
+                            if pre_inject_gate.code in FinalQualityGate.AUTO_REPAIRABLE_CODES:
+                                rep_inj, rep_inj_gate = FinalQualityGate.auto_repair(
+                                    draft_text, pre_inject_gate, preset=preset, source="pre_inject_repair",
+                                    style_profile=getattr(gen_ctx, "style_profile", None),
+                                    style_policy=getattr(gen_ctx, "style_policy", None),
+                                    excerpt=gen_ctx.excerpt,
+                                )
+                                if rep_inj and rep_inj_gate.valid:
+                                    logger.log(f"  ✨ [COMMENT/AUTO_REPAIR] 주입 전 경미 오류({pre_inject_gate.code}) 자동 수정: {draft_text!r} -> {rep_inj!r}")
+                                    draft_text = rep_inj
+                                    pre_inject_gate = rep_inj_gate
+
+                        if not pre_inject_gate.valid:
                             logger.log(f"  ❌ [COMMENT] 에디터 주입 전 품질 게이트 실패: [{pre_inject_gate.code}] {pre_inject_gate.reason}", "ERROR")
                             result.comment_result = CommentProcessResult(status=CommentSubmitState.FAILED, error=pre_inject_gate.code)
-                            if self.config.get("skip_on_comment_failure", True):
+                            should_skip = self.auto_comment_submit_enabled or self.config.get("skip_on_comment_failure", True)
+                            if should_skip:
                                 logger.log("  ⏭️ [COMMENT] 초안 품질 게이트 실패 -> 다음 글로 건너뜁니다.")
                                 result.comment_result.status = CommentSubmitState.SKIPPED
                                 if self.state_mgr:
@@ -1597,7 +1632,8 @@ class PostProcessor:
                         if not set_ok:
                             logger.log("  ❌ [COMMENT] 에디터 초안 주입 및 Read-back 검증 실패", "ERROR")
                             result.comment_result = CommentProcessResult(status=CommentSubmitState.FAILED, error="editor_set_text_failed")
-                            if self.config.get("skip_on_comment_failure", True):
+                            should_skip = self.auto_comment_submit_enabled or self.config.get("skip_on_comment_failure", True)
+                            if should_skip:
                                 logger.log("  ⏭️ [COMMENT] 에디터 주입 실패 -> 다음 글로 건너뜁니다.")
                                 result.comment_result.status = CommentSubmitState.SKIPPED
                                 if self.state_mgr:
@@ -1691,8 +1727,8 @@ class PostProcessor:
                                         if contam_sub_gate.is_contaminated:
                                             logger.log(f"  ❌ [COMMENT] 등록 직전 댓글 UI 오염 통과 실패: [{contam_sub_gate.code}] {contam_sub_gate.reason}", "WARNING")
                                             CommentInteractionService.release_submit_lock(detail_page, source=origin.value)
-                                            if origin == SubmitOrigin.AUTO_TIMER:
-                                                logger.log(f"[COMMENT][AUTO_QUALITY_SKIP] reason={contam_sub_gate.code} stage=pre_submit")
+                                            if origin == SubmitOrigin.AUTO_TIMER or self.auto_comment_submit_enabled:
+                                                logger.log(f"  ⏭️ [COMMENT][AUTO_QUALITY_SKIP] reason={contam_sub_gate.code} stage=pre_submit -> 다음 글로 건너뜁니다.")
                                                 cmt_res.status = CommentSubmitState.SKIPPED
                                                 cmt_res.error = contam_sub_gate.code
                                                 if self.state_mgr:
@@ -1711,12 +1747,29 @@ class PostProcessor:
                                             excerpt=gen_ctx.excerpt,
                                         )
                                         if not final_gate.valid:
+                                            if final_gate.code in FinalQualityGate.AUTO_REPAIRABLE_CODES:
+                                                repaired_sub, rep_sub_gate = FinalQualityGate.auto_repair(
+                                                    submitted_cand, final_gate, preset=preset, source="pre_submit_repair",
+                                                    style_profile=getattr(gen_ctx, "style_profile", None),
+                                                    style_policy=getattr(gen_ctx, "style_policy", None),
+                                                    excerpt=gen_ctx.excerpt,
+                                                )
+                                                if repaired_sub and rep_sub_gate.valid:
+                                                    logger.log(f"  ✨ [COMMENT/AUTO_REPAIR] 등록 직전 경미 오류({final_gate.code}) 자동 수정: {submitted_cand!r} -> {repaired_sub!r}")
+                                                    submitted_cand = repaired_sub
+                                                    final_gate = rep_sub_gate
+                                                    try:
+                                                        CommentEditorAdapter.set_text(detail_page, submitted_cand, stop_flag=self.stop_event)
+                                                    except TypeError:
+                                                        CommentEditorAdapter.set_text(detail_page, submitted_cand)
+
+                                        if not final_gate.valid:
                                             logger.log(f"  ❌ [COMMENT] 등록 직전 댓글 품질 게이트 통과 실패: [{final_gate.code}] {final_gate.reason} (매칭: {final_gate.matched})", "WARNING")
                                             CommentInteractionService.release_submit_lock(detail_page, source=origin.value)
-                                            if origin == SubmitOrigin.AUTO_TIMER:
-                                                logger.log(f"[COMMENT][AUTO_QUALITY_SKIP] reason={final_gate.code} stage=pre_submit")
+                                            if origin == SubmitOrigin.AUTO_TIMER or self.auto_comment_submit_enabled:
+                                                logger.log(f"  ⏭️ [COMMENT][AUTO_QUALITY_SKIP] reason={final_gate.code} stage=pre_submit -> 다음 글로 건너뜁니다.")
                                                 cmt_res.status = CommentSubmitState.SKIPPED
-                                                cmt_res.error = final_gate.code
+                                                cmt_res.error = f"quality_gate:{final_gate.code}"
                                                 if self.state_mgr:
                                                     self.state_mgr.update(new_state=FeedState.SKIPPING, inc_skip=True)
                                                 break

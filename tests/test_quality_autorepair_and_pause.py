@@ -379,6 +379,142 @@ class TestQualityAutoRepairAndPause(unittest.TestCase):
         sm.update(new_state=FeedState.OPENING_POST)
         self.assertIsNone(sm.get_state().pause_reason)
 
+    @patch("app.processor.TargetPostGuard.verify")
+    @patch("app.processor.CommentInteractionService.open_comment_layer", return_value=(True, "ok"))
+    @patch("app.processor.MobileDOMResolver.get_comment_editor_context")
+    @patch("app.processor.ServerCommentDuplicateGuard.scan_page_for_my_comment")
+    @patch("app.processor.ContentContextExtractor.extract")
+    def test_06_quality_retry_exhausted_in_auto_mode_skips_without_pause(
+        self, mock_extract, mock_dup_scan, mock_ctx, mock_open, mock_guard
+    ):
+        """자동등록 모드(auto_comment_submit_enabled=True)에서는 2회 연속 품질 탈락 시 일시정지하지 않고 해당 글을 스킵"""
+        mock_ctx.return_value = {"frame": self.mock_page, "root": self.mock_page}
+        mock_dup_scan.return_value = CommentPresenceResult(state=CommentPresenceState.ABSENT, confidence="high")
+        mock_extract.return_value = MagicMock(
+            title="성수동 삼겹살 솥뚜껑 구이 맛집",
+            excerpt="성수동 솥뚜껑 삼겹살집 다녀왔습니다. 두툼한 고기랑 김치가 예술입니다."
+        )
+
+        mock_gemini_bridge = MagicMock()
+        mock_gemini_bridge.preflight.return_value = MagicMock(ready=True)
+
+        # 1차, 2차 모두 ㅎㅎ / ㅋㅋ 로 탈락
+        mock_gemini_bridge.wait_for_result.side_effect = [
+            GeminiResult(
+                request_id="r1",
+                post_key="testuser:12345",
+                navigation_version=1,
+                status=GeminiResultStatus.COMPLETED,
+                text="솥뚜껑 삼겹살 너무 맛있겠어요 ㅎㅎ",
+                error="",
+            ),
+            GeminiResult(
+                request_id="r2",
+                post_key="testuser:12345",
+                navigation_version=1,
+                status=GeminiResultStatus.COMPLETED,
+                text="솥뚜껑 삼겹살 최고네요 ㅋㅋ",
+                error="",
+            ),
+        ]
+
+        state_mgr = StateManager()
+        pause_event = threading.Event()
+
+        plan = PostActionPlan(
+            process_like=False,
+            process_comment=True,
+            comment_sample_selected=True,
+            comment_sample_roll=0.1
+        )
+
+        processor = PostProcessor(
+            {**self.config, "skip_on_comment_failure": False, "auto_comment_submit_enabled": True},
+            like_enabled=False,
+            comment_enabled=True,
+            gemini_web_enabled=True,
+            gemini_extension_bridge=mock_gemini_bridge,
+            state_manager=state_mgr,
+            pause_event=pause_event,
+            auto_comment_submit_enabled=True,
+        )
+
+        with patch.object(FinalQualityGate, "auto_repair", return_value=(None, MagicMock(valid=False))):
+            res = processor.process(self.mock_page, self.post, action_plan=plan)
+
+        # Result is SKIPPED directly without pausing!
+        self.assertEqual(res.comment_result.status, CommentSubmitState.SKIPPED)
+        # Pause event was NEVER set!
+        self.assertFalse(pause_event.is_set())
+        # State transitioned to SKIPPING
+        self.assertEqual(state_mgr.get_state().current_state, FeedState.SKIPPING)
+
+    @patch("app.processor.TargetPostGuard.verify")
+    @patch("app.processor.CommentInteractionService.open_comment_layer", return_value=(True, "ok"))
+    @patch("app.processor.MobileDOMResolver.get_comment_editor_context")
+    @patch("app.processor.ServerCommentDuplicateGuard.scan_page_for_my_comment")
+    @patch("app.processor.ContentContextExtractor.extract")
+    @patch("app.processor.CommentInteractionService.install_keyboard_listener")
+    @patch("app.processor.CommentEditorAdapter.focus")
+    @patch("app.processor.CommentEditorAdapter.set_text", return_value=True)
+    def test_07_pre_submit_quality_failure_in_auto_mode_skips_without_hanging(
+        self, mock_set_text, mock_focus, mock_listener, mock_extract, mock_dup_scan, mock_ctx, mock_open, mock_guard
+    ):
+        """자동등록 모드(AUTO_TIMER)에서 등록 직전 텍스트가 품질 미충족이면 대기하지 않고 스킵"""
+        mock_ctx.return_value = {"frame": self.mock_page, "root": self.mock_page}
+        mock_dup_scan.return_value = CommentPresenceResult(state=CommentPresenceState.ABSENT, confidence="high")
+        mock_extract.return_value = MagicMock(
+            title="성수동 삼겹살 맛집",
+            excerpt="삼겹살이 맛있어요"
+        )
+        mock_gemini_bridge = MagicMock()
+        mock_gemini_bridge.preflight.return_value = MagicMock(ready=True)
+        # 초안 생성은 통과
+        mock_gemini_bridge.wait_for_result.return_value = GeminiResult(
+            request_id="r1",
+            post_key="testuser:12345",
+            navigation_version=1,
+            status=GeminiResultStatus.COMPLETED,
+            text="삼겹살이 참 맛있어 보여요",
+            error="",
+        )
+
+        state_mgr = StateManager()
+        plan = PostActionPlan(
+            process_like=False,
+            process_comment=True,
+            comment_sample_selected=True,
+            comment_sample_roll=0.1
+        )
+
+        processor = PostProcessor(
+            {**self.config, "auto_comment_submit_enabled": True},
+            like_enabled=False,
+            comment_enabled=True,
+            gemini_web_enabled=True,
+            gemini_extension_bridge=mock_gemini_bridge,
+            state_manager=state_mgr,
+            auto_comment_submit_enabled=True,
+        )
+
+        invalid_gate = MagicMock(valid=False, code="excessive_tilde", matched="~~~", reason="물결 과다")
+
+        with patch("app.processor.CommentInteractionService.wait_for_user_action", return_value=UserAction.AUTO_SUBMIT), \
+             patch("app.processor.CommentInteractionService.read_final_text", return_value="삼겹살이 참 맛있어 보여요~~~"), \
+             patch("app.processor.CommentInteractionService.release_submit_lock"), \
+             patch.object(FinalQualityGate, "validate_final_text", side_effect=[
+                 MagicMock(valid=True, code="ok", length=20),  # Step 1 body validation
+                 MagicMock(valid=True, code="ok", length=20),  # Step 2 suffix validation
+                 MagicMock(valid=True, code="ok", length=20),  # editor_injection validation
+                 invalid_gate,                                 # pre-submit validation (fails!)
+             ]), \
+             patch.object(FinalQualityGate, "auto_repair", return_value=(None, invalid_gate)):
+            res = processor.process(self.mock_page, self.post, action_plan=plan)
+
+        self.assertEqual(res.comment_result.status, CommentSubmitState.SKIPPED)
+        self.assertEqual(state_mgr.get_state().current_state, FeedState.SKIPPING)
+
 
 if __name__ == "__main__":
     unittest.main()
+
