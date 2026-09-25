@@ -447,6 +447,9 @@ class FinalQualityGate:
     )
 
     _LAUGHTER_RE: ClassVar[re.Pattern[str]] = re.compile(r"[ㅋㅎㅠㅜ]{1,}")
+    _JAMO_EMOTICON_RE: ClassVar[re.Pattern[str]] = re.compile(
+        r"(?<![가-힣ㄱ-ㅎㅏ-ㅣ])[ㄱ-ㅎㅏ-ㅣ]{2,}(?![가-힣ㄱ-ㅎㅏ-ㅣ])"
+    )
     _EMOJI_RE: ClassVar[re.Pattern[str]] = re.compile(
         r"(?:\u2764\ufe0f|"
         r"[\U0001F1E6-\U0001F1FF]{2}|"
@@ -827,10 +830,12 @@ class FinalQualityGate:
         repaired = text
 
         if gate_result.code == "laughter_or_emoticon":
-            # Remove all emoticon phrases
+            # Remove all emoticon phrases.
             for phrase in cls.EMOTICON_PHRASES:
                 repaired = repaired.replace(phrase, "")
-            # Remove laughter markers (ㅋ, ㅎ, ㅠ, ㅜ sequences)
+            # ㅎㅅㅎ, ㄷㄷ, ㅇㅇ 같은 standalone 자모 토큰은 일부 글자만 남기지 말고 통째로 제거한다.
+            repaired = cls._JAMO_EMOTICON_RE.sub("", repaired)
+            # Remove remaining laughter markers (ㅋ, ㅎ, ㅠ, ㅜ sequences).
             repaired = cls._LAUGHTER_RE.sub("", repaired)
             repaired = repaired.strip()
 

@@ -176,7 +176,9 @@ class LikeTransactionService:
         cls,
         page: Page,
         stop_event: Optional[threading.Event] = None,
-        post: Optional[FeedPost] = None
+        post: Optional[FeedPost] = None,
+        not_before_monotonic: Optional[float] = None,
+        skip_event: Optional[threading.Event] = None,
     ) -> LikeProcessResult:
         """
         2-Path Like Transaction 실행:
@@ -206,14 +208,44 @@ class LikeTransactionService:
             logger.log(f"  ⚠️ [LIKE] 리액션 상태 확신도 부족(type={rx.reaction_type.value}, conf={rx.confidence.value})으로 취소 방지를 위해 클릭을 건너뜁니다.", "WARNING")
             return LikeProcessResult(state_before=LikeState.UNKNOWN, action_taken=False, state_after=LikeState.UNKNOWN, error="low_confidence_precondition")
 
-        # 2. 요약 버튼 탐색 및 2.0s UI Settle
+        # 2. 요약 버튼 탐색 및 공감 목표시각까지 UI settle.
+        # not_before_monotonic이 있으면 "본문→공감" 설정을 실제 mutation 시각에 맞춘다.
         summary_btn = MobileDOMResolver.get_reaction_summary_button(page)
         if summary_btn and summary_btn.count() > 0:
             try:
                 summary_btn.scroll_into_view_if_needed(timeout=2500)
             except Exception:
                 pass
-            interruptible_wait(stop_event, 2.0)
+
+        if not_before_monotonic is None:
+            settle_seconds = 2.0
+            pacing_overrun = 0.0
+        else:
+            now_mono = time.monotonic()
+            remaining = not_before_monotonic - now_mono
+            settle_seconds = max(0.20, remaining)
+            pacing_overrun = max(0.0, -remaining)
+            logger.log(
+                f"[PACING][PRE_LIKE_TARGET] remaining={max(0.0, remaining):.2f}s "
+                f"settle={settle_seconds:.2f}s overrun={pacing_overrun:.2f}s"
+            )
+
+        interruptible_wait(stop_event, settle_seconds, skip_event=skip_event)
+        if skip_event and skip_event.is_set():
+            logger.log("  ⏭️ [USER] 본문→공감 대기 중 다음 글 스킵 요청 감지.")
+            return LikeProcessResult(
+                state_before=LikeState.NOT_LIKED,
+                action_taken=False,
+                state_after=LikeState.NOT_LIKED,
+                error="user_skipped_pre_like",
+            )
+        if stop_event and stop_event.is_set():
+            return LikeProcessResult(
+                state_before=LikeState.NOT_LIKED,
+                action_taken=False,
+                state_after=LikeState.NOT_LIKED,
+                error="stopped_pre_like",
+            )
 
         if post:
             TargetPostGuard.verify(page, post)

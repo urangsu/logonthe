@@ -112,7 +112,17 @@ class PacingService:
     def wait_page_settle(self) -> PacingResult:
         return self._wait_named(PacingKind.PAGE_SETTLE, "page_settle_min", "page_settle_max", 1.0, 2.0)
 
+    def plan_pre_like_delay(self) -> float:
+        """본문 확인 시점부터 실제 공감 mutation까지의 목표 지연시간을 1회 샘플링한다."""
+        if not self.config.get("pacing_enabled", True):
+            return 0.0
+        low, high = self._range("pre_like_delay_min", "pre_like_delay_max", 5.0, 10.0)
+        if high <= 0:
+            return 0.0
+        return round(random.uniform(low, high), 2)
+
     def wait_pre_like(self) -> PacingResult:
+        # 하위 호환용. 신규 processor 경로는 plan_pre_like_delay()로 절대시각을 계획한다.
         return self._wait_named(PacingKind.PRE_LIKE, "pre_like_delay_min", "pre_like_delay_max", 5.0, 10.0)
 
     def wait_post_like(self) -> PacingResult:

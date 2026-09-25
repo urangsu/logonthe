@@ -541,6 +541,24 @@ class PostProcessor:
         self.current_stage = "target_guard"
         TargetPostGuard.verify(detail_page, post)
 
+        # "본문→공감"은 추가 sleep이 아니라 실제 공감 mutation 목표시각으로 해석한다.
+        pre_like_anchor_monotonic = time.monotonic()
+        pre_like_target_delay = (
+            self.pacing.plan_pre_like_delay()
+            if effective_like and self.pacing and hasattr(self.pacing, "plan_pre_like_delay")
+            else 0.0
+        )
+        pre_like_deadline = (
+            pre_like_anchor_monotonic + pre_like_target_delay
+            if effective_like and pre_like_target_delay > 0
+            else None
+        )
+        if effective_like:
+            logger.log(
+                f"[PACING][PRE_LIKE_PLAN] targetDelay={pre_like_target_delay:.2f}s "
+                "anchor=post_body_ready"
+            )
+
         # 추천/관심주제는 실제 본문을 한 번 더 확인한 뒤 어떤 상호작용도 수행한다.
         self.current_stage = "context_extract"
         detail_context = None
@@ -650,23 +668,6 @@ class PostProcessor:
 
             # 2. 공감(하트) 처리 (Re-ordered Like Pipeline: State -> Popularity Guard -> Transaction)
             if effective_like:
-                # Keep the configured human pacing before the first mutating
-                # action as well as between actions.  This is intentionally
-                # cancellable and never bypasses the state/confidence checks below.
-                if self.pacing:
-                    p_res = self.pacing.wait_pre_like()
-                    if p_res.stopped or (self.stop_event and self.stop_event.is_set()):
-                        _cancel_early_command("pre_like_pacing_stopped")
-                        raise StopRequestedException("작업 중지 요청됨")
-                    if p_res.skipped or (self.skip_event and self.skip_event.is_set()):
-                        logger.log("  ⏭️ [USER] 공감 대기 중 다음 글로 건너뛰기 요청됨 (스킵).")
-                        _cancel_early_command("pre_like_pacing_skipped")
-                        result.like_result.error = "user_skipped"
-                        result.comment_result.status = CommentSubmitState.SKIPPED
-                        result.comment_result.error = "user_skipped"
-                        if self.state_mgr:
-                            self.state_mgr.update(new_state=FeedState.SKIPPING, inc_skip=True)
-                        return result
                 if self.state_mgr:
                     self.state_mgr.update(new_state=FeedState.CHECKING_LIKE, message="공감 상태 및 조건 확인 중...")
 
@@ -712,13 +713,30 @@ class PostProcessor:
                         self.current_stage = "like_commit"
                         if hasattr(self, "run_control") and self.run_control:
                             self.run_control.checkpoint("before_like_click")
-                        tx_res = LikeTransactionService.execute_like_transaction(detail_page, self.stop_event, post=post)
+                        tx_res = LikeTransactionService.execute_like_transaction(
+                            detail_page,
+                            self.stop_event,
+                            post=post,
+                            not_before_monotonic=pre_like_deadline,
+                            skip_event=self.skip_event,
+                        )
                         if hasattr(self, "run_control") and self.run_control:
                             self.run_control.checkpoint("after_like_click")
                         tx_res.like_count = elig_like_cnt
                         tx_res.daily_visitors = elig_daily_vis
                         result.like_result = tx_res
                         self.current_result = result
+
+                        if tx_res.error == "user_skipped_pre_like" or (self.skip_event and self.skip_event.is_set()):
+                            _cancel_early_command("pre_like_pacing_skipped")
+                            result.comment_result.status = CommentSubmitState.SKIPPED
+                            result.comment_result.error = "user_skipped"
+                            if self.state_mgr:
+                                self.state_mgr.update(new_state=FeedState.SKIPPING, inc_skip=True)
+                            return result
+                        if tx_res.error == "stopped_pre_like" or (self.stop_event and self.stop_event.is_set()):
+                            _cancel_early_command("pre_like_pacing_stopped")
+                            raise StopRequestedException("작업 중지 요청됨")
 
                         if tx_res.action_taken and tx_res.state_after == LikeState.LIKED:
                             if self.state_mgr:
@@ -1671,8 +1689,15 @@ class PostProcessor:
                                         from services.comments.community_rhythm import ResponseContaminationGate
                                         contam_sub_gate = ResponseContaminationGate.validate(submitted_cand)
                                         if contam_sub_gate.is_contaminated:
-                                            logger.log(f"  ❌ [COMMENT] 등록 직전 댓글 UI 오염 통과 실패: [{contam_sub_gate.code}] {contam_sub_gate.reason} - 등록 보류", "WARNING")
+                                            logger.log(f"  ❌ [COMMENT] 등록 직전 댓글 UI 오염 통과 실패: [{contam_sub_gate.code}] {contam_sub_gate.reason}", "WARNING")
                                             CommentInteractionService.release_submit_lock(detail_page, source=origin.value)
+                                            if origin == SubmitOrigin.AUTO_TIMER:
+                                                logger.log(f"[COMMENT][AUTO_QUALITY_SKIP] reason={contam_sub_gate.code} stage=pre_submit")
+                                                cmt_res.status = CommentSubmitState.SKIPPED
+                                                cmt_res.error = contam_sub_gate.code
+                                                if self.state_mgr:
+                                                    self.state_mgr.update(new_state=FeedState.SKIPPING, inc_skip=True)
+                                                break
                                             auto_submit_timeout = None
                                             msg = f"댓글 UI 오염({contam_sub_gate.code}) / 수정 후 Enter=등록 / Esc=건너뛰기"
                                             if self.state_mgr:
@@ -1686,8 +1711,15 @@ class PostProcessor:
                                             excerpt=gen_ctx.excerpt,
                                         )
                                         if not final_gate.valid:
-                                            logger.log(f"  ❌ [COMMENT] 등록 직전 댓글 품질 게이트 통과 실패: [{final_gate.code}] {final_gate.reason} (매칭: {final_gate.matched}) - 등록 보류", "WARNING")
+                                            logger.log(f"  ❌ [COMMENT] 등록 직전 댓글 품질 게이트 통과 실패: [{final_gate.code}] {final_gate.reason} (매칭: {final_gate.matched})", "WARNING")
                                             CommentInteractionService.release_submit_lock(detail_page, source=origin.value)
+                                            if origin == SubmitOrigin.AUTO_TIMER:
+                                                logger.log(f"[COMMENT][AUTO_QUALITY_SKIP] reason={final_gate.code} stage=pre_submit")
+                                                cmt_res.status = CommentSubmitState.SKIPPED
+                                                cmt_res.error = final_gate.code
+                                                if self.state_mgr:
+                                                    self.state_mgr.update(new_state=FeedState.SKIPPING, inc_skip=True)
+                                                break
                                             auto_submit_timeout = None
                                             msg = f"댓글 품질 요건 미충족({final_gate.code}) / 수정 후 Enter=등록 / Esc=건너뛰기"
                                             if self.state_mgr:
@@ -1738,6 +1770,9 @@ class PostProcessor:
                                         preset=preset,
                                         click=(origin != SubmitOrigin.NATIVE_CLICK),
                                         origin=origin,
+                                        style_profile=getattr(gen_ctx, "style_profile", None),
+                                        style_policy=getattr(gen_ctx, "style_policy", None),
+                                        excerpt=gen_ctx.excerpt,
                                     )
                                     if hasattr(self, "run_control") and self.run_control:
                                         self.run_control.checkpoint("after_comment_submit")
@@ -1775,11 +1810,22 @@ class PostProcessor:
                                         break
                                     elif status in (CommentSubmitState.REVIEW_REQUIRED, CommentSubmitState.PRECLICK_BLOCKED):
                                         CommentInteractionService.release_submit_lock(detail_page, source=origin.value)
+                                        outcome_reason = getattr(outcome, "reason", str(status))
+                                        if (
+                                            origin == SubmitOrigin.AUTO_TIMER
+                                            and outcome_reason not in ("user_edit", "text_mutation", "ime_composing")
+                                        ):
+                                            logger.log(f"[COMMENT][AUTO_QUALITY_SKIP] reason={outcome_reason} stage=submit_and_verify")
+                                            cmt_res.status = CommentSubmitState.SKIPPED
+                                            cmt_res.error = outcome_reason
+                                            if self.state_mgr:
+                                                self.state_mgr.update(new_state=FeedState.SKIPPING, inc_skip=True)
+                                            break
                                         auto_submit_timeout = None
                                         msg = "댓글은 등록되지 않았습니다 / 수정 후 Enter=등록 / Esc=건너뛰기"
                                         if self.state_mgr:
                                             self.state_mgr.update(new_state=FeedState.WAITING_USER, message=msg)
-                                        logger.log(f"[COMMENT][MANUAL_SUBMIT_PRECHECK_FAILED] reason={getattr(outcome, 'reason', status)} retryable=true")
+                                        logger.log(f"[COMMENT][MANUAL_SUBMIT_PRECHECK_FAILED] reason={outcome_reason} retryable=true")
                                         continue
                                     elif status == CommentSubmitState.SUBMISSION_UNKNOWN:
                                         if self.state_mgr:

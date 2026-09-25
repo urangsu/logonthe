@@ -1,7 +1,7 @@
 import time
 import uuid
 import threading
-from typing import Optional, Tuple
+from typing import Any, Optional, Tuple
 from playwright.sync_api import Page, Locator
 from app.models import (
     LikeState,
@@ -767,6 +767,9 @@ class CommentInteractionService:
         is_auto_submit: Optional[bool] = None,
         origin: Optional[SubmitOrigin] = None,
         post_key: str = "",
+        style_profile: Optional[Any] = None,
+        style_policy: Optional[Any] = None,
+        excerpt: Optional[str] = None,
     ) -> CommentSubmitOutcome:
         """
         댓글 등록 버튼 클릭 및 Fail-closed 검증 (에디터 클리어 및 서버 목록 내 댓글 등장 확인)
@@ -788,7 +791,14 @@ class CommentInteractionService:
         if origin != SubmitOrigin.NATIVE_CLICK:
             from services.comments.community_rhythm import FinalQualityGate
             sub_source = "user_edit" if origin == SubmitOrigin.USER_ENTER else "user_submission"
-            gate_res = FinalQualityGate.validate_final_text(final_text, preset=preset, source=sub_source)
+            gate_res = FinalQualityGate.validate_final_text(
+                final_text,
+                preset=preset,
+                source=sub_source,
+                style_profile=style_profile,
+                style_policy=style_policy,
+                excerpt=excerpt,
+            )
             if not gate_res.valid:
                 logger.log(f"  ❌ [COMMENT] 등록 직전 품질 게이트 실패로 제출을 중단합니다: [{gate_res.code}] {gate_res.reason} (매칭: {gate_res.matched})", "ERROR")
                 retryable = (origin in (SubmitOrigin.USER_ENTER, SubmitOrigin.AUTO_TIMER))
@@ -850,7 +860,14 @@ class CommentInteractionService:
                             logger.log("  ❌ [COMMENT][MANUAL_SUBMIT_PRECHECK_FAILED] reason=empty_text retryable=true", "ERROR")
                             return CommentSubmitOutcome(state=CommentSubmitState.PRECLICK_BLOCKED, reason="empty_text", click_dispatched=False, retryable_same_post=True)
                         if cur_norm and cur_norm != expected_norm:
-                            gate_res_cur = FinalQualityGate.validate_final_text(cur_text, preset=preset, source="user_edit")
+                            gate_res_cur = FinalQualityGate.validate_final_text(
+                                cur_text,
+                                preset=preset,
+                                source="user_edit",
+                                style_profile=style_profile,
+                                style_policy=style_policy,
+                                excerpt=excerpt,
+                            )
                             if not gate_res_cur.valid:
                                 logger.log(f"  ❌ [COMMENT][MANUAL_SUBMIT_PRECHECK_FAILED] reason={gate_res_cur.code} retryable=true", "WARNING")
                                 return CommentSubmitOutcome(state=CommentSubmitState.PRECLICK_BLOCKED, reason=gate_res_cur.code, click_dispatched=False, retryable_same_post=True)
