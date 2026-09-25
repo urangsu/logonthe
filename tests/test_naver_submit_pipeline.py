@@ -281,5 +281,38 @@ class TestStateManagerGeminiPhase(unittest.TestCase):
         self.assertEqual(snap.gemini_failure_count, 0)
 
 
+# ---------------------------------------------------------------------------
+# §17: CommentEditorAdapter stop_flag / interruptible_wait 반응성 검증
+# ---------------------------------------------------------------------------
+
+class TestEditorAdapterInterruptibleWait(unittest.TestCase):
+    def test_stop_flag_aborts_polling_immediately(self):
+        import threading
+        page = MagicMock()
+        frame = MagicMock()
+        editor = MagicMock()
+        editor.inner_text.return_value = "mismatched"
+
+        stop_event = threading.Event()
+        stop_event.set()  # Already set to stop
+
+        with patch("naver.editor_adapter.MobileDOMResolver.get_comment_editor_context",
+                   return_value={"editor": editor, "frame": frame, "frame_name": "main", "selector": "#ed", "frame_url": ""}):
+            result = CommentEditorAdapter._verify_and_confirm(
+                editor, "expected text", is_textarea=False, frame=frame, page=page, stop_flag=stop_event
+            )
+
+        self.assertFalse(result)
+
+    def test_set_text_plumbs_stop_flag(self):
+        import threading
+        page = MagicMock()
+        stop_event = threading.Event()
+        with patch("naver.editor_adapter.MobileDOMResolver.get_comment_editor_context", return_value=None):
+            result = CommentEditorAdapter.set_text(page, "댓글", stop_flag=stop_event)
+        self.assertFalse(result)
+
+
 if __name__ == "__main__":
     unittest.main()
+

@@ -1572,7 +1572,10 @@ class PostProcessor:
 
                         # 에디터에 주입 및 Read-back 검증
                         self.current_stage = "comment_injection"
-                        set_ok = CommentEditorAdapter.set_text(detail_page, draft_text)
+                        try:
+                            set_ok = CommentEditorAdapter.set_text(detail_page, draft_text, stop_flag=self.stop_event)
+                        except TypeError:
+                            set_ok = CommentEditorAdapter.set_text(detail_page, draft_text)
                         if not set_ok:
                             logger.log("  ❌ [COMMENT] 에디터 초안 주입 및 Read-back 검증 실패", "ERROR")
                             result.comment_result = CommentProcessResult(status=CommentSubmitState.FAILED, error="editor_set_text_failed")

@@ -435,7 +435,7 @@ class TestIntegratedPipelineE2E(unittest.TestCase):
                 return loc
             mock_page.locator.side_effect = page_locator
 
-            def mock_set_text(page, text):
+            def mock_set_text(page, text, *args, **kwargs):
                 editor_readbacks.append(text)
                 return True
 

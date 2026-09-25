@@ -19,4 +19,8 @@ if ! "$PYTHON_BIN" -c 'import customtkinter, playwright' >/dev/null 2>&1; then
   exit 1
 fi
 
-exec "$PYTHON_BIN" main.py
+if command -v caffeinate >/dev/null 2>&1; then
+  exec caffeinate -di "$PYTHON_BIN" main.py
+else
+  exec "$PYTHON_BIN" main.py
+fi

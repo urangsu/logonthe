@@ -177,6 +177,16 @@ class CommentEditorAdapter:
         """
         import time as _time
 
+        def _wait_step(seconds: float):
+            if stop_flag:
+                try:
+                    from browser.session import interruptible_wait
+                    interruptible_wait(stop_flag, seconds)
+                    return
+                except Exception:
+                    pass
+            _time.sleep(seconds)
+
         norm_expected = normalize_naver_comment_text(clean_t)
 
         # --- readback stability polling ---
@@ -226,7 +236,7 @@ class CommentEditorAdapter:
             if elapsed >= POLL_MAX:
                 break
 
-            _time.sleep(POLL_INTERVAL)
+            _wait_step(POLL_INTERVAL)
 
         matched = (norm_actual == norm_expected)
         cls._readback_diag(clean_t, raw_read, norm_expected, norm_actual, matched)
@@ -247,6 +257,9 @@ class CommentEditorAdapter:
         BTN_POLL_MAX = 0.40
         btn_start = _time.monotonic()
         while True:
+            if stop_flag and getattr(stop_flag, "is_set", lambda: False)():
+                break
+
             submit_context = MobileDOMResolver.get_comment_submit_context(page, frame)
             if not submit_context:
                 logger.log("[NAVER][COMMENT_SUBMIT_NOT_FOUND]", "ERROR")
@@ -268,13 +281,13 @@ class CommentEditorAdapter:
                 logger.log("[NAVER][EDITOR_INPUT_FAIL] stage=internal_state", "ERROR")
                 return False
 
-            _time.sleep(BTN_POLL_INTERVAL)
+            _wait_step(BTN_POLL_INTERVAL)
 
         logger.log("[NAVER][EDITOR_INTERNAL_READY] submitEnabled=true")
         return True
 
     @classmethod
-    def set_text(cls, page: Page, text: str) -> bool:
+    def set_text(cls, page: Page, text: str, stop_flag=None) -> bool:
         """
         텍스트를 에디터에 주입하고 change/input 이벤트를 디스패치한 뒤 정상 주입 여부를 검증.
 
@@ -334,7 +347,7 @@ class CommentEditorAdapter:
                     logger.log("[NAVER][EDITOR_FOCUS_OK]")
                     editor.fill(clean_t)
                     logger.log(f"[NAVER][EDITOR_FILL_OK] chars={len(clean_t)}")
-                    if cls._verify_and_confirm(editor, clean_t, is_textarea, frame, page):
+                    if cls._verify_and_confirm(editor, clean_t, is_textarea, frame, page, stop_flag=stop_flag):
                         return True
                 except Exception as e:
                     logger.log(f"ℹ️ [NAVER][EDITOR_PATH_A_NOTE] focus/fill 시도 중: {e}")
@@ -357,7 +370,7 @@ class CommentEditorAdapter:
                             logger.log("[NAVER][EDITOR_FOCUS_OK]")
                             editor.fill(clean_t)
                             logger.log(f"[NAVER][EDITOR_FILL_OK] chars={len(clean_t)}")
-                            if cls._verify_and_confirm(editor, clean_t, is_textarea, frame, page):
+                            if cls._verify_and_confirm(editor, clean_t, is_textarea, frame, page, stop_flag=stop_flag):
                                 return True
                         except Exception as e:
                             logger.log(f"ℹ️ [NAVER][EDITOR_PATH_B_NOTE] placeholder click/fill 시도 중: {e}")
@@ -390,7 +403,7 @@ class CommentEditorAdapter:
                             }));
                         }
                     }""", clean_t)
-                    if cls._verify_and_confirm(editor, clean_t, is_textarea, frame, page):
+                    if cls._verify_and_confirm(editor, clean_t, is_textarea, frame, page, stop_flag=stop_flag):
                         return True
                 except Exception as e:
                     logger.log(f"ℹ️ [NAVER][EDITOR_PATH_C_NOTE] execCommand 시도 중: {e}")
