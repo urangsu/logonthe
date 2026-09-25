@@ -93,41 +93,7 @@ class HistoryStore:
     def is_comment_submitted(self, key: str) -> bool:
         return self.get_comment_status(key) == CommentSubmitState.SUBMITTED.value
 
-    def has_suffix_applied_for_blog(self, blog_id: Optional[str], suffix: str = "") -> bool:
-        """같은 블로그에 서버 확인된 댓글로 꼬리말을 이미 보냈는지 확인한다.
-
-        신규 기록은 comment.suffix_applied 플래그를 우선 사용하고,
-        기존 history와의 호환을 위해 현재 suffix 문자열이 과거 submitted_text에
-        실제 포함된 경우도 1회 사용으로 간주한다. 미확정/실패 댓글은 제외한다.
-        """
-        blog_key = (blog_id or "").strip()
-        if not blog_key:
-            return False
-
-        suffix_text = (suffix or "").strip()
-        for item in self.posts.values():
-            if str(item.get("blog_id") or "").strip() != blog_key:
-                continue
-            comment = item.get("comment", {})
-            if comment.get("status") != CommentSubmitState.SUBMITTED.value or comment.get("unconfirmed"):
-                continue
-            if comment.get("suffix_applied") is True:
-                return True
-
-            legacy_text = str(comment.get("submitted_text") or comment.get("draft") or "")
-            if suffix_text and suffix_text in legacy_text:
-                return True
-
-        return False
-
-    def record_pre_submit(
-        self,
-        post_key: str,
-        text: str,
-        url: Optional[str] = None,
-        blog_id: Optional[str] = None,
-        suffix_applied: bool = False,
-    ):
+    def record_pre_submit(self, post_key: str, text: str, url: Optional[str] = None):
         """클릭 직전 프로세스 비정상 종료를 대비한 사전 미확정 상태 영속 기록 (실패 시 예외 발생)"""
         existing = self.posts.get(post_key, {})
         comment_data = existing.get("comment", {})
@@ -135,9 +101,6 @@ class HistoryStore:
         # 이미 제출되었거나 이미 미확정 상태면 덮어쓰지 않음
         if comment_data.get("status") in [CommentSubmitState.SUBMITTED.value, CommentSubmitState.SUBMISSION_UNKNOWN.value]:
             return
-
-        if blog_id:
-            existing["blog_id"] = blog_id
 
         if url:
             existing["url"] = url
@@ -150,7 +113,6 @@ class HistoryStore:
             "submitted_text": text,
             "attempted_at": datetime.now().isoformat(),
             "unconfirmed": True,
-            "suffix_applied": bool(comment_data.get("suffix_applied") or suffix_applied),
         })
         existing["comment"] = comment_data
         existing["updated_at"] = datetime.now().isoformat()
@@ -256,15 +218,11 @@ class HistoryStore:
             final_comment_status = CommentSubmitState.SUBMITTED.value
             final_submitted_text = existing_comment.get("submitted_text") or comment_result.submitted_text
 
-        final_suffix_applied = bool(
-            existing_comment.get("suffix_applied") or getattr(comment_result, "suffix_applied", False)
-        )
         comment_record = {
             "status": final_comment_status,
             "draft": comment_result.draft_text or existing_comment.get("draft"),
             "submitted_text": final_submitted_text,
-            "error": comment_result.error or existing_comment.get("error"),
-            "suffix_applied": final_suffix_applied,
+            "error": comment_result.error or existing_comment.get("error")
         }
 
         self.posts[post.key] = {
@@ -317,15 +275,11 @@ class HistoryStore:
             final_comment_status = CommentSubmitState.SUBMISSION_UNKNOWN.value
             final_submitted_text = existing_comment.get("submitted_text") or result.comment_result.submitted_text
 
-        final_suffix_applied = bool(
-            existing_comment.get("suffix_applied") or getattr(result.comment_result, "suffix_applied", False)
-        )
         comment_record = {
             "status": final_comment_status,
             "draft": result.comment_result.draft_text or existing_comment.get("draft"),
             "submitted_text": final_submitted_text,
-            "error": result.comment_result.error or existing_comment.get("error"),
-            "suffix_applied": final_suffix_applied,
+            "error": result.comment_result.error or existing_comment.get("error")
         }
 
         record = {

@@ -276,6 +276,7 @@ class PostProcessor:
         self.current_post_key: Optional[str] = None
         self.current_request_id: Optional[str] = None
         self.current_result: Optional[PostProcessResult] = None
+        self._neighbor_suffix_seen_blogs: set[str] = set()
 
     def _prepare_comment_generation_context(
         self,
@@ -287,26 +288,19 @@ class PostProcessor:
         preset = preset or self.config.get("comment_style_preset", "community")
         suffix = DraftService.resolve_suffix(post.source, self.config)
 
-        # 서로이웃 피드에서는 같은 블로그에 꼬리말을 서버 확인 기준으로 1회만 보낸다.
+        # 서로이웃 피드에서는 이번 실행(run) 동안 같은 블로그에 꼬리말을 1회만 보낸다.
+        # 영속 저장하지 않으며 Processor 인스턴스가 끝나면 자동 초기화된다.
         if (
             suffix
             and post.source == FeedSourceType.NEIGHBOR
             and post.blog_id
-            and self.history_store
-            and hasattr(self.history_store, "has_suffix_applied_for_blog")
+            and post.blog_id in self._neighbor_suffix_seen_blogs
         ):
-            try:
-                if self.history_store.has_suffix_applied_for_blog(post.blog_id, suffix):
-                    logger.log(
-                        f"[COMMENT][SUFFIX_SUPPRESSED] blog={post.blog_id} "
-                        "reason=already_applied_for_neighbor"
-                    )
-                    suffix = ""
-            except Exception as exc:
-                logger.log(
-                    f"⚠️ [COMMENT][SUFFIX_HISTORY_CHECK_FAILED] blog={post.blog_id} error={exc}",
-                    "WARNING",
-                )
+            logger.log(
+                f"[COMMENT][SUFFIX_SUPPRESSED] blog={post.blog_id} "
+                "reason=already_applied_in_current_run"
+            )
+            suffix = ""
 
         from services.food_comment_focus import FoodCommentFocus
         food_focus_info = FoodCommentFocus.analyze(post.title or "", post.excerpt or "")
@@ -1602,16 +1596,9 @@ class PostProcessor:
                             CommentInteractionService.install_keyboard_listener(detail_page, post_key=post.key)
                             CommentEditorAdapter.focus(detail_page)
 
-                            suffix_norm = normalize_naver_comment_text(suffix)
-                            draft_norm = normalize_naver_comment_text(draft_text)
-                            suffix_applied = bool(
-                                suffix_norm
-                                and (draft_norm == suffix_norm or draft_norm.endswith("\n" + suffix_norm))
-                            )
                             cmt_res = CommentProcessResult(
                                 status=CommentSubmitState.DRAFTED,
                                 draft_text=draft_text,
-                                suffix_applied=suffix_applied,
                             )
 
                             auto_submit_timeout = None
@@ -1712,7 +1699,7 @@ class PostProcessor:
                                     cmt_res.submitted_text = submitted_cand
                                     submitted_norm = normalize_naver_comment_text(submitted_cand)
                                     suffix_norm = normalize_naver_comment_text(suffix)
-                                    cmt_res.suffix_applied = bool(
+                                    suffix_applied_for_submission = bool(
                                         suffix_norm
                                         and (
                                             submitted_norm == suffix_norm
@@ -1726,13 +1713,7 @@ class PostProcessor:
                                     if self.history_store and hasattr(self.history_store, "record_pre_submit"):
                                         if origin != SubmitOrigin.NATIVE_CLICK:
                                             try:
-                                                self.history_store.record_pre_submit(
-                                                    post.key,
-                                                    cmt_res.submitted_text,
-                                                    url=post.url,
-                                                    blog_id=post.blog_id,
-                                                    suffix_applied=cmt_res.suffix_applied,
-                                                )
+                                                self.history_store.record_pre_submit(post.key, cmt_res.submitted_text, url=post.url)
                                             except Exception as e:
                                                 logger.log(f"❌ [HISTORY] pre_submit 영속 저장 실패 -> 중복 등록 방지를 위해 제출을 중단합니다: {e}", "ERROR")
                                                 cmt_res.status = CommentSubmitState.FAILED
@@ -1740,13 +1721,7 @@ class PostProcessor:
                                                 break
                                         else:
                                             try:
-                                                self.history_store.record_pre_submit(
-                                                    post.key,
-                                                    cmt_res.submitted_text,
-                                                    url=post.url,
-                                                    blog_id=post.blog_id,
-                                                    suffix_applied=cmt_res.suffix_applied,
-                                                )
+                                                self.history_store.record_pre_submit(post.key, cmt_res.submitted_text, url=post.url)
                                             except Exception as e:
                                                 logger.log(f"⚠️ [HISTORY] pre_submit 기록 실패 (네이티브 클릭 후, 서버 검증 계속 진행): {e}", "WARNING")
 
@@ -1767,6 +1742,16 @@ class PostProcessor:
                                     cmt_res.status = status
 
                                     if status == CommentSubmitState.SUBMITTED:
+                                        if (
+                                            post.source == FeedSourceType.NEIGHBOR
+                                            and post.blog_id
+                                            and suffix_applied_for_submission
+                                        ):
+                                            self._neighbor_suffix_seen_blogs.add(post.blog_id)
+                                            logger.log(
+                                                f"[COMMENT][SUFFIX_MARKED] blog={post.blog_id} "
+                                                "scope=current_run"
+                                            )
                                         # [사용자 피드백 기록] 초안 대비 사용자 최종 수정 및 등록 댓글을 학습용 코퍼스에 저장
                                         UserLearningService.record_submission(
                                             post=post,
