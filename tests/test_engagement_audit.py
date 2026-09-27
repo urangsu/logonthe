@@ -177,7 +177,63 @@ class TestEngagementAuditV13(unittest.TestCase):
             self.assertEqual(rows[1]["블로그ID"], "b2")
             self.assertEqual(rows[1]["반응 구분"], "무반응")
 
+    def test_master_csv_classification_3_or_more_reactions(self):
+        """댓글 또는 공감이 3개 이상인 이웃은 '우수 반응(3회이상)', 1~2개는 '반응 확인'으로 분류되는지 검증"""
+        page_mock = MagicMock()
+        buddies = {
+            "buddy_high_likes": BuddyInfo("buddy_high_likes", "공감왕", "B1", "그룹A", "서로이웃", "26.08.26.", "26.01.01."),
+            "buddy_high_comments": BuddyInfo("buddy_high_comments", "댓글왕", "B2", "그룹A", "서로이웃", "26.08.25.", "26.01.01."),
+            "buddy_normal": BuddyInfo("buddy_normal", "일반반응", "B3", "그룹A", "이웃", "26.08.20.", "26.01.01."),
+            "buddy_unresp": BuddyInfo("buddy_unresp", "무반응", "B4", "그룹B", "이웃", "26.07.01.", "26.01.01.")
+        }
+        b_result = BuddyCollectionResult(
+            buddies=buddies,
+            state="complete",
+            expected_total=4,
+            collected_total=4,
+            pages_visited=1,
+            page_fingerprints=["p1"]
+        )
+
+        with patch("services.buddy_list_collector.BuddyListCollector.collect_all_buddies", return_value=b_result), \
+             patch("services.my_blog_recent_posts.MyBlogRecentPostService.fetch_recent_posts") as mock_posts, \
+             patch("services.reaction_participant_collector.ReactionParticipantCollector.collect") as mock_likers, \
+             patch("services.comment_participant_collector.CommentParticipantCollector.collect") as mock_commenters:
+
+            mock_posts.return_value = [
+                {"log_no": f"10{i}", "url": f"https://m.blog.naver.com/me/10{i}", "title": f"글{i}"}
+                for i in range(1, 4)
+            ]
+
+            # 3 posts:
+            # buddy_high_likes likes 3 posts, 0 comments
+            # buddy_high_comments likes 0 posts, comments on 3 posts
+            # buddy_normal likes 2 posts, 0 comments
+            mock_likers.side_effect = [
+                ([{"blog_id": "buddy_high_likes", "nickname": "공감왕"}, {"blog_id": "buddy_normal", "nickname": "일반반응"}], "complete", 2),
+                ([{"blog_id": "buddy_high_likes", "nickname": "공감왕"}, {"blog_id": "buddy_normal", "nickname": "일반반응"}], "complete", 2),
+                ([{"blog_id": "buddy_high_likes", "nickname": "공감왕"}], "complete", 1),
+            ]
+            mock_commenters.side_effect = [
+                ([{"blog_id": "buddy_high_comments", "nickname": "댓글왕", "comment_entry_count": 1}], "complete", 1),
+                ([{"blog_id": "buddy_high_comments", "nickname": "댓글왕", "comment_entry_count": 1}], "complete", 1),
+                ([{"blog_id": "buddy_high_comments", "nickname": "댓글왕", "comment_entry_count": 1}], "complete", 1),
+            ]
+
+            with tempfile.TemporaryDirectory() as output_dir:
+                audit_res = EngagementAuditService.run_audit(page=page_mock, my_blog_id="me", recent_post_count=3, output_dir=output_dir)
+
+            self.assertTrue(audit_res["success"])
+            rep = audit_res["report"]
+            self.assertEqual(rep["active_buddies_count"], 2)
+
+            master_dict = {m["blog_id"]: m for m in rep["master_buddies"]}
+            self.assertEqual(master_dict["buddy_high_likes"]["reaction_category"], "우수 반응(3회이상)")
+            self.assertEqual(master_dict["buddy_high_comments"]["reaction_category"], "우수 반응(3회이상)")
+            self.assertEqual(master_dict["buddy_normal"]["reaction_category"], "반응 확인")
+            self.assertEqual(master_dict["buddy_unresp"]["reaction_category"], "무반응")
 
 
 if __name__ == "__main__":
     unittest.main()
+

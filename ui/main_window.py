@@ -1121,7 +1121,7 @@ class MainWindow(ctk.CTk):
                         f"🎉 [내 블로그 이웃 전수 및 무반응 감사 완료 (상태: {audit_st})]\n\n"
                         f"• 분석 대상 최근 글: {rep['recent_post_count']}개\n"
                         f"• 👥 전체 등록 이웃: {rep.get('total_buddies_count', 0)}명\n"
-                        f"• ❤️ 최근 글 반응 이웃: {rep.get('reacted_buddies_count', 0)}명\n"
+                        f"• ❤️ 최근 글 반응 이웃: {rep.get('reacted_buddies_count', 0)}명 (3회 이상 우수: {rep.get('active_buddies_count', 0)}명)\n"
                         f"   (공감+댓글: {rep.get('both_like_and_comment_count', 0)}명, 공감만: {rep.get('liked_only_count', 0)}명, 댓글만: {rep.get('commented_only_count', 0)}명)\n"
                         f"• 🚫 최근 글 무반응 이웃: {rep.get('unresponsive_buddies_count', 0)}명\n"
                         f"   (추가일과 이후 2일 유예: {rep.get('grace_period_buddies_count', 0)}명 / 확인된 무반응: {rep.get('real_unresponsive_count', 0)}명)\n\n"

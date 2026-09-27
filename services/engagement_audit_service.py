@@ -186,7 +186,11 @@ class EngagementAuditService:
 
             if engaged > 0:
                 row["no_reaction"] = False
-                row["reaction_category"] = "반응 확인"
+                c_entry_cnt = row.get("comment_entry_count", 0)
+                if l_cnt >= 3 or c_cnt >= 3 or c_entry_cnt >= 3:
+                    row["reaction_category"] = "우수 반응(3회이상)"
+                else:
+                    row["reaction_category"] = "반응 확인"
             elif all_post_scans_complete:
                 row["no_reaction"] = True
                 row["reaction_category"] = "무반응"
@@ -214,6 +218,7 @@ class EngagementAuditService:
         grace_count = sum(1 for r in unresponsive_rows if r["is_recent_buddy"])
         real_unresponsive_count = unresponsive_count - grace_count
 
+        active_buddies_count = sum(1 for r in master_rows if r.get("reaction_category") == "우수 반응(3회이상)")
         audit_state: Literal["complete", "partial", "failed"] = "complete" if all_post_scans_complete else "partial"
 
         report = {
@@ -224,6 +229,7 @@ class EngagementAuditService:
             "total_buddies_count": total_buddies,
             "expected_buddies_count": buddy_result.expected_total,
             "reacted_buddies_count": reacted_buddies_count,
+            "active_buddies_count": active_buddies_count,
             "unresponsive_buddies_count": unresponsive_count,
             "grace_period_buddies_count": grace_count,
             "real_unresponsive_count": real_unresponsive_count,
@@ -240,7 +246,7 @@ class EngagementAuditService:
         logger.log(f"==================================================")
         logger.log(f"🎉 [AUDIT] 전체 이웃 {total_buddies}명 기준 무반응 감사 완료! (상태: {audit_state.upper()})")
         logger.log(f"   👥 전체 등록 이웃 (Master): {total_buddies}명")
-        logger.log(f"   ❤️ 최근 글에 반응한 이웃: {reacted_buddies_count}명 (공감+댓글 모두: {both_count}명, 공감만: {liked_only_count}명, 댓글만: {commented_only_count}명)")
+        logger.log(f"   ❤️ 최근 글에 반응한 이웃: {reacted_buddies_count}명 (우수 반응 3회 이상: {active_buddies_count}명, 공감+댓글 모두: {both_count}명, 공감만: {liked_only_count}명, 댓글만: {commented_only_count}명)")
         logger.log(f"   🚫 최근 글 무반응 이웃: {unresponsive_count}명 (추가일 기준 참고: {grace_count}명 / 확인된 무반응: {real_unresponsive_count}명)")
         logger.log(f"   이웃별 누적 반응 CSV: {summary_csv}")
 
