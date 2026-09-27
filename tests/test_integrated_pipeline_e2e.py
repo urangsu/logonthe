@@ -439,7 +439,7 @@ class TestIntegratedPipelineE2E(unittest.TestCase):
                 editor_readbacks.append(text)
                 return True
 
-            def mock_submit_and_verify(page, final_text, stop_event=None, timeout=8.0, preset="thoughtful", click=None, origin=None):
+            def mock_submit_and_verify(page, final_text, stop_event=None, timeout=8.0, preset="thoughtful", click=None, origin=None, *args, **kwargs):
                 if origin in (SubmitOrigin.USER_ENTER, SubmitOrigin.AUTO_TIMER):
                     clicks_dispatched.append(post_key)
                 server_verified_calls.append(post_key)

@@ -18,6 +18,8 @@ from app.processor import PostProcessor
 from app.errors import StopRequestedException
 from browser.session import WaitInterruptionReason, interruptible_wait
 from services.pacing import PacingService, PacingKind, PacingResult
+from services.like_transaction import LikeStateResult, LikeConfidence
+from services.like_eligibility import LikeEligibilityResult, LikeEligibility
 from services.clipboard_bridge import ClipboardCommandBridge
 from services.gemini_extension_bridge import GeminiCommand, GeminiExtensionBridge, GeminiResult, GeminiResultStatus
 
@@ -71,8 +73,10 @@ class TestSkipPipelineContract(unittest.TestCase):
 
         with patch("app.processor.TargetPostGuard.verify"), \
              patch("naver.discovery.topic_filter.DiscoveryTopicFilter.evaluate") as mock_eval, \
-             patch.object(pacing, "wait_page_settle", return_value=PacingResult(PacingKind.PAGE_SETTLE, 0.0)), \
-             patch.object(pacing, "wait_pre_like", return_value=PacingResult(PacingKind.PRE_LIKE, 0.1, WaitInterruptionReason.SKIPPED)):
+             patch("app.processor.LikeTransactionService.resolve_like_state", return_value=LikeStateResult(state=LikeState.NOT_LIKED, confidence=LikeConfidence.HIGH)), \
+             patch("app.processor.LikeEligibilityService.evaluate", return_value=LikeEligibilityResult(eligible=True, status=LikeEligibility.ELIGIBLE, reason="ok")), \
+             patch("app.processor.LikeTransactionService.execute_like_transaction", return_value=LikeProcessResult(state_before=LikeState.NOT_LIKED, action_taken=False, state_after=LikeState.NOT_LIKED, error="user_skipped_pre_like")), \
+             patch.object(pacing, "wait_page_settle", return_value=PacingResult(PacingKind.PAGE_SETTLE, 0.0)):
             mock_eval.return_value = MagicMock(allowed=True)
             res = processor.process(self.mock_page, self.post)
 

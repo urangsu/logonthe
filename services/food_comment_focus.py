@@ -6,10 +6,16 @@ class FoodCommentFocus:
     """Classifies blog posts for food/dining focus and extracts food anchors."""
 
     # Strong restaurant signals (menus, dining keywords)
-    RESTAURANT_KEYWORDS = [
-        "맛집", "식당", "음식점", "밥집", "고깃집", "횟집", "한식", "중식", "일식", "양식",
-        "메뉴", "주문", "식사", "먹었", "맛있", "존맛", "꿀맛", "먹방", "외식", "회식"
+    STRONG_RESTAURANT_KEYWORDS = [
+        "맛집", "식당", "음식점", "밥집", "고깃집", "횟집", "한식집", "중식당", "일식집", "양식당",
+        "존맛", "먹방", "외식", "회식"
     ]
+
+    WEAK_RESTAURANT_KEYWORDS = [
+        "메뉴", "주문", "식사", "먹었", "맛있", "꿀맛"
+    ]
+
+    RESTAURANT_KEYWORDS = STRONG_RESTAURANT_KEYWORDS + WEAK_RESTAURANT_KEYWORDS
 
     RESTAURANT_DISHES = [
         "돈까스", "카츠", "치즈카츠", "국밥", "순대국", "돼지국밥", "덮밥", "파스타", "리조또",
@@ -53,12 +59,36 @@ class FoodCommentFocus:
         "네일", "네일아트", "미용실", "헤어샵", "왁싱", "필라테스", "피티", "헬스장", "숙소", "호텔", "펜션", "모텔", "게스트하우스"
     ]
 
+    # Non-food product review signals (appliances, home, living)
+    NON_FOOD_PRODUCT_SIGNALS = [
+        "탄소매트", "온열매트", "전기매트", "온수매트", "매트", "토퍼", "매트리스",
+        "청소기", "건조기", "세탁기", "공기청정기", "가습기", "제습기", "로봇청소기",
+        "의자", "침대", "베개", "소파", "책상", "가구", "인테리어",
+        "노트북", "모니터", "키보드", "마우스", "스마트폰", "태블릿", "이어폰", "헤드폰",
+        "화장품", "앰플", "세럼", "크림", "선크림", "샴푸", "트리트먼트", "바디워시",
+        "자동차", "타이어", "블랙박스", "네비게이션", "헬멧", "자전거", "텐트", "캠핑용품"
+    ]
+
     # Secondary / Non-food anchors that should NOT take precedence over food details
     SECONDARY_KEYWORDS = [
         "주차", "주차장", "주차자리", "발렛", "위치", "접근성", "역세권", "매장", "내부",
         "인테리어", "분위기", "창가", "창가자리", "오션뷰", "마운틴뷰", "뷰", "테라스",
         "단체석", "룸", "예약", "웨이팅", "영업시간", "브레이크타임", "가성비", "친절"
     ]
+
+    @classmethod
+    def _match_dishes(cls, dish_list: List[str], text: str) -> List[str]:
+        matched: List[str] = []
+        for dish in dish_list:
+            if len(dish) <= 2:
+                # 2글자 이하 단어는 단어 경계를 확인하여 '침구 이용', '버거워' 등의 부분 문자열 오탐 방지
+                pattern = rf"(?<![가-힣]){re.escape(dish)}(?![가-힣])"
+                if re.search(pattern, text):
+                    matched.append(dish)
+            else:
+                if dish in text:
+                    matched.append(dish)
+        return matched
 
     @classmethod
     def analyze(cls, title: str, excerpt: str) -> Dict[str, Any]:
@@ -70,24 +100,46 @@ class FoodCommentFocus:
         food_anchors: List[str] = []
         secondary_anchors: List[str] = []
 
-        # Check for non-dining wellness/services
+        # 1. 비음식 서비스 및 비음식 제품 신호 확인
         is_non_dining_service = any(kw in combined_text for kw in cls.NON_DINING_SERVICES)
+        has_non_food_product_title = any(kw in title_norm for kw in cls.NON_FOOD_PRODUCT_SIGNALS)
 
-        # 1. Search for secondary place/convenience anchors first
+        # 2. Secondary place/convenience anchors
         for kw in cls.SECONDARY_KEYWORDS:
             if kw in combined_text and kw not in secondary_anchors:
                 secondary_anchors.append(kw)
 
-        # 2. Check for Convenience Store / Packaged Food Products
-        has_product_brand = any(brand in combined_text for brand in cls.PRODUCT_BRAND_SIGNALS)
-        matched_cafe_dishes = [d for d in cls.CAFE_DISHES if d in combined_text]
-        matched_restaurant_dishes = [d for d in cls.RESTAURANT_DISHES if d in combined_text]
+        # 3. 디시 및 키워드 매칭
+        matched_cafe_dishes = cls._match_dishes(cls.CAFE_DISHES, combined_text)
+        matched_restaurant_dishes = cls._match_dishes(cls.RESTAURANT_DISHES, combined_text)
         for pat in cls.RAW_FISH_PATTERNS:
             for m in pat.finditer(combined_text):
                 matched_restaurant_dishes.append(m.group(1))
 
+        # 제목에 명확한 식당/카페 신호가 있는지 확인
+        title_has_restaurant_dish = any(d in title_norm for d in cls.RESTAURANT_DISHES)
+        title_has_cafe_dish = any(d in title_norm for d in cls.CAFE_DISHES)
+        title_has_strong_restaurant = any(kw in title_norm for kw in cls.STRONG_RESTAURANT_KEYWORDS)
+        title_has_cafe = any(kw in title_norm for kw in cls.CAFE_KEYWORDS)
+        title_has_food = (
+            title_has_strong_restaurant
+            or title_has_cafe
+            or title_has_restaurant_dish
+            or title_has_cafe_dish
+        )
+
+        # 제목이 명확히 비음식 제품/가전/가구 리뷰인데 제목에 음식 신호가 전혀 없으면 GENERAL로 분류 (탄소매트 등 오탐 방지)
+        if has_non_food_product_title and not title_has_food:
+            return {
+                "focus": "GENERAL",
+                "food_anchors": [],
+                "secondary_anchors": secondary_anchors,
+                "has_food_details": False,
+            }
+
+        # 4. 편의점 / 가공식품 신제품
+        has_product_brand = any(brand in combined_text for brand in cls.PRODUCT_BRAND_SIGNALS)
         if has_product_brand and (matched_cafe_dishes or "디저트" in combined_text or "젤라또" in combined_text or "찹쌀떡" in combined_text):
-            # Prioritize extracted dessert/product terms
             for d in matched_cafe_dishes:
                 if d not in food_anchors:
                     food_anchors.append(d)
@@ -102,7 +154,7 @@ class FoodCommentFocus:
                 "has_food_details": len(food_anchors) > 0,
             }
 
-        # If non-dining wellness service dominates and no actual dining dishes are present, do not classify as food
+        # 비음식 서비스(마사지, 미용 등)가 우세하고 실제 음식 디시가 없으면 GENERAL
         if is_non_dining_service and not matched_restaurant_dishes and not matched_cafe_dishes:
             return {
                 "focus": "GENERAL",
@@ -111,9 +163,13 @@ class FoodCommentFocus:
                 "has_food_details": False,
             }
 
-        # 3. Check for Cafe / Dessert
+        # 5. Cafe / Dessert 판정
         has_cafe_kw = any(kw in combined_text for kw in cls.CAFE_KEYWORDS)
-        if (has_cafe_kw and not is_non_dining_service) or (matched_cafe_dishes and not matched_restaurant_dishes):
+        is_cafe = (
+            (has_cafe_kw and not is_non_dining_service and (matched_cafe_dishes or title_has_cafe))
+            or (matched_cafe_dishes and not matched_restaurant_dishes and (title_has_food or len(matched_cafe_dishes) >= 2))
+        )
+        if is_cafe:
             for d in matched_cafe_dishes:
                 if d not in food_anchors:
                     food_anchors.append(d)
@@ -124,13 +180,23 @@ class FoodCommentFocus:
                 "has_food_details": len(food_anchors) > 0,
             }
 
-        # 4. Check for Restaurant / Dining
-        has_restaurant_kw = any(kw in combined_text for kw in cls.RESTAURANT_KEYWORDS)
-        if has_restaurant_kw or matched_restaurant_dishes:
+        # 6. Restaurant / Dining 판정
+        # 강한 맛집 키워드 또는 구체적 디시가 존재하고, 제목 신호나 명확한 본문 증거가 있을 때
+        has_strong_rest = any(kw in combined_text for kw in cls.STRONG_RESTAURANT_KEYWORDS)
+        is_restaurant = False
+        if title_has_strong_restaurant or title_has_restaurant_dish:
+            is_restaurant = True
+        elif has_strong_rest and (matched_restaurant_dishes or any(kw in combined_text for kw in ("메뉴", "주문", "식사"))):
+            is_restaurant = True
+        elif len(matched_restaurant_dishes) >= 2:
+            is_restaurant = True
+        elif matched_restaurant_dishes and any(kw in combined_text for kw in cls.WEAK_RESTAURANT_KEYWORDS):
+            is_restaurant = True
+
+        if is_restaurant:
             for d in matched_restaurant_dishes:
                 if d not in food_anchors:
                     food_anchors.append(d)
-            # Also include any cafe dishes if mentioned in dining (e.g. side desserts)
             for d in matched_cafe_dishes:
                 if d not in food_anchors:
                     food_anchors.append(d)
@@ -141,7 +207,7 @@ class FoodCommentFocus:
                 "has_food_details": len(food_anchors) > 0,
             }
 
-        # 5. General non-food post
+        # 7. General non-food post
         return {
             "focus": "GENERAL",
             "food_anchors": [],

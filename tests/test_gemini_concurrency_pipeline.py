@@ -99,7 +99,7 @@ class TestGeminiConcurrencyPipeline(unittest.TestCase):
         mock_elig.return_value = LikeEligibilityResult(
             eligible=True, status=LikeEligibility.ELIGIBLE, reason="ok", like_count=10, daily_visitors=100
         )
-        mock_tx.side_effect = lambda page, stop_event=None, post=None: (
+        mock_tx.side_effect = lambda page, stop_event=None, post=None, *args, **kwargs: (
             execution_order.append("like_transaction"),
             LikeProcessResult(state_before=LikeState.NOT_LIKED, action_taken=True, state_after=LikeState.LIKED)
         )[1]
@@ -163,7 +163,6 @@ class TestGeminiConcurrencyPipeline(unittest.TestCase):
         # 1. Verify exact chronological milestone sequence
         expected_order = [
             "publish",
-            "pre_like",
             "resolve_like_state",
             "like_transaction",
             "post_like",
@@ -245,7 +244,12 @@ class TestGeminiConcurrencyPipeline(unittest.TestCase):
 
     @patch("app.processor.TargetPostGuard.verify")
     @patch("app.processor.ContentContextExtractor.extract")
-    def test_zero_orphan_with_real_bridge_on_stop_requested(self, mock_extract, mock_guard):
+    @patch("app.processor.LikeTransactionService.resolve_like_state")
+    @patch("app.processor.LikeEligibilityService.evaluate")
+    @patch("app.processor.LikeTransactionService.execute_like_transaction")
+    def test_zero_orphan_with_real_bridge_on_stop_requested(
+        self, mock_tx, mock_elig, mock_like_state, mock_extract, mock_guard
+    ):
         """
         Using real GeminiExtensionBridge:
         When stop requested during pre-like pacing, the early command is cleanly cancelled,
@@ -254,6 +258,13 @@ class TestGeminiConcurrencyPipeline(unittest.TestCase):
         mock_extract.return_value = MagicMock(
             title="테스트 맛집 탐방",
             excerpt="서귀포에 위치한 신선한 해물 파스타 전문점 리뷰입니다.",
+        )
+        mock_like_state.return_value = LikeStateResult(state=LikeState.NOT_LIKED, confidence=LikeConfidence.HIGH)
+        mock_elig.return_value = LikeEligibilityResult(
+            eligible=True, status=LikeEligibility.ELIGIBLE, reason="ok", like_count=10, daily_visitors=100
+        )
+        mock_tx.return_value = LikeProcessResult(
+            state_before=LikeState.NOT_LIKED, action_taken=False, state_after=LikeState.NOT_LIKED, error="stopped_pre_like"
         )
 
         bridge = GeminiExtensionBridge()
@@ -265,24 +276,12 @@ class TestGeminiConcurrencyPipeline(unittest.TestCase):
             bridge_schema_version=bridge._bridge_schema_version_expected,
         )
 
-        mock_pacing = MagicMock()
-        mock_pacing.wait_page_settle.return_value = PacingResult(
-            kind=PacingKind.PAGE_SETTLE, seconds=0.0, reason=WaitInterruptionReason.COMPLETED
-        )
-        mock_pacing.wait_action.return_value = PacingResult(
-            kind=PacingKind.ACTION, seconds=0.0, reason=WaitInterruptionReason.COMPLETED
-        )
-        mock_pacing.wait_pre_like.return_value = PacingResult(
-            kind=PacingKind.PRE_LIKE, seconds=0.1, reason=WaitInterruptionReason.STOPPED
-        )
-
         processor = PostProcessor(
             self.config,
             like_enabled=True,
             comment_enabled=True,
             gemini_web_enabled=True,
             gemini_extension_bridge=bridge,
-            pacing_service=mock_pacing,
         )
 
         with self.assertRaises(StopRequestedException):
@@ -297,7 +296,12 @@ class TestGeminiConcurrencyPipeline(unittest.TestCase):
 
     @patch("app.processor.TargetPostGuard.verify")
     @patch("app.processor.ContentContextExtractor.extract")
-    def test_zero_orphan_with_real_bridge_on_skip_requested(self, mock_extract, mock_guard):
+    @patch("app.processor.LikeTransactionService.resolve_like_state")
+    @patch("app.processor.LikeEligibilityService.evaluate")
+    @patch("app.processor.LikeTransactionService.execute_like_transaction")
+    def test_zero_orphan_with_real_bridge_on_skip_requested(
+        self, mock_tx, mock_elig, mock_like_state, mock_extract, mock_guard
+    ):
         """
         Using real GeminiExtensionBridge:
         When skip requested during pre-like pacing, the early command is cleanly cancelled,
@@ -306,6 +310,13 @@ class TestGeminiConcurrencyPipeline(unittest.TestCase):
         mock_extract.return_value = MagicMock(
             title="테스트 맛집 탐방",
             excerpt="서귀포에 위치한 신선한 해물 파스타 전문점 리뷰입니다.",
+        )
+        mock_like_state.return_value = LikeStateResult(state=LikeState.NOT_LIKED, confidence=LikeConfidence.HIGH)
+        mock_elig.return_value = LikeEligibilityResult(
+            eligible=True, status=LikeEligibility.ELIGIBLE, reason="ok", like_count=10, daily_visitors=100
+        )
+        mock_tx.return_value = LikeProcessResult(
+            state_before=LikeState.NOT_LIKED, action_taken=False, state_after=LikeState.NOT_LIKED, error="user_skipped_pre_like"
         )
 
         bridge = GeminiExtensionBridge()
@@ -317,24 +328,12 @@ class TestGeminiConcurrencyPipeline(unittest.TestCase):
             bridge_schema_version=bridge._bridge_schema_version_expected,
         )
 
-        mock_pacing = MagicMock()
-        mock_pacing.wait_page_settle.return_value = PacingResult(
-            kind=PacingKind.PAGE_SETTLE, seconds=0.0, reason=WaitInterruptionReason.COMPLETED
-        )
-        mock_pacing.wait_action.return_value = PacingResult(
-            kind=PacingKind.ACTION, seconds=0.0, reason=WaitInterruptionReason.COMPLETED
-        )
-        mock_pacing.wait_pre_like.return_value = PacingResult(
-            kind=PacingKind.PRE_LIKE, seconds=0.1, reason=WaitInterruptionReason.SKIPPED
-        )
-
         processor = PostProcessor(
             self.config,
             like_enabled=True,
             comment_enabled=True,
             gemini_web_enabled=True,
             gemini_extension_bridge=bridge,
-            pacing_service=mock_pacing,
         )
 
         res = processor.process(self.mock_page, self.post)

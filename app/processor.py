@@ -544,13 +544,18 @@ class PostProcessor:
         self.current_stage = "target_guard"
         TargetPostGuard.verify(detail_page, post)
 
-        # "본문→공감"은 추가 sleep이 아니라 실제 공감 mutation 목표시각으로 해석한다.
+        # "본문→공감" 페이싱 초기 목표시각 설정
         pre_like_anchor_monotonic = time.monotonic()
         pre_like_target_delay = (
             self.pacing.plan_pre_like_delay()
             if effective_like and self.pacing and hasattr(self.pacing, "plan_pre_like_delay")
             else 0.0
         )
+        if not isinstance(pre_like_target_delay, (int, float)):
+            try:
+                pre_like_target_delay = float(pre_like_target_delay)
+            except Exception:
+                pre_like_target_delay = 0.0
         pre_like_deadline = (
             pre_like_anchor_monotonic + pre_like_target_delay
             if effective_like and pre_like_target_delay > 0
@@ -567,6 +572,10 @@ class PostProcessor:
         detail_context = None
         if post.source in {FeedSourceType.RECOMMENDATION, FeedSourceType.TARGETED_SEARCH} and self.config.get("topic_filter_enabled", True):
             detail_context = ContentContextExtractor.extract(detail_page, post, max_chars=self.ai_context_max_chars)
+            # 실제 본문 확인 시점에 맞춰 앵커 갱신
+            if effective_like and pre_like_target_delay > 0:
+                pre_like_anchor_monotonic = time.monotonic()
+                pre_like_deadline = pre_like_anchor_monotonic + pre_like_target_delay
             from naver.discovery.topic_filter import DiscoveryTopicFilter
             topic_decision = DiscoveryTopicFilter.evaluate(
                 detail_context.title or post.title or "",
@@ -639,6 +648,9 @@ class PostProcessor:
                     detail_context = ContentContextExtractor.extract(detail_page, post, max_chars=self.ai_context_max_chars)
                     post.title = detail_context.title or post.title
                     post.excerpt = detail_context.excerpt
+                    if pre_like_target_delay > 0:
+                        pre_like_anchor_monotonic = time.monotonic()
+                        pre_like_deadline = pre_like_anchor_monotonic + pre_like_target_delay
                 if (post.excerpt or "").strip():
                     if self.gemini_web_enabled and self.gemini_browser_mode == "extension_existing_chrome" and self.gemini_extension_bridge:
                         if not (self.stop_event and self.stop_event.is_set()) and not (self.skip_event and self.skip_event.is_set()):
@@ -722,6 +734,8 @@ class PostProcessor:
                             post=post,
                             not_before_monotonic=pre_like_deadline,
                             skip_event=self.skip_event,
+                            pause_event=self.pause_event,
+                            run_control=getattr(self, "run_control", None),
                         )
                         if hasattr(self, "run_control") and self.run_control:
                             self.run_control.checkpoint("after_like_click")
@@ -732,6 +746,7 @@ class PostProcessor:
 
                         if tx_res.error == "user_skipped_pre_like" or (self.skip_event and self.skip_event.is_set()):
                             _cancel_early_command("pre_like_pacing_skipped")
+                            result.like_result.error = "user_skipped"
                             result.comment_result.status = CommentSubmitState.SKIPPED
                             result.comment_result.error = "user_skipped"
                             if self.state_mgr:

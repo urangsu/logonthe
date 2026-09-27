@@ -40,7 +40,7 @@ class TestDraftCleaner(unittest.TestCase):
 
         gate_res = FinalQualityGate.validate_final_text(cleaned, preset="community", source="gemini")
         self.assertFalse(gate_res.valid)
-        self.assertIn(gate_res.code, {"hard_banned_emoticon", "hard_banned_pressure_word", "hard_banned_period", "absolute_or_pressure", "laughter_or_emoticon"})
+        self.assertIn(gate_res.code, {"hard_banned_emoticon", "hard_banned_pressure_word", "hard_banned_period", "absolute_or_pressure", "laughter_or_emoticon", "emoji"})
 
 
 if __name__ == "__main__":

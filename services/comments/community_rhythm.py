@@ -393,9 +393,22 @@ class FinalQualityGate:
     )
 
     ABSOLUTE_OR_PRESSURE_PHRASES: ClassVar[Tuple[str, ...]] = (
-        "꼭",
         "반드시",
         "무조건",
+        "꼭 사세요",
+        "꼭 사셔야",
+        "꼭 사시길",
+        "꼭 가보세요",
+        "꼭 가보셔야",
+        "꼭 가보시길",
+        "꼭 방문해보세요",
+        "꼭 써보세요",
+        "꼭 드셔보세요",
+        "꼭 해보세요",
+    )
+
+    _ABSOLUTE_PRESSURE_RE: ClassVar[re.Pattern[str]] = re.compile(
+        r"(?:반드시|무조건|꼭\s*(?:한\s*번\s*)?(?:사세|사야|사시|가세|가셔|가시|(?:방문해|들러|가|사|써|먹어|드셔)(?:보세|세요|셔야|시길|하십시오)))"
     )
 
     RUDE_SLANG_PHRASES: ClassVar[Tuple[str, ...]] = (
@@ -600,6 +613,10 @@ class FinalQualityGate:
             for phrase in cls.ABSOLUTE_OR_PRESSURE_PHRASES:
                 if phrase in normalized:
                     return result(False, "absolute_or_pressure", f"absolute or pressure wording is forbidden: {phrase}", matched=phrase)
+            pressure_match = cls._ABSOLUTE_PRESSURE_RE.search(normalized)
+            if pressure_match:
+                matched_p = pressure_match.group()
+                return result(False, "absolute_or_pressure", f"absolute or pressure wording is forbidden: {matched_p}", matched=matched_p)
 
             # 소프트 장식(웃음/이모지) 정책 판정
             allow_soft_laughter = False
@@ -798,6 +815,7 @@ class FinalQualityGate:
         "laughter_or_emoticon",
         "excessive_tilde",
         "excessive_slang",
+        "emoji",
     )
 
     @classmethod
@@ -847,6 +865,10 @@ class FinalQualityGate:
             # Remove matched slang expression (matched field holds the offender)
             if gate_result.matched:
                 repaired = repaired.replace(gate_result.matched, "", 1).strip()
+
+        elif gate_result.code == "emoji":
+            # Remove emojis
+            repaired = cls._EMOJI_RE.sub("", repaired).strip()
 
         if not repaired or repaired == text.strip():
             # Nothing changed or empty result after repair — not useful

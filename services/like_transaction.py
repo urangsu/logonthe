@@ -1,5 +1,6 @@
 import time
 import threading
+import random
 from enum import Enum
 from dataclasses import dataclass, field
 from typing import Optional, List, Tuple
@@ -7,7 +8,8 @@ from playwright.sync_api import Page, Locator
 from app.models import LikeState, LikeProcessResult, FeedPost
 from naver.resolver import MobileDOMResolver
 from naver.target_guard import TargetPostGuard
-from browser.session import interruptible_wait, ensure_page_alive
+from browser.session import interruptible_wait, ensure_page_alive, WaitInterruptionReason
+from app.run_control import StopRequestedException
 from src.logger import logger
 
 
@@ -179,11 +181,17 @@ class LikeTransactionService:
         post: Optional[FeedPost] = None,
         not_before_monotonic: Optional[float] = None,
         skip_event: Optional[threading.Event] = None,
+        pause_event: Optional[threading.Event] = None,
+        run_control: Optional[Any] = None,
     ) -> LikeProcessResult:
         """
         2-Path Like Transaction 실행:
         1. Precondition 검사
-        2. Summary 버튼으로 스크롤 후 2.0s UI Settle Delay
+        2. 본문-공감 페이싱 대기:
+           - 공감 버튼 선이동은 대기 끝으로 배치
+           - 본문이 충분히 길고 시간이 남은 글에서만 2~4회 작은 폭 스크롤 (짧은 글/시간 부족 시 생략)
+           - 각 이동 전후에 일시정지(pause_event/run_control), 건너뛰기(skip_event), 중지(stop_event) 확인
+           - 스크롤이 목표시각을 뒤로 밀지 않도록 남은 시간 매번 계산
         3. Path A (Option 이미 노출) vs Path B (Summary 오프너 클릭 후 상태 재검증 및 레이어 대기)
         """
         if LikeCircuitBreaker.is_open():
@@ -208,8 +216,132 @@ class LikeTransactionService:
             logger.log(f"  ⚠️ [LIKE] 리액션 상태 확신도 부족(type={rx.reaction_type.value}, conf={rx.confidence.value})으로 취소 방지를 위해 클릭을 건너뜁니다.", "WARNING")
             return LikeProcessResult(state_before=LikeState.UNKNOWN, action_taken=False, state_after=LikeState.UNKNOWN, error="low_confidence_precondition")
 
-        # 2. 요약 버튼 탐색 및 공감 목표시각까지 UI settle.
-        # not_before_monotonic이 있으면 "본문→공감" 설정을 실제 mutation 시각에 맞춘다.
+        # 2. 본문-공감 페이싱 및 스크롤 관리
+        wait_start_mono = time.monotonic()
+        if not_before_monotonic is None:
+            planned_wait = 2.0
+            target_deadline = wait_start_mono + planned_wait
+        else:
+            target_deadline = not_before_monotonic
+            planned_wait = max(0.20, target_deadline - wait_start_mono)
+
+        now_mono = time.monotonic()
+        initial_remaining = target_deadline - now_mono
+        pacing_overrun = max(0.0, -initial_remaining)
+        logger.log(
+            f"[PACING][PRE_LIKE_TARGET] remaining={max(0.0, initial_remaining):.2f}s "
+            f"settle={planned_wait:.2f}s overrun={pacing_overrun:.2f}s"
+        )
+
+        def _check_and_wait(duration: float, stage: str = "pre_like_wait") -> Optional[LikeProcessResult]:
+            """일시정지/중지/건너뛰기 신호를 체크하며 대기. 일시정지 중이면 해제될 때까지 대기."""
+            if run_control:
+                try:
+                    run_control.checkpoint(stage)
+                    reason = run_control.interruptible_wait(duration, stage=stage)
+                except StopRequestedException:
+                    return LikeProcessResult(
+                        state_before=LikeState.NOT_LIKED,
+                        action_taken=False,
+                        state_after=LikeState.NOT_LIKED,
+                        error="stopped_pre_like",
+                    )
+                if reason == WaitInterruptionReason.SKIPPED or (skip_event and skip_event.is_set()):
+                    logger.log("  ⏭️ [USER] 본문→공감 대기 중 다음 글 스킵 요청 감지.")
+                    return LikeProcessResult(
+                        state_before=LikeState.NOT_LIKED,
+                        action_taken=False,
+                        state_after=LikeState.NOT_LIKED,
+                        error="user_skipped_pre_like",
+                    )
+                if reason == WaitInterruptionReason.STOPPED or (stop_event and stop_event.is_set()):
+                    return LikeProcessResult(
+                        state_before=LikeState.NOT_LIKED,
+                        action_taken=False,
+                        state_after=LikeState.NOT_LIKED,
+                        error="stopped_pre_like",
+                    )
+            else:
+                reason = interruptible_wait(stop_event, duration, pause_event=pause_event, skip_event=skip_event)
+                if reason == WaitInterruptionReason.SKIPPED or (skip_event and skip_event.is_set()):
+                    logger.log("  ⏭️ [USER] 본문→공감 대기 중 다음 글 스킵 요청 감지.")
+                    return LikeProcessResult(
+                        state_before=LikeState.NOT_LIKED,
+                        action_taken=False,
+                        state_after=LikeState.NOT_LIKED,
+                        error="user_skipped_pre_like",
+                    )
+                if reason == WaitInterruptionReason.STOPPED or (stop_event and stop_event.is_set()):
+                    return LikeProcessResult(
+                        state_before=LikeState.NOT_LIKED,
+                        action_taken=False,
+                        state_after=LikeState.NOT_LIKED,
+                        error="stopped_pre_like",
+                    )
+            return None
+
+        # 스크롤 전 즉시 안전 체크 (일시정지 상태면 여기서 대기)
+        abort_res = _check_and_wait(0.0, "pre_like_scroll_check")
+        if abort_res:
+            return abort_res
+
+        # 본문 영역 길이 및 스크롤 가능 여부 확인
+        # (목표 마감시각이 전달되었고 남은 시간이 2.5초 이상인 경우에만 본문 스크롤 탐색)
+        cur_rem = target_deadline - time.monotonic()
+        max_scroll = 0
+        if not_before_monotonic is not None and cur_rem >= 2.5:
+            try:
+                scroll_info = page.evaluate("""() => {
+                    const doc = document.documentElement;
+                    const body = document.body;
+                    const scrollHeight = Math.max(doc ? doc.scrollHeight : 0, body ? body.scrollHeight : 0);
+                    const clientHeight = window.innerHeight || (doc ? doc.clientHeight : 0);
+                    const scrollY = window.scrollY || window.pageYOffset || 0;
+                    return {
+                        scrollHeight: scrollHeight,
+                        clientHeight: clientHeight,
+                        scrollY: scrollY,
+                        maxScroll: Math.max(0, scrollHeight - clientHeight)
+                    };
+                }""")
+                if isinstance(scroll_info, dict):
+                    max_scroll = scroll_info.get("maxScroll", 0)
+            except Exception:
+                max_scroll = 0
+
+        # 본문이 충분히 길고(max_scroll >= 400) 남은 시간이 2.5초 이상일 때만 2~4회 스크롤
+        cur_rem = target_deadline - time.monotonic()
+        if max_scroll >= 400 and cur_rem >= 2.5:
+            num_scrolls = min(4, max(2, int(cur_rem // 1.5)))
+        else:
+            num_scrolls = 0
+
+        scrolls_done = 0
+        for _ in range(num_scrolls):
+            rem_before = target_deadline - time.monotonic()
+            if rem_before < 0.8:
+                break  # 목표시각을 뒤로 밀지 않도록 즉시 중단
+
+            abort_res = _check_and_wait(0.0, "before_scroll_step")
+            if abort_res:
+                return abort_res
+
+            # 작은 폭 스크롤 (150~280px)
+            delta = random.randint(150, 280)
+            try:
+                page.evaluate(f"window.scrollBy({{ top: {delta}, behavior: 'smooth' }});")
+                scrolls_done += 1
+            except Exception:
+                break
+
+            # 스크롤 후 잠깐의 읽기 대기 (남은 시간을 넘지 않도록 안전 텀 부여)
+            rem_after = target_deadline - time.monotonic()
+            step_wait = min(random.uniform(0.6, 1.0), max(0.1, rem_after - 0.4))
+            abort_res = _check_and_wait(step_wait, "after_scroll_step")
+            if abort_res:
+                return abort_res
+
+        # 대기 끝으로 공감 버튼 선이동을 배치
         summary_btn = MobileDOMResolver.get_reaction_summary_button(page)
         if summary_btn and summary_btn.count() > 0:
             try:
@@ -217,35 +349,24 @@ class LikeTransactionService:
             except Exception:
                 pass
 
-        if not_before_monotonic is None:
-            settle_seconds = 2.0
-            pacing_overrun = 0.0
-        else:
-            now_mono = time.monotonic()
-            remaining = not_before_monotonic - now_mono
-            settle_seconds = max(0.20, remaining)
-            pacing_overrun = max(0.0, -remaining)
-            logger.log(
-                f"[PACING][PRE_LIKE_TARGET] remaining={max(0.0, remaining):.2f}s "
-                f"settle={settle_seconds:.2f}s overrun={pacing_overrun:.2f}s"
-            )
+        # 목표시각까지 남은 시간 최종 대기
+        rem_final = target_deadline - time.monotonic()
+        if rem_final > 0:
+            abort_res = _check_and_wait(rem_final, "final_target_wait")
+            if abort_res:
+                return abort_res
 
-        interruptible_wait(stop_event, settle_seconds, skip_event=skip_event)
-        if skip_event and skip_event.is_set():
-            logger.log("  ⏭️ [USER] 본문→공감 대기 중 다음 글 스킵 요청 감지.")
-            return LikeProcessResult(
-                state_before=LikeState.NOT_LIKED,
-                action_taken=False,
-                state_after=LikeState.NOT_LIKED,
-                error="user_skipped_pre_like",
-            )
-        if stop_event and stop_event.is_set():
-            return LikeProcessResult(
-                state_before=LikeState.NOT_LIKED,
-                action_taken=False,
-                state_after=LikeState.NOT_LIKED,
-                error="stopped_pre_like",
-            )
+        # 클릭 직전 일시정지/중지/건너뛰기 최종 체크 (일시정지 중 클릭 방지)
+        abort_res = _check_and_wait(0.0, "before_like_click")
+        if abort_res:
+            return abort_res
+
+        actual_elapsed = time.monotonic() - wait_start_mono
+        overrun = max(0.0, actual_elapsed - planned_wait)
+        logger.log(
+            f"[PACING][PRE_LIKE_DONE] planned={planned_wait:.2f}s scrolls={scrolls_done} "
+            f"actual={actual_elapsed:.2f}s overrun={overrun:.2f}s"
+        )
 
         if post:
             TargetPostGuard.verify(page, post)

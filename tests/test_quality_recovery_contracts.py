@@ -33,10 +33,14 @@ class QualityRecoveryContracts(unittest.TestCase):
         self.assertEqual(error.exception.code, 2)
 
     def test_default_prompt_allows_expression_without_forced_praise(self):
-        prompt = AIPromptBuilder.build("긴 대기 끝에 아쉬웠던 식사", "한참 기다렸지만 기대보다 아쉬웠어요")
-        self.assertIn("가벼운 비유", prompt)
-        self.assertIn("정보를 다시 설명하기만 하지 말고", prompt)
-        self.assertIn("억지로 긍정적인 반응을 붙이지 마", prompt)
+        prompt_v3_2 = AIPromptBuilder.build("긴 대기 끝에 아쉬웠던 식사", "한참 기다렸지만 기대보다 아쉬웠어요", version="3.2")
+        self.assertIn("가벼운 비유", prompt_v3_2)
+        self.assertIn("정보를 다시 설명하기만 하지 말고", prompt_v3_2)
+        self.assertIn("억지로 긍정적인 반응을 붙이지 마", prompt_v3_2)
+
+        prompt_v3_4 = AIPromptBuilder.build("긴 대기 끝에 아쉬웠던 식사", "한참 기다렸지만 기대보다 아쉬웠어요", version="3.4")
+        self.assertIn("억지 칭찬", prompt_v3_4)
+        self.assertIn("가장 눈에 들어온 장면", prompt_v3_4)
 
     def test_long_intro_does_not_displace_core(self):
         raw = ("오늘 찾은 곳은 동네에 새로 생긴 가게였어요 " * 45)

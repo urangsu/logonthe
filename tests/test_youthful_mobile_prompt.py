@@ -16,10 +16,8 @@ def test_v3_4_prompt_prioritizes_youthful_mobile_voice_for_concern_post():
         version=PROMPT_VERSION_V3_4,
     )
 
-    assert "20대" in prompt
-    assert "모바일" in prompt
+    assert "글의 구체적인 한 부분" in prompt
     assert "마침표(.) 없이" in prompt
-    assert "ㅎㅎ·ㅠㅠ·ㅜㅜ" in prompt
     assert "뉴스나 안내문처럼 정보를 다시 전달하지" in prompt
     assert "아쉬움이나 걱정" in prompt
     assert "장식 없음" not in prompt

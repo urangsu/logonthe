@@ -317,7 +317,15 @@ class CommentInteractionService:
 
         # Step D: 최적의 visible + enabled 후보 선정 및 로깅
         visible_enabled = [c for c in candidates if c.visible and c.enabled]
-        with_box = [c for c in visible_enabled if c.bbox and c.bbox.get("width", 0) > 0 and c.bbox.get("height", 0) > 0]
+        def _has_positive_bbox(c):
+            bbox = getattr(c, "bbox", None)
+            if not isinstance(bbox, dict):
+                return False
+            w = bbox.get("width", 0)
+            h = bbox.get("height", 0)
+            return isinstance(w, (int, float)) and isinstance(h, (int, float)) and w > 0 and h > 0
+
+        with_box = [c for c in visible_enabled if _has_positive_bbox(c)]
         selected = with_box[0] if with_box else visible_enabled[0]
 
         frame_id = getattr(selected.frame, "name", "") or getattr(selected.frame, "url", "")
