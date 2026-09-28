@@ -384,16 +384,35 @@ class PostProcessor:
         self.current_request_id: Optional[str] = None
         self.current_result: Optional[PostProcessResult] = None
         self._neighbor_suffix_seen_blogs: set[str] = set()
-        self._recent_reaction_modes: List[str] = []
+        self._recent_submitted_modes: List[str] = []  # 실제 등록 성공 후 기록 (반복 방지 기준)
+        self._recent_generated_modes: List[str] = []  # 초안 확정 시점 기록 (모니터링/디버깅용)
+        # 하위 호환: _recent_reaction_modes → _recent_submitted_modes 별칭
+        self._recent_reaction_modes = self._recent_submitted_modes
 
-    def _record_reaction_mode(self, gen_ctx: Optional[Any]) -> None:
+    def _record_generated_reaction_mode(self, gen_ctx: Optional[Any]) -> None:
+        """초안(draft)이 확정된 시점에 생성 히스토리를 기록한다. (모니터링용)"""
         if gen_ctx and getattr(gen_ctx, "reaction_plan", None):
             plan = gen_ctx.reaction_plan
             mode = getattr(plan, "reaction_mode", None)
             if mode:
-                self._recent_reaction_modes.append(mode)
-                self._recent_reaction_modes = self._recent_reaction_modes[-10:]
-                logger.log(f"[REACTION_HISTORY] recorded mode={mode} recent_count={len(self._recent_reaction_modes)}")
+                self._recent_generated_modes.append(mode)
+                self._recent_generated_modes = self._recent_generated_modes[-10:]
+                logger.log(f"[REACTION_HISTORY][GENERATED] mode={mode} recent_count={len(self._recent_generated_modes)}")
+
+    def _record_submitted_reaction_mode(self, gen_ctx: Optional[Any]) -> None:
+        """댓글이 실제 등록 성공(SUBMITTED) 이후에 반복 방지 히스토리를 기록한다."""
+        if gen_ctx and getattr(gen_ctx, "reaction_plan", None):
+            plan = gen_ctx.reaction_plan
+            mode = getattr(plan, "reaction_mode", None)
+            if mode:
+                self._recent_submitted_modes.append(mode)
+                self._recent_submitted_modes = self._recent_submitted_modes[-10:]
+                # _recent_reaction_modes와 동일 객체이므로 별도 갱신 불필요
+                logger.log(f"[REACTION_HISTORY][SUBMITTED] mode={mode} recent_count={len(self._recent_submitted_modes)}")
+
+    def _record_reaction_mode(self, gen_ctx: Optional[Any]) -> None:
+        """하위 호환용 메서드: _record_generated_reaction_mode 로 위임."""
+        self._record_generated_reaction_mode(gen_ctx)
 
     def _prepare_comment_generation_context(
         self,
@@ -1543,6 +1562,63 @@ class PostProcessor:
                                                             f"length={combined_gate.length} source=gemini"
                                                         )
                                                         validated_final_text = candidate_with_suffix
+
+                                                        # P0-2: CommentGroundingGate - 본문에 없는 구체적 사실 차단 (FOOD 외 도메인)
+                                                        try:
+                                                            from services.comments.grounding_gate import CommentGroundingGate
+                                                            _plan = getattr(gen_ctx, 'reaction_plan', None)
+                                                            _g_domain = _plan.domain if _plan else 'GENERAL'
+                                                            _g_ctx = gen_ctx.selected_context or gen_ctx.excerpt or ''
+                                                            _grounding_res = CommentGroundingGate.validate(
+                                                                gemini_answer, _g_ctx, domain=_g_domain, reaction_plan=_plan
+                                                            )
+                                                            if not _grounding_res.valid:
+                                                                logger.log(
+                                                                    f'[GROUNDING_GATE] FAIL code={_grounding_res.code} '
+                                                                    f'unsupported={list(_grounding_res.unsupported_terms)} '
+                                                                    f'post={post.key}',
+                                                                    'WARNING',
+                                                                )
+                                                                if not getattr(self, '_grounding_rewrite_done', False) and gen_ctx.attempt_count < gen_ctx.max_attempts:
+                                                                    self._grounding_rewrite_done = True
+                                                                    _g_feedback = _grounding_res.rewrite_feedback(domain=_g_domain)
+                                                                    logger.log(f'[GROUNDING_GATE] 1회 재작성 피드백: {_g_feedback}', 'WARNING')
+                                                                    if (self.stop_event and self.stop_event.is_set()) or (self.skip_event and self.skip_event.is_set()):
+                                                                        if self.stop_event and self.stop_event.is_set():
+                                                                            raise StopRequestedException('User stopped before grounding rewrite')
+                                                                        result.comment_result = CommentProcessResult(status=CommentSubmitState.SKIPPED, error='user_skipped')
+                                                                        if self.state_mgr:
+                                                                            self.state_mgr.update(new_state=FeedState.SKIPPING, inc_skip=True)
+                                                                        return result
+                                                                    request_id = uuid.uuid4().hex
+                                                                    ai_prompt = gen_ctx.build_prompt(
+                                                                        rewrite_feedback=_g_feedback,
+                                                                        recent_comments=gen_ctx.recent_comments,
+                                                                        request_id=request_id,
+                                                                        previous_draft=gemini_answer,
+                                                                    )
+                                                                    if self.state_mgr:
+                                                                        self.state_mgr.update(
+                                                                            current_ai_prompt=ai_prompt,
+                                                                            message=f'Grounding 보정 1회 재작성 중 (unsupported_content_claim)...',
+                                                                        )
+                                                                    gemini_answer = None
+                                                                    validated_final_text = None
+                                                                    continue
+                                                                else:
+                                                                    logger.log(f'[GROUNDING_GATE] 재작성 예산 소진 또는 이미 시도됨 -> SKIP', 'WARNING')
+                                                                    result.comment_result = CommentProcessResult(
+                                                                        status=CommentSubmitState.SKIPPED,
+                                                                        error='unsupported_content_claim',
+                                                                    )
+                                                                    if self.state_mgr:
+                                                                        self.state_mgr.update(new_state=FeedState.SKIPPING, inc_skip=True)
+                                                                    return result
+                                                            else:
+                                                                logger.log(f'[GROUNDING_GATE] PASS domain={_g_domain} supported={list(_grounding_res.supported_terms)}')
+                                                        except ImportError:
+                                                            pass
+
                                                         # P0-4: Semantic anchor selection & connection
                                                         selected_anchor = "none"
                                                         matched_food = [d for d in gen_ctx.verified_anchors if d in gemini_answer]
@@ -2120,6 +2196,10 @@ class PostProcessor:
                                         )
                                         if self.state_mgr:
                                             self.state_mgr.update(inc_comment=True)
+                                        # P1: 실제 등록 성공(SUBMITTED) 시점에 반복 방지 히스토리 기록
+                                        self._record_submitted_reaction_mode(
+                                            gen_ctx if "gen_ctx" in locals() else None
+                                        )
                                         if self.on_comment_committed:
                                             try:
                                                 self.on_comment_committed(post, cmt_res)

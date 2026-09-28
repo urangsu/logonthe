@@ -63,7 +63,7 @@
 
 ### [food_02_rich_taste_donkatsu] 성수동 일식 돈카츠 전문점
 - **Domain / Mode**: `FOOD` / `taste_reaction`
-- **Primary / Secondary Anchor**: `돈카츠` / `카츠`
+- **Primary / Secondary Anchor**: `돈카츠` / `튀김`
 - **Evidence**: 본문 맛/식감 언급(돈카츠)
 - **Instruction**: 본문에 언급된 돈카츠의 맛이나 식감 디테일에 관찰자 입장에서 반응해. 본문에 없는 맛이나 식감은 지어내지 마.
 
@@ -87,7 +87,7 @@
 
 ### [food_06_burger_visual] 이태원 수제버거 더블 패티 버거
 - **Domain / Mode**: `FOOD` / `visual_reaction`
-- **Primary / Secondary Anchor**: `수제버거` / `버거`
+- **Primary / Secondary Anchor**: `수제버거` / ``
 - **Evidence**: 시각/구성 디테일(수제버거)
 - **Instruction**: 수제버거의 비주얼이나 푸짐한 구성에 가볍게 반응해. 직접 먹어본 척하지 마.
 
@@ -123,13 +123,13 @@
 
 ### [food_12_mala_special] 건대 마라탕 특유의 얼얼한 맛
 - **Domain / Mode**: `FOOD` / `combination_curiosity`
-- **Primary / Secondary Anchor**: `마라` / `마라탕`
-- **Evidence**: 조합/특수재료 근거(마라와 마라탕)
-- **Instruction**: 마라와 마라탕 재료와 조합에 관찰자 입장에서 반응해. 먹어본 사람처럼 공감하지 말고 맛에 대한 궁금함이나 조합의 독특함을 표현해.
+- **Primary / Secondary Anchor**: `마라` / ``
+- **Evidence**: 조합/특수재료 근거(마라)
+- **Instruction**: 마라 재료와 조합에 관찰자 입장에서 반응해. 먹어본 사람처럼 공감하지 말고 맛에 대한 궁금함이나 조합의 독특함을 표현해.
 
 ### [food_13_eel_texture] 파주 장어구이 몸보신 식당
 - **Domain / Mode**: `FOOD` / `taste_reaction`
-- **Primary / Secondary Anchor**: `장어구이` / `장어`
+- **Primary / Secondary Anchor**: `장어구이` / `숯불`
 - **Evidence**: 본문 맛/식감 언급(장어구이)
 - **Instruction**: 본문에 언급된 장어구이의 맛이나 식감 디테일에 관찰자 입장에서 반응해. 본문에 없는 맛이나 식감은 지어내지 마.
 
@@ -147,13 +147,13 @@
 
 ### [food_16_pancake_fluffy] 가로수길 수플레 팬케이크 브런치
 - **Domain / Mode**: `FOOD` / `taste_reaction`
-- **Primary / Secondary Anchor**: `팬케이크` / `케이크`
+- **Primary / Secondary Anchor**: `팬케이크` / `수플레`
 - **Evidence**: 본문 맛/식감 언급(팬케이크)
 - **Instruction**: 본문에 언급된 팬케이크의 맛이나 식감 디테일에 관찰자 입장에서 반응해. 본문에 없는 맛이나 식감은 지어내지 마.
 
 ### [food_17_pho_broth] 을지로 베트남 쌀국수 맛집
 - **Domain / Mode**: `FOOD` / `taste_reaction`
-- **Primary / Secondary Anchor**: `쌀국수` / `국수`
+- **Primary / Secondary Anchor**: `쌀국수` / ``
 - **Evidence**: 본문 맛/식감 언급(쌀국수)
 - **Instruction**: 본문에 언급된 쌀국수의 맛이나 식감 디테일에 관찰자 입장에서 반응해. 본문에 없는 맛이나 식감은 지어내지 마.
 

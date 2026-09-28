@@ -352,11 +352,18 @@ class ReactionContextPlanner:
             pri = ranked_foods[0] if ranked_foods else "메뉴"
 
             # 2nd food anchor: 반드시 진짜 음식/재료여야 함 (절대로 '위치', '주차' 등 메타데이터가 아님!)
+            # P2: primary와 포함관계(부분문자열)인 경우도 제거 (예: 돈카츠/카츠, 크림파스타/파스타)
             sec = ""
             for rf in ranked_foods[1:]:
-                if rf != pri and rf not in cls.GENERIC_BANNED_ANCHORS and rf not in FoodCommentFocus.SECONDARY_KEYWORDS:
-                    sec = rf
-                    break
+                if rf == pri:
+                    continue
+                if rf in cls.GENERIC_BANNED_ANCHORS or rf in FoodCommentFocus.SECONDARY_KEYWORDS:
+                    continue
+                # 포함관계 중복 제거: 한쪽이 다른 쪽의 부분문자열인 경우 스킵
+                if rf in pri or pri in rf:
+                    continue
+                sec = rf
+                break
 
             # Salience 점수 계산
             combo_salience = 0.0
@@ -398,9 +405,15 @@ class ReactionContextPlanner:
                     pri = matched_special[0]
                     sec = ""
                     for rf in ranked_foods:
-                        if rf != pri and rf not in cls.GENERIC_BANNED_ANCHORS and rf not in FoodCommentFocus.SECONDARY_KEYWORDS:
-                            sec = rf
-                            break
+                        if rf == pri:
+                            continue
+                        if rf in cls.GENERIC_BANNED_ANCHORS or rf in FoodCommentFocus.SECONDARY_KEYWORDS:
+                            continue
+                        # 포함관계 중복 제거
+                        if rf in pri or pri in rf:
+                            continue
+                        sec = rf
+                        break
                 sec_desc = f"와 {sec}" if sec and sec != pri else ""
                 instruction = (
                     f"{pri}{sec_desc} 재료와 조합에 관찰자 입장에서 반응해. "
@@ -464,7 +477,12 @@ class ReactionContextPlanner:
             all_places = matched_places + matched_stays
             ranked_places = cls.rank_anchors(all_places, title_s, excerpt_s, domain="PLACE")
             pri = ranked_places[0] if ranked_places else "여행지"
-            sec = ranked_places[1] if len(ranked_places) > 1 and ranked_places[1] != pri else ""
+            # P2: PLACE secondary에서도 포함관계 중복 제거
+            sec = ""
+            for rp in ranked_places[1:]:
+                if rp != pri and not (rp in pri or pri in rp):
+                    sec = rp
+                    break
 
             mode = "place_observation"
             instruction = (
@@ -489,7 +507,12 @@ class ReactionContextPlanner:
                 matched_products = [kw for kw in cls.PRODUCT_SIGNALS if kw in combined]
             ranked_prods = cls.rank_anchors(matched_products, title_s, excerpt_s, domain="PRODUCT")
             pri = ranked_prods[0] if ranked_prods else "제품"
-            sec = ranked_prods[1] if len(ranked_prods) > 1 and ranked_prods[1] != pri else ""
+            # P2: PRODUCT secondary에서도 포함관계 중복 제거
+            sec = ""
+            for rpr in ranked_prods[1:]:
+                if rpr != pri and not (rpr in pri or pri in rpr):
+                    sec = rpr
+                    break
             instruction = (
                 f"제품의 {pri} 기능이나 디자인, 사용 디테일에 관찰자 입장에서 가볍게 반응해. 직접 써본 척하지 마."
             )
@@ -520,7 +543,12 @@ class ReactionContextPlanner:
 
             ranked_svcs = cls.rank_anchors(matched_services, title_s, excerpt_s, domain="SERVICE")
             pri = ranked_svcs[0] if ranked_svcs else "서비스"
-            sec = ranked_svcs[1] if len(ranked_svcs) > 1 and ranked_svcs[1] != pri else ""
+            # P2: SERVICE secondary에서도 포함관계 중복 제거
+            sec = ""
+            for rsv in ranked_svcs[1:]:
+                if rsv != pri and not (rsv in pri or pri in rsv):
+                    sec = rsv
+                    break
             instruction = (
                 f"{pri} 서비스의 구성이나 진행 방식 디테일에 관찰자 입장에서 반응해."
             )
