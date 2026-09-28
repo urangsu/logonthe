@@ -17,7 +17,7 @@ class TestV35ReactionPipelineAndQuality(unittest.TestCase):
 
         plan = StylePlanService.select_style_plan(post_key="test_blog:1", preset="community", seed=42)
         self.assertNotIn("공감", plan.reaction_type)
-        self.assertIn(plan.reaction_mode, StylePlanService.REACTION_MODES)
+        self.assertNotIn("reaction_mode", plan.to_dict())
 
     def test_02_implied_shared_experience_gate_blocks_ai_empathy(self):
         """2. implied_shared_experience 품질게이트가 AI 초안의 경험 암시 및 공감 표현을 차단"""

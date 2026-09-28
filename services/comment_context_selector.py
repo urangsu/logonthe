@@ -212,6 +212,8 @@ def select_comment_context(
     title: str,
     body: str,
     max_chars: int = 600,
+    preferred_anchors: Optional[List[str]] = None,
+    preferred_terms: Optional[List[str]] = None,
 ) -> SelectedCommentContext:
     """
     블로그 본문에서 댓글 작성용 맥락을 선별한다.
@@ -219,6 +221,7 @@ def select_comment_context(
     - 목표: 400~700자 발췌 (max_chars 기본 600)
     - 문장 중간 substring 절단 금지
     - 감정·반전 묶음은 함께 선택
+    - preferred_anchors / preferred_terms 가 주어지면 해당 문장 우선 선택 가중치 부여
     - 근거 부족 시 needs_more_context=True 반환 (호출자가 확장 결정)
     """
     if not body or not body.strip():
@@ -244,6 +247,24 @@ def select_comment_context(
             unit = _classify(sent, sidx, group_counter)
             all_units.append(unit)
             sidx += 1
+
+    pref_set = set()
+    if preferred_anchors:
+        pref_set.update(a.strip() for a in preferred_anchors if a and a.strip())
+    if preferred_terms:
+        pref_set.update(t.strip() for t in preferred_terms if t and t.strip())
+
+    if pref_set:
+        for idx, u in enumerate(all_units):
+            if u.kind != "noise" and any(p in u.text for p in pref_set):
+                new_kind = "fact" if u.kind == "background" else u.kind
+                all_units[idx] = ContextUnit(
+                    source_index=u.source_index,
+                    text=u.text,
+                    kind=new_kind,
+                    group_id=u.group_id,
+                    weight=u.weight + 8,
+                )
 
     if not all_units:
         return SelectedCommentContext(

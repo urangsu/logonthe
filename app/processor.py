@@ -86,6 +86,71 @@ def build_quality_rewrite_feedback(gate_res: Any) -> str:
         return f"품질 기준 위반({cause})을 배제하고 담백하고 자연스러운 이웃 댓글로 다시 작성해 주세요."
 
 
+def check_food_relevance(
+    draft: str,
+    excerpt: str,
+    verified_anchors: List[str],
+    reaction_mode: str = "detail_observation",
+) -> Tuple[bool, str]:
+    """
+    3단계 음식 연관성(Relevance) 검증:
+    A. Direct anchor: 검증된 음식 앵커 직접 언급
+    B. Grounded sensory evidence: 본문과 초안 양쪽에 공통 존재하는 감각/맛/식감 키워드
+    C. Reaction-plan compatible semantic signal:
+       - combination_curiosity: 조합, 어떤 맛, 궁금, 독특, 어우러, 궁합, 호불호
+       - taste_reaction: 맛, 향, 식감, 풍미, 맛있는, 느낌
+       - visual_reaction: 푸짐, 비주얼, 두툼, 가득, 색감, 플레이팅, 사진
+       - future_interest: 맛보고 싶, 먹어보고 싶, 궁금하네요, 궁금해
+    """
+    draft_clean = (draft or "").strip()
+    excerpt_clean = (excerpt or "").strip()
+
+    # Exclusively non-food topics check (매장 인테리어, 주차 등에만 치우침)
+    non_food_terms = ("주차", "위치", "인테리어", "매장 분위기", "접근성", "화장실")
+    is_exclusively_non_food = (
+        any(t in draft_clean for t in non_food_terms)
+        and not any(a in draft_clean for a in verified_anchors)
+        and not any(w in draft_clean for w in ("맛", "식감", "메뉴", "조합", "향", "비주얼", "바삭", "촉촉", "고소", "양", "푸짐"))
+    )
+    if is_exclusively_non_food:
+        return False, "exclusively_non_food"
+
+    # Tier A: Direct anchor mention
+    for a in verified_anchors:
+        if a and a in draft_clean:
+            return True, f"tier_a_direct_anchor:{a}"
+
+    # Tier B: Grounded sensory evidence (공통 감각/식감/맛 어휘가 본문과 초안 양쪽에 존재)
+    sensory_terms = (
+        "바삭", "촉촉", "고소", "쫀득", "쫄깃", "진한 향", "매콤", "얼큰", "단짠",
+        "육즙", "부드러", "달달", "담백", "시원", "칼칼", "풍미", "불향", "알싸",
+        "달콤", "새콤", "짭짤", "식감", "튀김옷"
+    )
+    for term in sensory_terms:
+        if term in draft_clean and term in excerpt_clean:
+            return True, f"tier_b_grounded_sensory:{term}"
+
+    # Tier C: Reaction-plan compatible semantic signal
+    if reaction_mode == "combination_curiosity":
+        combo_signals = ("조합", "어떤 맛", "궁금", "독특", "어우러", "궁합", "호불호")
+        if any(s in draft_clean for s in combo_signals):
+            return True, "tier_c_combination_semantic"
+    elif reaction_mode == "taste_reaction":
+        taste_signals = ("맛", "향", "식감", "풍미", "맛있", "느낌")
+        if any(s in draft_clean for s in taste_signals):
+            return True, "tier_c_taste_semantic"
+    elif reaction_mode == "visual_reaction":
+        visual_signals = ("푸짐", "비주얼", "두툼", "가득", "색감", "플레이팅", "사진")
+        if any(s in draft_clean for s in visual_signals):
+            return True, "tier_c_visual_semantic"
+    elif reaction_mode == "future_interest":
+        interest_signals = ("맛보고 싶", "먹어보고 싶", "궁금하네요", "궁금해", "먹어보고")
+        if any(s in draft_clean for s in interest_signals):
+            return True, "tier_c_future_interest_semantic"
+
+    return False, "no_food_anchor_or_sensory_evidence"
+
+
 @dataclass
 class GenerationContext:
     """
@@ -115,6 +180,7 @@ class GenerationContext:
     reaction_plan: Optional[Any] = None
     selected_context: str = ""
     needs_more_context: bool = False
+    style_config: Dict[str, Any] = field(default_factory=dict)
 
     def update_excerpt(self, new_excerpt: str) -> None:
         from services.comment_context_selector import select_comment_context
@@ -124,7 +190,16 @@ class GenerationContext:
         from services.comments.policy import CommentStylePolicy
 
         self.excerpt = new_excerpt
-        context_res = select_comment_context(title=self.title or "", body=self.excerpt or "", max_chars=600)
+        disc_domain, pref_anchors, pref_terms = ReactionContextPlanner.discover_domain_and_terms(
+            self.title or "", self.excerpt or ""
+        )
+        context_res = select_comment_context(
+            title=self.title or "",
+            body=self.excerpt or "",
+            max_chars=600,
+            preferred_anchors=pref_anchors,
+            preferred_terms=pref_terms,
+        )
         self.selected_context = context_res.excerpt if context_res.excerpt else (self.excerpt or "")
         self.needs_more_context = context_res.needs_more_context
 
@@ -149,6 +224,7 @@ class GenerationContext:
         self.style_profile = profile
         self.style_policy = CommentStylePolicy.from_context(
             preset=self.preset,
+            config=self.style_config,
             style_profile=self.style_profile,
             action_plan=None,
         )
@@ -161,6 +237,8 @@ class GenerationContext:
         request_id: Optional[str] = None,
         previous_draft: Optional[str] = None,
     ) -> str:
+        if self.needs_more_context:
+            return ""
         self.attempt_count += 1
         rid = request_id or uuid.uuid4().hex
         if rewrite_feedback:
@@ -300,19 +378,21 @@ class PostProcessor:
         # P1-1 Invariant: if auto_comment_submit_enabled is active, comment pipeline is always enabled
         self.comment_enabled = bool(comment_enabled or self.auto_comment_submit_enabled)
         self._processed_post_keys: set[str] = set()
-        self.ai_prompt_version = str(cfg_dict.get("ai_prompt_version", "3.4.0-youthful-mobile"))
+        self.ai_prompt_version = str(cfg_dict.get("ai_prompt_version", "3.5.0-reaction-planned"))
         self.current_stage: str = "init"
         self.current_post_key: Optional[str] = None
         self.current_request_id: Optional[str] = None
         self.current_result: Optional[PostProcessResult] = None
         self._neighbor_suffix_seen_blogs: set[str] = set()
+        self._recent_reaction_modes: List[str] = []
 
     def _prepare_comment_generation_context(
         self,
         post: FeedPost,
         action_plan: Optional[PostActionPlan] = None,
         preset: Optional[str] = None,
-        request_id: Optional[str] = None
+        request_id: Optional[str] = None,
+        detail_page: Optional[Any] = None,
     ) -> Tuple[GenerationContext, str, str, str, str]:
         preset = preset or self.config.get("comment_style_preset", "community")
         suffix = DraftService.resolve_suffix(post.source, self.config)
@@ -333,20 +413,64 @@ class PostProcessor:
 
         from services.comment_context_selector import select_comment_context
         from services.reaction_planner import ReactionContextPlanner
+        from services.food_comment_focus import FoodCommentFocus
 
-        context_res = select_comment_context(title=post.title or "", body=post.excerpt or "", max_chars=600)
+        # 1. 1차 Domain / Anchor Discovery (원문 기준)
+        disc_domain, pref_anchors, pref_terms = ReactionContextPlanner.discover_domain_and_terms(
+            post.title or "", post.excerpt or ""
+        )
+
+        context_res = select_comment_context(
+            title=post.title or "",
+            body=post.excerpt or "",
+            max_chars=600,
+            preferred_anchors=pref_anchors,
+            preferred_terms=pref_terms,
+        )
+
+        # needs_more_context 제어 흐름: 근거 부족 시 1회 본문 확장 시도
+        if not context_res.needs_more_context:
+            logger.log(f"[CONTEXT_PLAN] selected={len(context_res.excerpt)} meaningful=true")
+        else:
+            logger.log("[CONTEXT_PLAN] meaningful=false action=expand")
+            expanded_body = post.excerpt or ""
+            if detail_page:
+                try:
+                    from naver.content_extractor import ContentContextExtractor
+                    expanded_ctx = ContentContextExtractor.extract(
+                        detail_page, post, max_chars=max(self.ai_context_max_chars * 2, 3000)
+                    )
+                    if (expanded_ctx.excerpt or "") != (post.excerpt or ""):
+                        expanded_body = expanded_ctx.excerpt or post.excerpt or ""
+                        post.excerpt = expanded_body
+                except Exception as e:
+                    logger.log(f"[CONTEXT_PLAN] expansion error: {e}")
+
+            context_res = select_comment_context(
+                title=post.title or "",
+                body=expanded_body,
+                max_chars=600,
+                preferred_anchors=pref_anchors,
+                preferred_terms=pref_terms,
+            )
+            if not context_res.needs_more_context:
+                logger.log(f"[CONTEXT_PLAN] selected={len(context_res.excerpt)} meaningful=true")
+            else:
+                logger.log("[CONTEXT_PLAN] extended_meaningful=false action=skip")
+
         selected_context = context_res.excerpt if context_res.excerpt else (post.excerpt or "")
 
-        from services.food_comment_focus import FoodCommentFocus
         food_focus_info = FoodCommentFocus.analyze(post.title or "", selected_context or post.excerpt or "")
         content_focus = food_focus_info["focus"]
         food_anchors = food_focus_info["food_anchors"]
         sec_anchors = food_focus_info.get("secondary_anchors", [])
 
+        recent_modes = getattr(self, "_recent_reaction_modes", [])
         reaction_plan = ReactionContextPlanner.plan(
             title=post.title or "",
             excerpt=selected_context,
             food_focus_info=food_focus_info,
+            recent_reaction_modes=recent_modes,
         )
         logger.log(
             f"[REACTION_PLAN] domain={reaction_plan.domain} mode={reaction_plan.reaction_mode} "
@@ -374,6 +498,7 @@ class PostProcessor:
             action_plan=action_plan,
         )
 
+        cfg_dict = self.config if isinstance(self.config, dict) else (self.config.data if hasattr(self.config, "data") else {})
         style_plan = (action_plan.style_plan if action_plan else None)
         prompt_ver = getattr(self, "ai_prompt_version", "3.5.0-reaction-planned")
         gen_ctx = GenerationContext(
@@ -395,6 +520,7 @@ class PostProcessor:
             reaction_plan=reaction_plan,
             selected_context=selected_context,
             needs_more_context=context_res.needs_more_context,
+            style_config=cfg_dict,
         )
 
         req_id = request_id or uuid.uuid4().hex
@@ -693,7 +819,8 @@ class PostProcessor:
                 if detail_context is None:
                     detail_context = ContentContextExtractor.extract(detail_page, post, max_chars=self.ai_context_max_chars)
                     post.title = detail_context.title or post.title
-                    post.excerpt = detail_context.excerpt
+                    if detail_context.excerpt and detail_context.excerpt.strip():
+                        post.excerpt = detail_context.excerpt
                     if pre_like_target_delay > 0:
                         pre_like_anchor_monotonic = time.monotonic()
                         pre_like_deadline = pre_like_anchor_monotonic + pre_like_target_delay
@@ -708,9 +835,9 @@ class PostProcessor:
                             )
                             if preflight and preflight.ready:
                                 early_gen_ctx, early_request_id, early_ai_prompt, early_suffix, early_preset = self._prepare_comment_generation_context(
-                                    post=post, action_plan=action_plan
+                                    post=post, action_plan=action_plan, detail_page=detail_page
                                 )
-                                if early_ai_prompt:
+                                if early_ai_prompt and not early_gen_ctx.needs_more_context:
                                     gemini_timeout = float(self.config.get("gemini_response_timeout", 55.0))
                                     early_cmd = GeminiCommand.create(
                                         post_key=post.key,
@@ -907,11 +1034,11 @@ class PostProcessor:
                         # 3-3. 내 댓글이 없는 것이 확실한 경우(ABSENT HIGH)에만 초안 생성 및 주입
                         context = detail_context or ContentContextExtractor.extract(detail_page, post, max_chars=self.ai_context_max_chars)
                         post.title = context.title or post.title
-                        post.excerpt = context.excerpt
-                        if not post.excerpt.strip():
+                        if context.excerpt and context.excerpt.strip():
+                            post.excerpt = context.excerpt
+
+                        if not (post.excerpt or "").strip():
                             _cancel_early_command("content_extraction_insufficient")
-                            # Never manufacture a plausible reply from a title
-                            # when the locked/changed page yielded no body.
                             logger.log("  ⚠️ [COMMENT] 본문을 확인하지 못해 제목만으로 댓글을 만들지 않았습니다. 페이지를 확인하거나 발췌문을 보완해 주세요.", "WARNING")
                             result.comment_result = CommentProcessResult(
                                 status=CommentSubmitState.FAILED,
@@ -944,8 +1071,20 @@ class PostProcessor:
                             preset = early_preset
                         else:
                             gen_ctx, request_id, ai_prompt, suffix, preset = self._prepare_comment_generation_context(
-                                post=post, action_plan=action_plan
+                                post=post, action_plan=action_plan, detail_page=detail_page
                             )
+
+                        if self.gemini_web_enabled and gen_ctx.needs_more_context:
+                            _cancel_early_command("insufficient_context")
+                            logger.log("  ⚠️ [COMMENT] 유의미한 본문 근거 부족(needs_more_context)으로 댓글 생성을 건너뜁니다 (SKIP).")
+                            result.comment_result = CommentProcessResult(
+                                status=CommentSubmitState.SKIPPED,
+                                error="insufficient_context",
+                            )
+                            if self.state_mgr:
+                                self.state_mgr.update(new_state=FeedState.SKIPPING, inc_skip=True, message="본문 근거 부족으로 댓글 건너뜀")
+                            return result
+
                         content_focus = gen_ctx.content_focus
 
                         draft_text = ""
@@ -1457,15 +1596,18 @@ class PostProcessor:
                                                         has_food_details = bool(gen_ctx.verified_anchors) or FoodCommentFocus.analyze(gen_ctx.title, gen_ctx.excerpt).get("has_food_details", False)
 
                                                         if is_food_or_cafe and has_food_details:
-                                                            is_food_miss = False
-                                                            if selected_anchor == "none":
-                                                                is_food_miss = True
-                                                            elif not matched_food and any(sec in gemini_answer for sec in ("주차", "위치", "인테리어", "매장", "공간", "접근성")):
-                                                                # 음식 디테일이 있는데 매장/장소에만 반응한 경우
-                                                                is_food_miss = True
-
-                                                            if is_food_miss:
-                                                                logger.log(f"⚠️ [COMMENT][FOOD_FOCUS_MISS] post={post.key} selected_anchor={selected_anchor} answer={gemini_answer!r}", "WARNING")
+                                                            rx_mode = gen_ctx.reaction_plan.reaction_mode if (gen_ctx.reaction_plan and hasattr(gen_ctx.reaction_plan, "reaction_mode")) else "detail_observation"
+                                                            is_food_relevant, rel_reason = check_food_relevance(
+                                                                draft=gemini_answer,
+                                                                excerpt=gen_ctx.selected_context or gen_ctx.excerpt,
+                                                                verified_anchors=gen_ctx.verified_anchors,
+                                                                reaction_mode=rx_mode,
+                                                            )
+                                                            is_food_miss = not is_food_relevant
+                                                            if is_food_relevant:
+                                                                logger.log(f"  🍲 [FOOD_RELEVANCE_PASS] post={post.key} evidence={rel_reason}")
+                                                            else:
+                                                                logger.log(f"⚠️ [COMMENT][FOOD_FOCUS_MISS] post={post.key} reason={rel_reason} answer={gemini_answer!r}", "WARNING")
                                                                 if not getattr(self, "_quality_food_retry_done", False) and gen_ctx.attempt_count < gen_ctx.max_attempts:
                                                                     self._quality_food_retry_done = True
                                                                     feedback = "음식/메뉴/맛에 대한 구체적인 디테일이나 조합에 반응해 주세요 (매장/인테리어/일반 분위기 반응 지양)."
@@ -1633,6 +1775,9 @@ class PostProcessor:
                             if gate_res.valid:
                                 draft_text = cand_composed
                                 draft_source_label = "Gemini 생성"
+                                if gen_ctx.reaction_plan and hasattr(gen_ctx.reaction_plan, "reaction_mode"):
+                                    self._recent_reaction_modes.append(gen_ctx.reaction_plan.reaction_mode)
+                                    self._recent_reaction_modes = self._recent_reaction_modes[-10:]
                                 if self.state_mgr:
                                     self.state_mgr.update(inc_gen_success=True)
                             elif gate_res.code in FinalQualityGate.AUTO_REPAIRABLE_CODES and not getattr(self, "_gemini_auto_repair_done", False):
@@ -1647,6 +1792,9 @@ class PostProcessor:
                                 if repaired_text and repaired_gate.valid:
                                     draft_text = repaired_text
                                     draft_source_label = "Gemini 생성 (자동수정)"
+                                    if gen_ctx.reaction_plan and hasattr(gen_ctx.reaction_plan, "reaction_mode"):
+                                        self._recent_reaction_modes.append(gen_ctx.reaction_plan.reaction_mode)
+                                        self._recent_reaction_modes = self._recent_reaction_modes[-10:]
                                     logger.log(
                                         f"[GEMINI][AUTO_REPAIRED] code={gate_res.code} matched={gate_res.matched!r} "
                                         f"original_chars={len(cand_composed)} repaired_chars={len(repaired_text)}"

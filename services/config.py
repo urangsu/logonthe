@@ -60,7 +60,7 @@ DEFAULT_CONFIG_V2: Dict[str, Any] = {
     "ai_clipboard_enabled": True,
     "ai_context_max_chars": 700,
     "ai_prompt_style": "warm_short",
-    "ai_prompt_version": "3.4.0-youthful-mobile",
+    "ai_prompt_version": "3.5.0-reaction-planned",
     "allow_soft_laughter": True,
     "allow_soft_emoji": False,
     "append_fixed_suffix_to_ai": False,
@@ -124,16 +124,22 @@ def migrate_comment_style_preset(data: Dict[str, Any]) -> Dict[str, Any]:
 
 
 def migrate_ai_prompt_version(data: Dict[str, Any]) -> Dict[str, Any]:
-    """이전 기본 프롬프트를 20대 모바일 대화체 기본값으로 승격한다."""
+    """이전 기본 프롬프트를 v3.5 ReactionPlan 기본값으로 승격한다."""
     migrated = dict(data)
     ver = str(migrated.get("ai_prompt_version") or "").strip()
     if not ver or ver in (
+        "3.0",
+        "3.1",
+        "3.2",
+        "3.3",
+        "3.4",
         "3.0.0-grounded-human",
         "3.1.0-grounded-human",
         "3.2.0-grounded-human",
         "3.3.0-context-lean",
+        "3.4.0-youthful-mobile",
     ):
-        migrated["ai_prompt_version"] = "3.4.0-youthful-mobile"
+        migrated["ai_prompt_version"] = "3.5.0-reaction-planned"
     return migrated
 
 

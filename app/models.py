@@ -105,7 +105,6 @@ class StylePlan:
     intensity: str = "crisp"  # "crisp", "playful"
     ending_family: str = "~네요"  # "~네요", "~겠어요", "~보여요"
     emphasis: str = "none"  # "none", "once"
-    reaction_mode: str = "detail_observation"  # "detail_observation", "curiosity", "future_interest"
 
     def to_dict(self) -> dict:
         return {
@@ -114,7 +113,6 @@ class StylePlan:
             "intensity": self.intensity,
             "ending_family": self.ending_family,
             "emphasis": self.emphasis,
-            "reaction_mode": self.reaction_mode,
         }
 
 

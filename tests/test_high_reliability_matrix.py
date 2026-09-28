@@ -152,7 +152,7 @@ class TestHighReliabilityMatrix(unittest.TestCase):
         with patch("naver.interaction.CommentInteractionService.open_comment_layer", return_value=(True, "ok")), \
              patch("naver.comment_guard.ServerCommentDuplicateGuard.scan_page_for_my_comment", return_value=CommentPresenceResult(state=CommentPresenceState.ABSENT, confidence="high")), \
              patch("naver.content_extractor.ContentContextExtractor.extract", side_effect=[
-                 PostContext(title=self.post.title, excerpt="초기 짧은 서두"),
+                 PostContext(title=self.post.title, excerpt="초기 서두입니다. 오늘 방문한 돈까스 매장 후기를 작성합니다."),
                  PostContext(title=self.post.title, excerpt="신규 1800자 상세 정보: 치즈 돈까스가 12000원이고 바삭합니다."),
              ]), \
              patch("services.draft.DraftService.clean_ai_response", return_value="새로운 본문 증거를 반영한 치즈 돈까스 댓글이네요~"), \

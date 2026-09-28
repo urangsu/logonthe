@@ -18,8 +18,6 @@ class StylePlanService:
     REACTION_TYPES_THOUGHTFUL = ["구체적 디테일 반응", "정중한 소감", "진중한 응원"]
     REACTION_TYPES_ENTHUSIASTIC = ["열렬한 감탄", "적극적 관심", "열정적 반응"]
 
-    REACTION_MODES = ["detail_observation", "curiosity", "future_interest"]
-
     LENGTH_BANDS = ["보통", "짧게"]
     ENDING_FAMILIES = ["~네요", "~겠어요", "~보여요"]
 
@@ -78,7 +76,6 @@ class StylePlanService:
             k=1
         )[0]
         chosen_reaction = rng.choice(reaction_candidates)
-        chosen_mode = rng.choice(cls.REACTION_MODES)
         chosen_length = rng.choice(cls.LENGTH_BANDS)
         chosen_intensity = rng.choice(intensity_candidates)
         chosen_emphasis = rng.choices(["없음", "한 번"], weights=emphasis_weights, k=1)[0]
@@ -89,11 +86,10 @@ class StylePlanService:
             intensity=chosen_intensity,
             ending_family=chosen_ending,
             emphasis=chosen_emphasis,
-            reaction_mode=chosen_mode,
         )
 
         logger.log(
             f"[STYLE_PLAN] post={post_key} preset={preset} reaction={plan.reaction_type} "
-            f"mode={plan.reaction_mode} ending={plan.ending_family} intensity={plan.intensity} len={plan.length_band}"
+            f"ending={plan.ending_family} intensity={plan.intensity} len={plan.length_band}"
         )
         return plan
