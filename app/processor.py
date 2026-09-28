@@ -61,7 +61,12 @@ def build_quality_rewrite_feedback(gate_res: Any) -> str:
         return f"가보지 않은 곳을 가본 척하거나 직접 해본 척하는 표현{hint} 대신, 포스팅을 본 소감으로 작성해 주세요."
     elif code == "absolute_or_pressure":
         hint = f"('{matched}')" if matched else ""
-        return f"강요하거나 단정적인 어휘{hint} 대신 부드럽고 가벼운 공감 어조로 작성해 주세요."
+        return f"강요하거나 단정적인 어휘{hint} 대신 부드럽고 가벼운 대화체로 작성해 주세요."
+    elif code == "implied_shared_experience":
+        hint = f"('{matched}')" if matched else ""
+        return f"직접 경험한 듯한 공감이나 과거 경험 암시{hint}(공감돼요, 저도 그래요 등)를 배제하고, 관찰자의 시선에서 본문 디테일에 반응해 주세요."
+    elif code == "food_focus_miss":
+        return "음식/메뉴/맛에 대한 구체적인 디테일이나 조합에 반응해 주세요 (매장/인테리어/일반 분위기 반응 지양)."
     elif code == "forbidden_period":
         return "문장 끝이나 중간에 마침표(.)를 사용하지 말고 물결(~)이나 여운을 주는 어미(~네요)로 마무리해 주세요."
     elif code == "excessive_tilde":
@@ -106,17 +111,34 @@ class GenerationContext:
     max_attempts: int = 3
     rewrite_reasons: List[str] = field(default_factory=list)
     style_policy: Optional[Any] = None
-    prompt_version: str = "3.4.0-youthful-mobile"
+    prompt_version: str = "3.5.0-reaction-planned"
+    reaction_plan: Optional[Any] = None
+    selected_context: str = ""
+    needs_more_context: bool = False
 
     def update_excerpt(self, new_excerpt: str) -> None:
+        from services.comment_context_selector import select_comment_context
         from services.food_comment_focus import FoodCommentFocus
+        from services.reaction_planner import ReactionContextPlanner
         from services.user_learning_service import UserLearningService
         from services.comments.policy import CommentStylePolicy
+
         self.excerpt = new_excerpt
-        info = FoodCommentFocus.analyze(self.title or "", self.excerpt or "")
+        context_res = select_comment_context(title=self.title or "", body=self.excerpt or "", max_chars=600)
+        self.selected_context = context_res.excerpt if context_res.excerpt else (self.excerpt or "")
+        self.needs_more_context = context_res.needs_more_context
+
+        info = FoodCommentFocus.analyze(self.title or "", self.selected_context or self.excerpt or "")
         self.content_focus = info.get("focus", "GENERAL")
         self.verified_anchors = info.get("food_anchors", [])
         self.secondary_anchors = info.get("secondary_anchors", [])
+
+        self.reaction_plan = ReactionContextPlanner.plan(
+            title=self.title or "",
+            excerpt=self.selected_context,
+            food_focus_info=info,
+        )
+
         examples, stats, profile = UserLearningService.get_learning_context(
             category=self.content_focus,
             anchors=self.verified_anchors,
@@ -144,6 +166,7 @@ class GenerationContext:
         if rewrite_feedback:
             self.rewrite_reasons.append(rewrite_feedback)
         comments_to_use = self.recent_comments if recent_comments is None else recent_comments
+        rx_inst = self.reaction_plan.reaction_instruction if (self.reaction_plan and hasattr(self.reaction_plan, "reaction_instruction")) else None
         return AIPromptBuilder.build(
             title=self.title,
             excerpt=self.excerpt,
@@ -162,6 +185,9 @@ class GenerationContext:
             corpus_stats=self.corpus_stats,
             style_policy=self.style_policy,
             previous_draft=previous_draft,
+            reaction_plan=self.reaction_plan,
+            reaction_instruction=rx_inst,
+            selected_context=self.selected_context,
             version=self.prompt_version,
         )
 
@@ -305,11 +331,27 @@ class PostProcessor:
             )
             suffix = ""
 
+        from services.comment_context_selector import select_comment_context
+        from services.reaction_planner import ReactionContextPlanner
+
+        context_res = select_comment_context(title=post.title or "", body=post.excerpt or "", max_chars=600)
+        selected_context = context_res.excerpt if context_res.excerpt else (post.excerpt or "")
+
         from services.food_comment_focus import FoodCommentFocus
-        food_focus_info = FoodCommentFocus.analyze(post.title or "", post.excerpt or "")
+        food_focus_info = FoodCommentFocus.analyze(post.title or "", selected_context or post.excerpt or "")
         content_focus = food_focus_info["focus"]
         food_anchors = food_focus_info["food_anchors"]
         sec_anchors = food_focus_info.get("secondary_anchors", [])
+
+        reaction_plan = ReactionContextPlanner.plan(
+            title=post.title or "",
+            excerpt=selected_context,
+            food_focus_info=food_focus_info,
+        )
+        logger.log(
+            f"[REACTION_PLAN] domain={reaction_plan.domain} mode={reaction_plan.reaction_mode} "
+            f"anchor={reaction_plan.primary_anchor} sec={reaction_plan.secondary_anchor}"
+        )
         if content_focus != "GENERAL":
             logger.log(f"[FOOD_FOCUS] focus={content_focus} anchors={food_anchors[:3]} secondary={sec_anchors[:3]}")
 
@@ -333,7 +375,7 @@ class PostProcessor:
         )
 
         style_plan = (action_plan.style_plan if action_plan else None)
-        prompt_ver = getattr(self, "ai_prompt_version", "3.4.0-youthful-mobile")
+        prompt_ver = getattr(self, "ai_prompt_version", "3.5.0-reaction-planned")
         gen_ctx = GenerationContext(
             title=post.title or "",
             excerpt=post.excerpt or "",
@@ -350,6 +392,9 @@ class PostProcessor:
             max_attempts=3,
             style_policy=style_policy,
             prompt_version=prompt_ver,
+            reaction_plan=reaction_plan,
+            selected_context=selected_context,
+            needs_more_context=context_res.needs_more_context,
         )
 
         req_id = request_id or uuid.uuid4().hex
@@ -539,6 +584,7 @@ class PostProcessor:
         self._contamination_retry_done = False
         self._food_anchor_retry_done = False
         self._quality_body_retry_done = False
+        self._quality_food_retry_done = False
         self._gemini_auto_repair_done = False
         # TargetPostGuard: 대상 글 일치 여부 확인 (Fail-Open 원천 차단)
         self.current_stage = "target_guard"
@@ -1256,11 +1302,17 @@ class PostProcessor:
                                                         self.state_mgr.update(
                                                             message=f"댓글 생성은 완료됐지만 최종 품질검사를 통과하지 못해 등록하지 않았습니다. 사유: {body_gate.code}"
                                                         )
+                                                    is_skip_code = body_gate.code in ("implied_shared_experience", "food_focus_miss")
+                                                    status = CommentSubmitState.SKIPPED if is_skip_code else CommentSubmitState.FAILED
+                                                    if is_skip_code and self.state_mgr:
+                                                        self.state_mgr.update(new_state=FeedState.SKIPPING, inc_skip=True)
                                                     result.comment_result = CommentProcessResult(
-                                                        status=CommentSubmitState.FAILED,
+                                                        status=status,
                                                         error=f"quality_body:{body_gate.code}",
                                                     )
                                                     gemini_answer = None
+                                                    if is_skip_code:
+                                                        return result
                                                 else:
                                                     # Step 2: Combined / Suffix validation
                                                     candidate_with_suffix = DraftService.compose_body_and_suffix(gemini_answer, suffix)
@@ -1325,12 +1377,18 @@ class PostProcessor:
                                                             self.state_mgr.update(
                                                                 message=f"댓글 생성은 완료됐지만 최종 품질검사를 통과하지 못해 등록하지 않았습니다. 사유: {combined_gate.code}"
                                                             )
+                                                        is_skip_code = combined_gate.code in ("implied_shared_experience", "food_focus_miss")
+                                                        status = CommentSubmitState.SKIPPED if is_skip_code else CommentSubmitState.FAILED
+                                                        if is_skip_code and self.state_mgr:
+                                                            self.state_mgr.update(new_state=FeedState.SKIPPING, inc_skip=True)
                                                         result.comment_result = CommentProcessResult(
-                                                            status=CommentSubmitState.FAILED,
+                                                            status=status,
                                                             error=f"quality_suffix:{combined_gate.code}",
                                                         )
                                                         gemini_answer = None
                                                         validated_final_text = None
+                                                        if is_skip_code:
+                                                            return result
                                                     else:
                                                         logger.log(
                                                             f"✅ [GEMINI/EXTENSION] 품질 검사 통과: "
@@ -1395,17 +1453,54 @@ class PostProcessor:
                                                             logger.log(f"[FOOD_COMMENT] focus={content_focus} selected_anchor={selected_anchor}")
 
                                                         # Lexical overlap is diagnostic, not semantic proof.
-                                                        is_food_or_cafe = content_focus in ("FOOD_RESTAURANT", "FOOD_PRODUCT", "CAFE_DESSERT")
-                                                        if is_food_or_cafe and gen_ctx.verified_anchors and selected_anchor == "none":
-                                                            logger.log(f"[COMMENT][RELEVANCE_ADVISORY] code=no_lexical_anchor post={post.key}")
+                                                        is_food_or_cafe = content_focus in ("FOOD_RESTAURANT", "FOOD_PRODUCT", "CAFE_DESSERT") or (getattr(gen_ctx, "reaction_plan", None) and gen_ctx.reaction_plan.domain == "FOOD")
+                                                        has_food_details = bool(gen_ctx.verified_anchors) or FoodCommentFocus.analyze(gen_ctx.title, gen_ctx.excerpt).get("has_food_details", False)
 
-                                                        # Check if food anchors were available but Gemini only commented on secondary place anchors
-                                                        if (
-                                                            FoodCommentFocus.analyze(gen_ctx.title, gen_ctx.excerpt).get("has_food_details")
-                                                            and not matched_food
-                                                            and any(sec in gemini_answer for sec in ("주차", "위치", "인테리어", "매장", "공간", "접근성"))
-                                                        ):
-                                                            logger.log(f"[COMMENT][RELEVANCE_ADVISORY] code=place_reaction post={post.key}")
+                                                        if is_food_or_cafe and has_food_details:
+                                                            is_food_miss = False
+                                                            if selected_anchor == "none":
+                                                                is_food_miss = True
+                                                            elif not matched_food and any(sec in gemini_answer for sec in ("주차", "위치", "인테리어", "매장", "공간", "접근성")):
+                                                                # 음식 디테일이 있는데 매장/장소에만 반응한 경우
+                                                                is_food_miss = True
+
+                                                            if is_food_miss:
+                                                                logger.log(f"⚠️ [COMMENT][FOOD_FOCUS_MISS] post={post.key} selected_anchor={selected_anchor} answer={gemini_answer!r}", "WARNING")
+                                                                if not getattr(self, "_quality_food_retry_done", False) and gen_ctx.attempt_count < gen_ctx.max_attempts:
+                                                                    self._quality_food_retry_done = True
+                                                                    feedback = "음식/메뉴/맛에 대한 구체적인 디테일이나 조합에 반응해 주세요 (매장/인테리어/일반 분위기 반응 지양)."
+                                                                    logger.log(f"🔄 [GEMINI/EXTENSION] 음식 포커스 누락(food_focus_miss) -> 1회 자동 재작성 피드백 반영: {feedback}", "WARNING")
+                                                                    if (self.stop_event and self.stop_event.is_set()) or (self.skip_event and self.skip_event.is_set()):
+                                                                        if self.stop_event and self.stop_event.is_set():
+                                                                            raise StopRequestedException("User stopped before Gemini retry")
+                                                                        result.comment_result = CommentProcessResult(status=CommentSubmitState.SKIPPED, error="user_skipped")
+                                                                        if self.state_mgr:
+                                                                            self.state_mgr.update(new_state=FeedState.SKIPPING, inc_skip=True)
+                                                                        return result
+                                                                    request_id = uuid.uuid4().hex
+                                                                    ai_prompt = gen_ctx.build_prompt(
+                                                                        rewrite_feedback=feedback,
+                                                                        recent_comments=gen_ctx.recent_comments,
+                                                                        request_id=request_id,
+                                                                        previous_draft=gemini_answer,
+                                                                    )
+                                                                    if self.state_mgr:
+                                                                        self.state_mgr.update(
+                                                                            current_ai_prompt=ai_prompt,
+                                                                            message="음식 포커스 보정 1회 재작성 중 (food_focus_miss)...",
+                                                                        )
+                                                                    gemini_answer = None
+                                                                    validated_final_text = None
+                                                                    continue
+                                                                else:
+                                                                    logger.log(f"🛑 [COMMENT][FOOD_FOCUS_MISS_SKIP] post={post.key} 음식 포커스 부재로 댓글 등록을 건너뜁니다 (SKIP).", "WARNING")
+                                                                    if self.state_mgr:
+                                                                        self.state_mgr.update(new_state=FeedState.SKIPPING, inc_skip=True, message="음식 포커스 부재로 댓글 건너뜀")
+                                                                    result.comment_result = CommentProcessResult(
+                                                                        status=CommentSubmitState.SKIPPED,
+                                                                        error="food_focus_miss",
+                                                                    )
+                                                                    return result
                                             else:
                                                 failure = "empty_cleaned_response"
                                                 logger.log("⚠️ [GEMINI/EXTENSION] 정제 후 응답 본문이 비어있음", "WARNING")

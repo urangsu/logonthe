@@ -29,7 +29,7 @@ CATEGORY_REACTIONS: Dict[str, List[Tuple[str, str]]] = {
         ("{anchor} 부분을 이렇게 풀어주니 새롭게 보이네요~", "detail_new_view"),
         ("{anchor} 기준을 짚어준 부분이 눈에 남네요~", "detail_criteria"),
         ("{anchor} 과정이 차근차근 보여서 흥미롭네요~", "detail_process"),
-        ("{anchor} 선택한 이유가 잘 보여서 공감되네요~", "detail_reason"),
+        ("{anchor} 선택한 이유가 잘 보여서 눈에 쏙 들어오네요~", "detail_reason"),
         ("{anchor} 차이를 알려준 부분이 도움 되네요~", "detail_difference"),
     ],
     "FOOD": [

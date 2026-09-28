@@ -104,6 +104,8 @@ _CODE_CATEGORIES: dict = {
     "negation_inversion": "fact_violation",
     "mismatched_attribute_target": "fact_violation",
     "fake_experience": "fact_violation",
+    "implied_shared_experience": "fact_violation",
+    "food_focus_miss": "fact_violation",
     "semantic_mismatch": "fact_violation",
     # style_penalty — auto_repair/재작성으로 복구 시도 후 실패 시 FAILED
     "laughter_or_emoticon": "style_penalty",
@@ -392,6 +394,30 @@ class FinalQualityGate:
         "방문했",
     )
 
+    IMPLIED_SHARED_EXPERIENCE_PHRASES: ClassVar[Tuple[str, ...]] = (
+        "공감돼요",
+        "공감되네요",
+        "완전 공감",
+        "너무 공감",
+        "저도 그래요",
+        "저도 그래",
+        "저도 같은 생각",
+        "그 느낌 알 것 같아요",
+        "그 느낌 알죠",
+        "그 맛 알죠",
+        "그 맛 알 것 같아요",
+        "그 맛 알겠",
+        "저도 이런 거 좋아해요",
+        "저도 이런 스타일 좋아해요",
+        "저도 좋아해요",
+        "저도 좋아하는데",
+    )
+
+    _IMPLIED_SHARED_EXPERIENCE_RE: ClassVar[re.Pattern[str]] = re.compile(
+        r"(?:공감\s*(?:돼|되|합|하|해|가|간|됩|갈|뿜|폭발|만땅)|완전\s*공감|너무\s*공감|적극\s*공감|폭풍\s*공감|무한\s*공감|"
+        r"그\s*(?:맛|느낌)\s*알\s*(?:죠|것|겠)|저도\s*(?:그래|그렇|같은\s*생각|이런\s*(?:거|스타일)|좋아해|좋아하))"
+    )
+
     ABSOLUTE_OR_PRESSURE_PHRASES: ClassVar[Tuple[str, ...]] = (
         "반드시",
         "무조건",
@@ -588,17 +614,7 @@ class FinalQualityGate:
 
         # 사용자 직접 편집본은 AI 초안용 문체 강제 규칙(격식체/매크로/이모지/가짜경험/최소길이)을 면제함
         if not is_user_source:
-            for phrase in cls.FORMAL_SUBSTRINGS:
-                if phrase in normalized:
-                    return result(False, "formal_register", f"formal register is forbidden: {phrase}", matched=phrase)
-            if not legacy:
-                for phrase in cls.HARD_BANNED_MACROS:
-                    if phrase in normalized:
-                        return result(False, "banned_macro", f"summary or macro phrase is forbidden: {phrase}", matched=phrase)
-
-                matched_soft = [p for p in cls.SOFT_AI_PHRASES if p in normalized]
-                if len(matched_soft) >= 2:
-                    return result(False, "banned_macro", f"multiple soft AI phrases: {', '.join(matched_soft)}", matched=matched_soft[0])
+            # 1. 사실 및 경험 위반 우선 검사 (fact_violation)
             for phrase in cls.FAKE_EXPERIENCE_PHRASES:
                 if phrase in normalized:
                     return result(False, "fake_experience", f"unverified past experience is forbidden: {phrase}", matched=phrase)
@@ -610,6 +626,28 @@ class FinalQualityGate:
                     f"unverified past experience is forbidden: {fake_experience.group()}",
                     matched=fake_experience.group(),
                 )
+            for phrase in cls.IMPLIED_SHARED_EXPERIENCE_PHRASES:
+                if phrase in normalized:
+                    return result(False, "implied_shared_experience", f"implied shared experience is forbidden: {phrase}", matched=phrase)
+            implied_match = cls._IMPLIED_SHARED_EXPERIENCE_RE.search(normalized)
+            if implied_match:
+                matched_im = implied_match.group()
+                return result(False, "implied_shared_experience", f"implied shared experience is forbidden: {matched_im}", matched=matched_im)
+            if "공감" in normalized:
+                return result(False, "implied_shared_experience", "the word '공감' is forbidden in AI generated comments", matched="공감")
+
+            # 2. 문체 및 형식 위반 검사 (style_penalty)
+            for phrase in cls.FORMAL_SUBSTRINGS:
+                if phrase in normalized:
+                    return result(False, "formal_register", f"formal register is forbidden: {phrase}", matched=phrase)
+            if not legacy:
+                for phrase in cls.HARD_BANNED_MACROS:
+                    if phrase in normalized:
+                        return result(False, "banned_macro", f"summary or macro phrase is forbidden: {phrase}", matched=phrase)
+
+                matched_soft = [p for p in cls.SOFT_AI_PHRASES if p in normalized]
+                if len(matched_soft) >= 2:
+                    return result(False, "banned_macro", f"multiple soft AI phrases: {', '.join(matched_soft)}", matched=matched_soft[0])
             for phrase in cls.ABSOLUTE_OR_PRESSURE_PHRASES:
                 if phrase in normalized:
                     return result(False, "absolute_or_pressure", f"absolute or pressure wording is forbidden: {phrase}", matched=phrase)
