@@ -1004,6 +1004,18 @@ class CommentDraftInspector:
         "바삭",
     )
 
+    UNVERIFIED_TASTE_WORDS: ClassVar[Tuple[str, ...]] = (
+        "달달",
+        "달콤",
+        "매콤",
+        "얼큰",
+        "칼칼",
+        "알싸",
+        "단짠",
+        "짭조름",
+        "짭짤",
+    )
+
     INVENTED_CAUSALITY_PATTERNS: ClassVar[Tuple[re.Pattern[str], ...]] = (
         re.compile(r"(?:구워서|튀겨서|삶아서|볶아서|쪄서|숙성해서|끓여서|훈제해서)\s*(?:더\s*)?(?:통통|촉촉|쫀득|쫄깃|부드럽|탱글|꼬독|고소|바삭|담백|맛있)"),
         re.compile(r"(?:조합이라|조합이라서)\s*(?:더\s*)?(?:꼬독|쫀득|바삭|고소|촉촉|담백)"),
@@ -1073,6 +1085,27 @@ class CommentDraftInspector:
                         matched=tex_word,
                         feedback=f"본문에 언급되지 않은 식감 추측 표현('{tex_word}')이 포함되어 있습니다. 본문에 없는 식감이나 맛을 추측하지 말고 본문의 실제 내용에만 반응해주세요."
                     )
+
+            # 2-1-B. 본문에 근거 없는 맛/풍미 단정 검사
+            taste_roots = {
+                "달달": ("달", "단맛", "시럽", "설탕", "꿀", "스위트"),
+                "달콤": ("달", "단맛", "시럽", "설탕", "꿀", "스위트"),
+                "매콤": ("매", "맵", "고추", "양념", "핫", "마라"),
+                "얼큰": ("얼큰", "칼칼", "시원", "국물", "해장", "찌개", "탕"),
+                "칼칼": ("칼칼", "얼큰", "시원", "국물", "고추"),
+                "알싸": ("알싸", "마늘", "와사비", "겨자", "파"),
+                "단짠": ("단짠", "달콤", "짭짤", "간장", "단", "짠"),
+                "짭조름": ("짭", "소금", "간장", "간이", "짠"),
+                "짭짤": ("짭", "소금", "간장", "간이", "짠"),
+            }
+            for taste_word, roots in taste_roots.items():
+                if taste_word in normalized:
+                    if not any(r in norm_excerpt for r in roots):
+                        return DraftInspectionResult(
+                            passed=False, stage=2, code="unsupported_taste",
+                            matched=taste_word,
+                            feedback=f"본문에 언급되지 않은 맛 추측 표현('{taste_word}')이 포함되어 있습니다. 본문에 없는 맛이나 특징을 지어내지 말고 본문의 실제 사실에만 반응해주세요."
+                        )
 
             # 2-2. 임의의 인과관계 왜곡 검사 (예: 구워서 더 촉촉)
             for pat in cls.INVENTED_CAUSALITY_PATTERNS:

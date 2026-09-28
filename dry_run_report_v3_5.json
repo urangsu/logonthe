@@ -8,9 +8,9 @@
     "domain": "FOOD",
     "reaction_mode": "combination_curiosity",
     "primary_anchor": "블루치즈",
-    "secondary_anchor": "위치",
-    "evidence": "조합/특수재료 근거(블루치즈와 위치)",
-    "instruction": "블루치즈와 위치 재료와 조합에 관찰자 입장에서 반응해. 먹어본 사람처럼 공감하지 말고 맛에 대한 궁금함이나 조합의 독특함을 표현해.",
+    "secondary_anchor": "피자",
+    "evidence": "조합/특수재료 근거(블루치즈와 피자)",
+    "instruction": "블루치즈와 피자 재료와 조합에 관찰자 입장에서 반응해. 먹어본 사람처럼 공감하지 말고 맛에 대한 궁금함이나 조합의 독특함을 표현해.",
     "prompt_sample": "네이버 블로그 글에 남길 자연스러운 짧은 댓글 하나를 작성해.\n\n[작성 원칙]\n- 말투: 편한 존댓말, 20~60자, 자연스러운 대화체 (마침표 없이 부드럽게 마무리)\n- 본문에서 확인되는 구체적인 내용 하나에 반응해\n- 직접 먹어보거나 가보거나 사용해본 사람처럼 말하지 마\n- \"공감돼요\", \"저도 그래요\", \"그 느낌 알 것 같아요\"처럼 경험을 공유하는 ..."
   },
   {
@@ -21,10 +21,10 @@
     "needs_more_context": true,
     "domain": "FOOD",
     "reaction_mode": "taste_reaction",
-    "primary_anchor": "메뉴",
-    "secondary_anchor": "",
-    "evidence": "본문 맛/식감 언급(메뉴)",
-    "instruction": "본문에 언급된 메뉴의 맛이나 식감 디테일에 관찰자 입장에서 반응해. 본문에 없는 맛이나 식감은 지어내지 마.",
+    "primary_anchor": "돈카츠",
+    "secondary_anchor": "카츠",
+    "evidence": "본문 맛/식감 언급(돈카츠)",
+    "instruction": "본문에 언급된 돈카츠의 맛이나 식감 디테일에 관찰자 입장에서 반응해. 본문에 없는 맛이나 식감은 지어내지 마.",
     "prompt_sample": "네이버 블로그 글에 남길 자연스러운 짧은 댓글 하나를 작성해.\n\n[작성 원칙]\n- 말투: 편한 존댓말, 20~60자, 자연스러운 대화체 (마침표 없이 부드럽게 마무리)\n- 본문에서 확인되는 구체적인 내용 하나에 반응해\n- 직접 먹어보거나 가보거나 사용해본 사람처럼 말하지 마\n- \"공감돼요\", \"저도 그래요\", \"그 느낌 알 것 같아요\"처럼 경험을 공유하는 ..."
   },
   {
@@ -77,10 +77,10 @@
     "needs_more_context": false,
     "domain": "FOOD",
     "reaction_mode": "visual_reaction",
-    "primary_anchor": "버거",
-    "secondary_anchor": "수제버거",
-    "evidence": "시각/구성 디테일(버거)",
-    "instruction": "버거의 비주얼이나 푸짐한 구성에 가볍게 반응해. 직접 먹어본 척하지 마.",
+    "primary_anchor": "수제버거",
+    "secondary_anchor": "버거",
+    "evidence": "시각/구성 디테일(수제버거)",
+    "instruction": "수제버거의 비주얼이나 푸짐한 구성에 가볍게 반응해. 직접 먹어본 척하지 마.",
     "prompt_sample": "네이버 블로그 글에 남길 자연스러운 짧은 댓글 하나를 작성해.\n\n[작성 원칙]\n- 말투: 편한 존댓말, 20~60자, 자연스러운 대화체 (마침표 없이 부드럽게 마무리)\n- 본문에서 확인되는 구체적인 내용 하나에 반응해\n- 직접 먹어보거나 가보거나 사용해본 사람처럼 말하지 마\n- \"공감돼요\", \"저도 그래요\", \"그 느낌 알 것 같아요\"처럼 경험을 공유하는 ..."
   },
   {
@@ -104,11 +104,11 @@
     "selected_context_len": 52,
     "needs_more_context": false,
     "domain": "FOOD",
-    "reaction_mode": "taste_reaction",
+    "reaction_mode": "visual_reaction",
     "primary_anchor": "아이스크림",
     "secondary_anchor": "크로플",
-    "evidence": "본문 맛/식감 언급(아이스크림)",
-    "instruction": "본문에 언급된 아이스크림의 맛이나 식감 디테일에 관찰자 입장에서 반응해. 본문에 없는 맛이나 식감은 지어내지 마.",
+    "evidence": "시각/구성 디테일(아이스크림)",
+    "instruction": "아이스크림의 비주얼이나 푸짐한 구성에 가볍게 반응해. 직접 먹어본 척하지 마.",
     "prompt_sample": "네이버 블로그 글에 남길 자연스러운 짧은 댓글 하나를 작성해.\n\n[작성 원칙]\n- 말투: 편한 존댓말, 20~60자, 자연스러운 대화체 (마침표 없이 부드럽게 마무리)\n- 본문에서 확인되는 구체적인 내용 하나에 반응해\n- 직접 먹어보거나 가보거나 사용해본 사람처럼 말하지 마\n- \"공감돼요\", \"저도 그래요\", \"그 느낌 알 것 같아요\"처럼 경험을 공유하는 ..."
   },
   {
@@ -119,10 +119,10 @@
     "needs_more_context": false,
     "domain": "FOOD",
     "reaction_mode": "taste_reaction",
-    "primary_anchor": "메뉴",
+    "primary_anchor": "떡볶이",
     "secondary_anchor": "",
-    "evidence": "본문 맛/식감 언급(메뉴)",
-    "instruction": "본문에 언급된 메뉴의 맛이나 식감 디테일에 관찰자 입장에서 반응해. 본문에 없는 맛이나 식감은 지어내지 마.",
+    "evidence": "본문 맛/식감 언급(떡볶이)",
+    "instruction": "본문에 언급된 떡볶이의 맛이나 식감 디테일에 관찰자 입장에서 반응해. 본문에 없는 맛이나 식감은 지어내지 마.",
     "prompt_sample": "네이버 블로그 글에 남길 자연스러운 짧은 댓글 하나를 작성해.\n\n[작성 원칙]\n- 말투: 편한 존댓말, 20~60자, 자연스러운 대화체 (마침표 없이 부드럽게 마무리)\n- 본문에서 확인되는 구체적인 내용 하나에 반응해\n- 직접 먹어보거나 가보거나 사용해본 사람처럼 말하지 마\n- \"공감돼요\", \"저도 그래요\", \"그 느낌 알 것 같아요\"처럼 경험을 공유하는 ..."
   },
   {
@@ -147,10 +147,10 @@
     "needs_more_context": true,
     "domain": "FOOD",
     "reaction_mode": "taste_reaction",
-    "primary_anchor": "커피",
-    "secondary_anchor": "",
-    "evidence": "본문 맛/식감 언급(커피)",
-    "instruction": "본문에 언급된 커피의 맛이나 식감 디테일에 관찰자 입장에서 반응해. 본문에 없는 맛이나 식감은 지어내지 마.",
+    "primary_anchor": "에스프레소",
+    "secondary_anchor": "커피",
+    "evidence": "본문 맛/식감 언급(에스프레소)",
+    "instruction": "본문에 언급된 에스프레소의 맛이나 식감 디테일에 관찰자 입장에서 반응해. 본문에 없는 맛이나 식감은 지어내지 마.",
     "prompt_sample": "네이버 블로그 글에 남길 자연스러운 짧은 댓글 하나를 작성해.\n\n[작성 원칙]\n- 말투: 편한 존댓말, 20~60자, 자연스러운 대화체 (마침표 없이 부드럽게 마무리)\n- 본문에서 확인되는 구체적인 내용 하나에 반응해\n- 직접 먹어보거나 가보거나 사용해본 사람처럼 말하지 마\n- \"공감돼요\", \"저도 그래요\", \"그 느낌 알 것 같아요\"처럼 경험을 공유하는 ..."
   },
   {
@@ -175,10 +175,10 @@
     "needs_more_context": true,
     "domain": "FOOD",
     "reaction_mode": "taste_reaction",
-    "primary_anchor": "숯불",
-    "secondary_anchor": "",
-    "evidence": "본문 맛/식감 언급(숯불)",
-    "instruction": "본문에 언급된 숯불의 맛이나 식감 디테일에 관찰자 입장에서 반응해. 본문에 없는 맛이나 식감은 지어내지 마.",
+    "primary_anchor": "장어구이",
+    "secondary_anchor": "장어",
+    "evidence": "본문 맛/식감 언급(장어구이)",
+    "instruction": "본문에 언급된 장어구이의 맛이나 식감 디테일에 관찰자 입장에서 반응해. 본문에 없는 맛이나 식감은 지어내지 마.",
     "prompt_sample": "네이버 블로그 글에 남길 자연스러운 짧은 댓글 하나를 작성해.\n\n[작성 원칙]\n- 말투: 편한 존댓말, 20~60자, 자연스러운 대화체 (마침표 없이 부드럽게 마무리)\n- 본문에서 확인되는 구체적인 내용 하나에 반응해\n- 직접 먹어보거나 가보거나 사용해본 사람처럼 말하지 마\n- \"공감돼요\", \"저도 그래요\", \"그 느낌 알 것 같아요\"처럼 경험을 공유하는 ..."
   },
   {
@@ -188,11 +188,11 @@
     "selected_context_len": 45,
     "needs_more_context": false,
     "domain": "FOOD",
-    "reaction_mode": "taste_reaction",
-    "primary_anchor": "메뉴",
-    "secondary_anchor": "",
-    "evidence": "본문 맛/식감 언급(메뉴)",
-    "instruction": "본문에 언급된 메뉴의 맛이나 식감 디테일에 관찰자 입장에서 반응해. 본문에 없는 맛이나 식감은 지어내지 마.",
+    "reaction_mode": "visual_reaction",
+    "primary_anchor": "튀김",
+    "secondary_anchor": "텐동",
+    "evidence": "시각/구성 디테일(튀김)",
+    "instruction": "튀김의 비주얼이나 푸짐한 구성에 가볍게 반응해. 직접 먹어본 척하지 마.",
     "prompt_sample": "네이버 블로그 글에 남길 자연스러운 짧은 댓글 하나를 작성해.\n\n[작성 원칙]\n- 말투: 편한 존댓말, 20~60자, 자연스러운 대화체 (마침표 없이 부드럽게 마무리)\n- 본문에서 확인되는 구체적인 내용 하나에 반응해\n- 직접 먹어보거나 가보거나 사용해본 사람처럼 말하지 마\n- \"공감돼요\", \"저도 그래요\", \"그 느낌 알 것 같아요\"처럼 경험을 공유하는 ..."
   },
   {
@@ -217,10 +217,10 @@
     "needs_more_context": true,
     "domain": "FOOD",
     "reaction_mode": "taste_reaction",
-    "primary_anchor": "케이크",
-    "secondary_anchor": "",
-    "evidence": "본문 맛/식감 언급(케이크)",
-    "instruction": "본문에 언급된 케이크의 맛이나 식감 디테일에 관찰자 입장에서 반응해. 본문에 없는 맛이나 식감은 지어내지 마.",
+    "primary_anchor": "팬케이크",
+    "secondary_anchor": "케이크",
+    "evidence": "본문 맛/식감 언급(팬케이크)",
+    "instruction": "본문에 언급된 팬케이크의 맛이나 식감 디테일에 관찰자 입장에서 반응해. 본문에 없는 맛이나 식감은 지어내지 마.",
     "prompt_sample": "네이버 블로그 글에 남길 자연스러운 짧은 댓글 하나를 작성해.\n\n[작성 원칙]\n- 말투: 편한 존댓말, 20~60자, 자연스러운 대화체 (마침표 없이 부드럽게 마무리)\n- 본문에서 확인되는 구체적인 내용 하나에 반응해\n- 직접 먹어보거나 가보거나 사용해본 사람처럼 말하지 마\n- \"공감돼요\", \"저도 그래요\", \"그 느낌 알 것 같아요\"처럼 경험을 공유하는 ..."
   },
   {
@@ -232,7 +232,7 @@
     "domain": "FOOD",
     "reaction_mode": "taste_reaction",
     "primary_anchor": "쌀국수",
-    "secondary_anchor": "",
+    "secondary_anchor": "국수",
     "evidence": "본문 맛/식감 언급(쌀국수)",
     "instruction": "본문에 언급된 쌀국수의 맛이나 식감 디테일에 관찰자 입장에서 반응해. 본문에 없는 맛이나 식감은 지어내지 마.",
     "prompt_sample": "네이버 블로그 글에 남길 자연스러운 짧은 댓글 하나를 작성해.\n\n[작성 원칙]\n- 말투: 편한 존댓말, 20~60자, 자연스러운 대화체 (마침표 없이 부드럽게 마무리)\n- 본문에서 확인되는 구체적인 내용 하나에 반응해\n- 직접 먹어보거나 가보거나 사용해본 사람처럼 말하지 마\n- \"공감돼요\", \"저도 그래요\", \"그 느낌 알 것 같아요\"처럼 경험을 공유하는 ..."
@@ -245,10 +245,10 @@
     "needs_more_context": false,
     "domain": "FOOD",
     "reaction_mode": "taste_reaction",
-    "primary_anchor": "닭갈비",
-    "secondary_anchor": "볶음밥",
-    "evidence": "본문 맛/식감 언급(닭갈비)",
-    "instruction": "본문에 언급된 닭갈비의 맛이나 식감 디테일에 관찰자 입장에서 반응해. 본문에 없는 맛이나 식감은 지어내지 마.",
+    "primary_anchor": "볶음밥",
+    "secondary_anchor": "닭갈비",
+    "evidence": "본문 맛/식감 언급(볶음밥)",
+    "instruction": "본문에 언급된 볶음밥의 맛이나 식감 디테일에 관찰자 입장에서 반응해. 본문에 없는 맛이나 식감은 지어내지 마.",
     "prompt_sample": "네이버 블로그 글에 남길 자연스러운 짧은 댓글 하나를 작성해.\n\n[작성 원칙]\n- 말투: 편한 존댓말, 20~60자, 자연스러운 대화체 (마침표 없이 부드럽게 마무리)\n- 본문에서 확인되는 구체적인 내용 하나에 반응해\n- 직접 먹어보거나 가보거나 사용해본 사람처럼 말하지 마\n- \"공감돼요\", \"저도 그래요\", \"그 느낌 알 것 같아요\"처럼 경험을 공유하는 ..."
   },
   {
@@ -273,10 +273,10 @@
     "needs_more_context": false,
     "domain": "FOOD",
     "reaction_mode": "taste_reaction",
-    "primary_anchor": "메뉴",
-    "secondary_anchor": "",
-    "evidence": "본문 맛/식감 언급(메뉴)",
-    "instruction": "본문에 언급된 메뉴의 맛이나 식감 디테일에 관찰자 입장에서 반응해. 본문에 없는 맛이나 식감은 지어내지 마.",
+    "primary_anchor": "누룽지",
+    "secondary_anchor": "솥밥",
+    "evidence": "본문 맛/식감 언급(누룽지)",
+    "instruction": "본문에 언급된 누룽지의 맛이나 식감 디테일에 관찰자 입장에서 반응해. 본문에 없는 맛이나 식감은 지어내지 마.",
     "prompt_sample": "네이버 블로그 글에 남길 자연스러운 짧은 댓글 하나를 작성해.\n\n[작성 원칙]\n- 말투: 편한 존댓말, 20~60자, 자연스러운 대화체 (마침표 없이 부드럽게 마무리)\n- 본문에서 확인되는 구체적인 내용 하나에 반응해\n- 직접 먹어보거나 가보거나 사용해본 사람처럼 말하지 마\n- \"공감돼요\", \"저도 그래요\", \"그 느낌 알 것 같아요\"처럼 경험을 공유하는 ..."
   },
   {
@@ -287,10 +287,10 @@
     "needs_more_context": false,
     "domain": "SERVICE",
     "reaction_mode": "service_reaction",
-    "primary_anchor": "미용실",
-    "secondary_anchor": "",
-    "evidence": "서비스 신호(미용실)",
-    "instruction": "미용실 서비스의 구성이나 진행 방식 디테일에 관찰자 입장에서 반응해.",
+    "primary_anchor": "레이어드컷",
+    "secondary_anchor": "손질",
+    "evidence": "서비스 신호(레이어드컷)",
+    "instruction": "레이어드컷 서비스의 구성이나 진행 방식 디테일에 관찰자 입장에서 반응해.",
     "prompt_sample": "네이버 블로그 글에 남길 자연스러운 짧은 댓글 하나를 작성해.\n\n[작성 원칙]\n- 말투: 편한 존댓말, 20~60자, 자연스러운 대화체 (마침표 없이 부드럽게 마무리)\n- 본문에서 확인되는 구체적인 내용 하나에 반응해\n- 직접 먹어보거나 가보거나 사용해본 사람처럼 말하지 마\n- \"공감돼요\", \"저도 그래요\", \"그 느낌 알 것 같아요\"처럼 경험을 공유하는 ..."
   },
   {
@@ -301,10 +301,10 @@
     "needs_more_context": true,
     "domain": "SERVICE",
     "reaction_mode": "service_reaction",
-    "primary_anchor": "네일",
-    "secondary_anchor": "",
-    "evidence": "서비스 신호(네일)",
-    "instruction": "네일 서비스의 구성이나 진행 방식 디테일에 관찰자 입장에서 반응해.",
+    "primary_anchor": "그라데이션",
+    "secondary_anchor": "케어",
+    "evidence": "서비스 신호(그라데이션)",
+    "instruction": "그라데이션 서비스의 구성이나 진행 방식 디테일에 관찰자 입장에서 반응해.",
     "prompt_sample": "네이버 블로그 글에 남길 자연스러운 짧은 댓글 하나를 작성해.\n\n[작성 원칙]\n- 말투: 편한 존댓말, 20~60자, 자연스러운 대화체 (마침표 없이 부드럽게 마무리)\n- 본문에서 확인되는 구체적인 내용 하나에 반응해\n- 직접 먹어보거나 가보거나 사용해본 사람처럼 말하지 마\n- \"공감돼요\", \"저도 그래요\", \"그 느낌 알 것 같아요\"처럼 경험을 공유하는 ..."
   },
   {
@@ -315,10 +315,10 @@
     "needs_more_context": false,
     "domain": "SERVICE",
     "reaction_mode": "service_reaction",
-    "primary_anchor": "마사지",
-    "secondary_anchor": "에스테틱",
-    "evidence": "서비스 신호(마사지)",
-    "instruction": "마사지 서비스의 구성이나 진행 방식 디테일에 관찰자 입장에서 반응해.",
+    "primary_anchor": "마스크팩",
+    "secondary_anchor": "수분 진정",
+    "evidence": "서비스 신호(마스크팩)",
+    "instruction": "마스크팩 서비스의 구성이나 진행 방식 디테일에 관찰자 입장에서 반응해.",
     "prompt_sample": "네이버 블로그 글에 남길 자연스러운 짧은 댓글 하나를 작성해.\n\n[작성 원칙]\n- 말투: 편한 존댓말, 20~60자, 자연스러운 대화체 (마침표 없이 부드럽게 마무리)\n- 본문에서 확인되는 구체적인 내용 하나에 반응해\n- 직접 먹어보거나 가보거나 사용해본 사람처럼 말하지 마\n- \"공감돼요\", \"저도 그래요\", \"그 느낌 알 것 같아요\"처럼 경험을 공유하는 ..."
   },
   {
@@ -343,10 +343,10 @@
     "needs_more_context": true,
     "domain": "SERVICE",
     "reaction_mode": "service_reaction",
-    "primary_anchor": "세차",
-    "secondary_anchor": "",
-    "evidence": "서비스 신호(세차)",
-    "instruction": "세차 서비스의 구성이나 진행 방식 디테일에 관찰자 입장에서 반응해.",
+    "primary_anchor": "디테일링",
+    "secondary_anchor": "세차",
+    "evidence": "서비스 신호(디테일링)",
+    "instruction": "디테일링 서비스의 구성이나 진행 방식 디테일에 관찰자 입장에서 반응해.",
     "prompt_sample": "네이버 블로그 글에 남길 자연스러운 짧은 댓글 하나를 작성해.\n\n[작성 원칙]\n- 말투: 편한 존댓말, 20~60자, 자연스러운 대화체 (마침표 없이 부드럽게 마무리)\n- 본문에서 확인되는 구체적인 내용 하나에 반응해\n- 직접 먹어보거나 가보거나 사용해본 사람처럼 말하지 마\n- \"공감돼요\", \"저도 그래요\", \"그 느낌 알 것 같아요\"처럼 경험을 공유하는 ..."
   },
   {
@@ -399,10 +399,10 @@
     "needs_more_context": true,
     "domain": "PLACE",
     "reaction_mode": "place_observation",
-    "primary_anchor": "여행",
-    "secondary_anchor": "명소",
-    "evidence": "장소/여행 신호(여행)",
-    "instruction": "여행 관련 풍경이나 코스, 공간 디테일에 관찰자 입장에서 반응해. 직접 가본 척하지 마.",
+    "primary_anchor": "코스",
+    "secondary_anchor": "제주",
+    "evidence": "장소/여행 신호(코스)",
+    "instruction": "코스 관련 풍경이나 코스, 공간 디테일에 관찰자 입장에서 반응해. 직접 가본 척하지 마.",
     "prompt_sample": "네이버 블로그 글에 남길 자연스러운 짧은 댓글 하나를 작성해.\n\n[작성 원칙]\n- 말투: 편한 존댓말, 20~60자, 자연스러운 대화체 (마침표 없이 부드럽게 마무리)\n- 본문에서 확인되는 구체적인 내용 하나에 반응해\n- 직접 먹어보거나 가보거나 사용해본 사람처럼 말하지 마\n- \"공감돼요\", \"저도 그래요\", \"그 느낌 알 것 같아요\"처럼 경험을 공유하는 ..."
   },
   {
@@ -413,10 +413,10 @@
     "needs_more_context": false,
     "domain": "PLACE",
     "reaction_mode": "place_observation",
-    "primary_anchor": "여행",
-    "secondary_anchor": "코스",
-    "evidence": "장소/여행 신호(여행)",
-    "instruction": "여행 관련 풍경이나 코스, 공간 디테일에 관찰자 입장에서 반응해. 직접 가본 척하지 마.",
+    "primary_anchor": "제주",
+    "secondary_anchor": "산책로",
+    "evidence": "장소/여행 신호(제주)",
+    "instruction": "제주 관련 풍경이나 코스, 공간 디테일에 관찰자 입장에서 반응해. 직접 가본 척하지 마.",
     "prompt_sample": "네이버 블로그 글에 남길 자연스러운 짧은 댓글 하나를 작성해.\n\n[작성 원칙]\n- 말투: 편한 존댓말, 20~60자, 자연스러운 대화체 (마침표 없이 부드럽게 마무리)\n- 본문에서 확인되는 구체적인 내용 하나에 반응해\n- 직접 먹어보거나 가보거나 사용해본 사람처럼 말하지 마\n- \"공감돼요\", \"저도 그래요\", \"그 느낌 알 것 같아요\"처럼 경험을 공유하는 ..."
   },
   {
@@ -427,10 +427,10 @@
     "needs_more_context": true,
     "domain": "PLACE",
     "reaction_mode": "place_observation",
-    "primary_anchor": "여행",
-    "secondary_anchor": "숙소",
-    "evidence": "장소/여행 신호(여행)",
-    "instruction": "여행 관련 풍경이나 코스, 공간 디테일에 관찰자 입장에서 반응해. 직접 가본 척하지 마.",
+    "primary_anchor": "강릉",
+    "secondary_anchor": "1박",
+    "evidence": "장소/여행 신호(강릉)",
+    "instruction": "강릉 관련 풍경이나 코스, 공간 디테일에 관찰자 입장에서 반응해. 직접 가본 척하지 마.",
     "prompt_sample": "네이버 블로그 글에 남길 자연스러운 짧은 댓글 하나를 작성해.\n\n[작성 원칙]\n- 말투: 편한 존댓말, 20~60자, 자연스러운 대화체 (마침표 없이 부드럽게 마무리)\n- 본문에서 확인되는 구체적인 내용 하나에 반응해\n- 직접 먹어보거나 가보거나 사용해본 사람처럼 말하지 마\n- \"공감돼요\", \"저도 그래요\", \"그 느낌 알 것 같아요\"처럼 경험을 공유하는 ..."
   },
   {
@@ -441,10 +441,10 @@
     "needs_more_context": true,
     "domain": "PLACE",
     "reaction_mode": "place_observation",
-    "primary_anchor": "여행",
-    "secondary_anchor": "둘레길",
-    "evidence": "장소/여행 신호(여행)",
-    "instruction": "여행 관련 풍경이나 코스, 공간 디테일에 관찰자 입장에서 반응해. 직접 가본 척하지 마.",
+    "primary_anchor": "둘레길",
+    "secondary_anchor": "산책길",
+    "evidence": "장소/여행 신호(둘레길)",
+    "instruction": "둘레길 관련 풍경이나 코스, 공간 디테일에 관찰자 입장에서 반응해. 직접 가본 척하지 마.",
     "prompt_sample": "네이버 블로그 글에 남길 자연스러운 짧은 댓글 하나를 작성해.\n\n[작성 원칙]\n- 말투: 편한 존댓말, 20~60자, 자연스러운 대화체 (마침표 없이 부드럽게 마무리)\n- 본문에서 확인되는 구체적인 내용 하나에 반응해\n- 직접 먹어보거나 가보거나 사용해본 사람처럼 말하지 마\n- \"공감돼요\", \"저도 그래요\", \"그 느낌 알 것 같아요\"처럼 경험을 공유하는 ..."
   },
   {
@@ -455,10 +455,10 @@
     "needs_more_context": true,
     "domain": "PLACE",
     "reaction_mode": "place_observation",
-    "primary_anchor": "코스",
-    "secondary_anchor": "야경",
-    "evidence": "장소/여행 신호(코스)",
-    "instruction": "코스 관련 풍경이나 코스, 공간 디테일에 관찰자 입장에서 반응해. 직접 가본 척하지 마.",
+    "primary_anchor": "바다",
+    "secondary_anchor": "해변",
+    "evidence": "장소/여행 신호(바다)",
+    "instruction": "바다 관련 풍경이나 코스, 공간 디테일에 관찰자 입장에서 반응해. 직접 가본 척하지 마.",
     "prompt_sample": "네이버 블로그 글에 남길 자연스러운 짧은 댓글 하나를 작성해.\n\n[작성 원칙]\n- 말투: 편한 존댓말, 20~60자, 자연스러운 대화체 (마침표 없이 부드럽게 마무리)\n- 본문에서 확인되는 구체적인 내용 하나에 반응해\n- 직접 먹어보거나 가보거나 사용해본 사람처럼 말하지 마\n- \"공감돼요\", \"저도 그래요\", \"그 느낌 알 것 같아요\"처럼 경험을 공유하는 ..."
   },
   {
@@ -483,10 +483,10 @@
     "needs_more_context": true,
     "domain": "PLACE",
     "reaction_mode": "place_observation",
-    "primary_anchor": "풍경",
-    "secondary_anchor": "바다",
-    "evidence": "장소/여행 신호(풍경)",
-    "instruction": "풍경 관련 풍경이나 코스, 공간 디테일에 관찰자 입장에서 반응해. 직접 가본 척하지 마.",
+    "primary_anchor": "바다",
+    "secondary_anchor": "풍경",
+    "evidence": "장소/여행 신호(바다)",
+    "instruction": "바다 관련 풍경이나 코스, 공간 디테일에 관찰자 입장에서 반응해. 직접 가본 척하지 마.",
     "prompt_sample": "네이버 블로그 글에 남길 자연스러운 짧은 댓글 하나를 작성해.\n\n[작성 원칙]\n- 말투: 편한 존댓말, 20~60자, 자연스러운 대화체 (마침표 없이 부드럽게 마무리)\n- 본문에서 확인되는 구체적인 내용 하나에 반응해\n- 직접 먹어보거나 가보거나 사용해본 사람처럼 말하지 마\n- \"공감돼요\", \"저도 그래요\", \"그 느낌 알 것 같아요\"처럼 경험을 공유하는 ..."
   },
   {
@@ -497,10 +497,10 @@
     "needs_more_context": true,
     "domain": "PLACE",
     "reaction_mode": "place_observation",
-    "primary_anchor": "코스",
-    "secondary_anchor": "산책로",
-    "evidence": "장소/여행 신호(코스)",
-    "instruction": "코스 관련 풍경이나 코스, 공간 디테일에 관찰자 입장에서 반응해. 직접 가본 척하지 마.",
+    "primary_anchor": "산책로",
+    "secondary_anchor": "숲길",
+    "evidence": "장소/여행 신호(산책로)",
+    "instruction": "산책로 관련 풍경이나 코스, 공간 디테일에 관찰자 입장에서 반응해. 직접 가본 척하지 마.",
     "prompt_sample": "네이버 블로그 글에 남길 자연스러운 짧은 댓글 하나를 작성해.\n\n[작성 원칙]\n- 말투: 편한 존댓말, 20~60자, 자연스러운 대화체 (마침표 없이 부드럽게 마무리)\n- 본문에서 확인되는 구체적인 내용 하나에 반응해\n- 직접 먹어보거나 가보거나 사용해본 사람처럼 말하지 마\n- \"공감돼요\", \"저도 그래요\", \"그 느낌 알 것 같아요\"처럼 경험을 공유하는 ..."
   },
   {
@@ -567,10 +567,10 @@
     "needs_more_context": false,
     "domain": "PRODUCT",
     "reaction_mode": "feature_reaction",
-    "primary_anchor": "사용기",
-    "secondary_anchor": "배터리",
-    "evidence": "제품 신호(사용기)",
-    "instruction": "제품의 사용기 기능이나 디자인, 사용 디테일에 관찰자 입장에서 가볍게 반응해. 직접 써본 척하지 마.",
+    "primary_anchor": "배터리",
+    "secondary_anchor": "사용기",
+    "evidence": "제품 신호(배터리)",
+    "instruction": "제품의 배터리 기능이나 디자인, 사용 디테일에 관찰자 입장에서 가볍게 반응해. 직접 써본 척하지 마.",
     "prompt_sample": "네이버 블로그 글에 남길 자연스러운 짧은 댓글 하나를 작성해.\n\n[작성 원칙]\n- 말투: 편한 존댓말, 20~60자, 자연스러운 대화체 (마침표 없이 부드럽게 마무리)\n- 본문에서 확인되는 구체적인 내용 하나에 반응해\n- 직접 먹어보거나 가보거나 사용해본 사람처럼 말하지 마\n- \"공감돼요\", \"저도 그래요\", \"그 느낌 알 것 같아요\"처럼 경험을 공유하는 ..."
   },
   {
@@ -610,7 +610,7 @@
     "domain": "PERSONAL",
     "reaction_mode": "writer_feeling",
     "primary_anchor": "합격",
-    "secondary_anchor": "",
+    "secondary_anchor": "자격증",
     "evidence": "일상/감정 신호(합격)",
     "instruction": "작성자가 겪은 상황이나 마음에 가볍게 호응하거나 응원해. 내 경험을 덧붙이지 마.",
     "prompt_sample": "네이버 블로그 글에 남길 자연스러운 짧은 댓글 하나를 작성해.\n\n[작성 원칙]\n- 말투: 편한 존댓말, 20~60자, 자연스러운 대화체 (마침표 없이 부드럽게 마무리)\n- 본문에서 확인되는 구체적인 내용 하나에 반응해\n- 직접 먹어보거나 가보거나 사용해본 사람처럼 말하지 마\n- \"공감돼요\", \"저도 그래요\", \"그 느낌 알 것 같아요\"처럼 경험을 공유하는 ..."
@@ -623,9 +623,9 @@
     "needs_more_context": false,
     "domain": "PERSONAL",
     "reaction_mode": "writer_feeling",
-    "primary_anchor": "생일",
+    "primary_anchor": "친구",
     "secondary_anchor": "마음이",
-    "evidence": "일상/감정 신호(생일)",
+    "evidence": "일상/감정 신호(친구)",
     "instruction": "작성자가 겪은 상황이나 마음에 가볍게 호응하거나 응원해. 내 경험을 덧붙이지 마.",
     "prompt_sample": "네이버 블로그 글에 남길 자연스러운 짧은 댓글 하나를 작성해.\n\n[작성 원칙]\n- 말투: 편한 존댓말, 20~60자, 자연스러운 대화체 (마침표 없이 부드럽게 마무리)\n- 본문에서 확인되는 구체적인 내용 하나에 반응해\n- 직접 먹어보거나 가보거나 사용해본 사람처럼 말하지 마\n- \"공감돼요\", \"저도 그래요\", \"그 느낌 알 것 같아요\"처럼 경험을 공유하는 ..."
   },
@@ -638,7 +638,7 @@
     "domain": "PERSONAL",
     "reaction_mode": "writer_feeling",
     "primary_anchor": "회복",
-    "secondary_anchor": "",
+    "secondary_anchor": "하루",
     "evidence": "일상/감정 신호(회복)",
     "instruction": "작성자가 겪은 상황이나 마음에 가볍게 호응하거나 응원해. 내 경험을 덧붙이지 마.",
     "prompt_sample": "네이버 블로그 글에 남길 자연스러운 짧은 댓글 하나를 작성해.\n\n[작성 원칙]\n- 말투: 편한 존댓말, 20~60자, 자연스러운 대화체 (마침표 없이 부드럽게 마무리)\n- 본문에서 확인되는 구체적인 내용 하나에 반응해\n- 직접 먹어보거나 가보거나 사용해본 사람처럼 말하지 마\n- \"공감돼요\", \"저도 그래요\", \"그 느낌 알 것 같아요\"처럼 경험을 공유하는 ..."
@@ -652,7 +652,7 @@
     "domain": "PERSONAL",
     "reaction_mode": "writer_feeling",
     "primary_anchor": "일기",
-    "secondary_anchor": "",
+    "secondary_anchor": "출근",
     "evidence": "일상/감정 신호(일기)",
     "instruction": "작성자가 겪은 상황이나 마음에 가볍게 호응하거나 응원해. 내 경험을 덧붙이지 마.",
     "prompt_sample": "네이버 블로그 글에 남길 자연스러운 짧은 댓글 하나를 작성해.\n\n[작성 원칙]\n- 말투: 편한 존댓말, 20~60자, 자연스러운 대화체 (마침표 없이 부드럽게 마무리)\n- 본문에서 확인되는 구체적인 내용 하나에 반응해\n- 직접 먹어보거나 가보거나 사용해본 사람처럼 말하지 마\n- \"공감돼요\", \"저도 그래요\", \"그 느낌 알 것 같아요\"처럼 경험을 공유하는 ..."
@@ -665,9 +665,9 @@
     "needs_more_context": false,
     "domain": "PERSONAL",
     "reaction_mode": "writer_feeling",
-    "primary_anchor": "이사",
-    "secondary_anchor": "뿌듯",
-    "evidence": "일상/감정 신호(이사)",
+    "primary_anchor": "뿌듯",
+    "secondary_anchor": "이사",
+    "evidence": "일상/감정 신호(뿌듯)",
     "instruction": "작성자가 겪은 상황이나 마음에 가볍게 호응하거나 응원해. 내 경험을 덧붙이지 마.",
     "prompt_sample": "네이버 블로그 글에 남길 자연스러운 짧은 댓글 하나를 작성해.\n\n[작성 원칙]\n- 말투: 편한 존댓말, 20~60자, 자연스러운 대화체 (마침표 없이 부드럽게 마무리)\n- 본문에서 확인되는 구체적인 내용 하나에 반응해\n- 직접 먹어보거나 가보거나 사용해본 사람처럼 말하지 마\n- \"공감돼요\", \"저도 그래요\", \"그 느낌 알 것 같아요\"처럼 경험을 공유하는 ..."
   },
@@ -679,9 +679,9 @@
     "needs_more_context": false,
     "domain": "PERSONAL",
     "reaction_mode": "writer_feeling",
-    "primary_anchor": "생일",
-    "secondary_anchor": "반려견",
-    "evidence": "일상/감정 신호(생일)",
+    "primary_anchor": "반려견",
+    "secondary_anchor": "가족",
+    "evidence": "일상/감정 신호(반려견)",
     "instruction": "작성자가 겪은 상황이나 마음에 가볍게 호응하거나 응원해. 내 경험을 덧붙이지 마.",
     "prompt_sample": "네이버 블로그 글에 남길 자연스러운 짧은 댓글 하나를 작성해.\n\n[작성 원칙]\n- 말투: 편한 존댓말, 20~60자, 자연스러운 대화체 (마침표 없이 부드럽게 마무리)\n- 본문에서 확인되는 구체적인 내용 하나에 반응해\n- 직접 먹어보거나 가보거나 사용해본 사람처럼 말하지 마\n- \"공감돼요\", \"저도 그래요\", \"그 느낌 알 것 같아요\"처럼 경험을 공유하는 ..."
   },

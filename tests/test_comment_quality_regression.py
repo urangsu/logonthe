@@ -95,6 +95,22 @@ class TestCommentQualityRegression(unittest.TestCase):
         inspect_res = CommentDraftInspector.inspect(user_edited, source="user_edit")
         self.assertTrue(inspect_res.passed, f"Expected inspect passed for user_edit, got: {inspect_res.code}")
 
+    def test_09_unsupported_taste_claim_fails(self):
+        """본문에 단맛 언급이 전혀 없는데 '은은하게 달달해서'처럼 지어낸 맛 주장은 반려"""
+        excerpt = "안심 돈카츠 튀김옷이 바삭하고 고기가 부드러웠습니다."
+        candidate = "은은하게 달달해서 참 맛있겠네요~"
+        res = CommentDraftInspector.inspect(candidate, excerpt=excerpt)
+        self.assertFalse(res.passed)
+        self.assertEqual(res.code, "unsupported_taste")
+        self.assertIn("맛 추측 표현", res.feedback)
+
+    def test_10_grounded_taste_claim_passes(self):
+        """본문에 단맛(달콤한 시럽/꿀)이나 매운맛 근거가 있으면 해당 맛 표현 정상 통과"""
+        excerpt = "팬케이크 위에 달콤한 시럽이 촉촉하게 스며드네요."
+        candidate = "달달한 시럽이 스며들어 정말 맛있겠어요"
+        res = CommentDraftInspector.inspect(candidate, excerpt=excerpt)
+        self.assertTrue(res.passed, f"Expected PASS for grounded taste claim, got: {res.code} - {res.feedback}")
+
 
 if __name__ == "__main__":
     unittest.main()

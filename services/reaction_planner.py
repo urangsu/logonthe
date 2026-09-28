@@ -101,6 +101,77 @@ class ReactionContextPlanner:
         "세차", "예약제", "원장님", "디자이너", "염색", "파마", "커트", "스케일링"
     )
 
+    GENERIC_BANNED_ANCHORS = (
+        "메뉴", "제품", "서비스", "음식", "디테일", "가게", "매장", "관리"
+    )
+
+    @classmethod
+    def rank_anchors(
+        cls,
+        candidates: List[str],
+        title: str,
+        excerpt: str,
+        domain: str = "GENERAL",
+    ) -> List[str]:
+        """
+        후보 앵커 목록을 제목 등장 여부, 구체성, 출현 빈도를 점수화하여 정렬한다.
+        일반어("메뉴", "제품", "서비스" 등)와 메타데이터("위치", "주차")를 강하게 배제.
+        """
+        if not candidates:
+            return []
+
+        title_norm = (title or "").lower()
+        excerpt_norm = (excerpt or "").lower()
+        combined = f"{title_norm}\n{excerpt_norm}"
+
+        scored: List[Tuple[float, str]] = []
+        for cand in candidates:
+            if not cand or not isinstance(cand, str):
+                continue
+            cand_s = cand.strip()
+            if not cand_s:
+                continue
+
+            score = 0.0
+
+            # 1. 일반어 및 메타데이터 감점
+            if cand_s in cls.GENERIC_BANNED_ANCHORS:
+                score -= 50.0
+
+            if domain == "FOOD":
+                if cand_s in FoodCommentFocus.SECONDARY_KEYWORDS:
+                    score -= 100.0  # 음식 도메인에서는 위치/주차 등을 앵커로 절대 선택 불가
+
+            # 2. 제목 일치 가중치
+            if cand_s.lower() in title_norm:
+                if cand_s in ("미용실", "식당", "카페", "여행", "호텔", "숙소", "맛집"):
+                    score += 4.0
+                else:
+                    score += 10.0
+
+            # 3. 본문 출현 가중치 (본문이 있는데 본문에 없으면 감점)
+            if excerpt_norm and len(excerpt_norm) > 20:
+                if cand_s.lower() not in excerpt_norm:
+                    score -= 8.0
+                else:
+                    e_cnt = excerpt_norm.count(cand_s.lower())
+                    score += min(e_cnt * 3.0, 9.0)
+            else:
+                c_cnt = combined.count(cand_s.lower())
+                score += min(c_cnt * 2.0, 6.0)
+
+            # 4. 고유명사/시술명/메뉴명 구체성 (글자 수 가산)
+            if len(cand_s) >= 3:
+                score += 1.5
+            if len(cand_s) >= 4:
+                score += 1.5
+
+            scored.append((score, cand_s))
+
+        # 점수 내림차순, 동일 점수 시 긴 단어 우선
+        scored.sort(key=lambda x: (x[0], len(x[1])), reverse=True)
+        return [cand for _, cand in scored]
+
     @classmethod
     def score_domains(
         cls,
@@ -264,48 +335,92 @@ class ReactionContextPlanner:
         # -------------------------------------------------------------
         if best_domain == "FOOD":
             food_anchors = food_focus_info.get("food_anchors", [])
-            secondary_anchors = food_focus_info.get("secondary_anchors", [])
-            pri = food_anchors[0] if food_anchors else "메뉴"
-            sec = secondary_anchors[0] if secondary_anchors else (food_anchors[1] if len(food_anchors) > 1 else "")
 
-            # 특색 있는 식재료 우선 앵커링 (블루치즈, 트러플, 마라 등)
+            # 특색 있는 식재료 우선 수집 (블루치즈, 트러플, 마라 등)
             matched_special = [ing for ing in cls.SPECIAL_COMBINATION_INGREDIENTS if ing in combined]
-            if matched_special:
-                special_ing = matched_special[0]
-                if special_ing not in food_anchors:
-                    sec = pri if pri != "메뉴" else sec
-                    pri = special_ing
-                elif food_anchors and food_anchors[0] != special_ing:
-                    sec = pri
-                    pri = special_ing
 
-            has_explicit_combo = any(k in combined for k in cls.EXPLICIT_COMBINATION_PHRASES)
+            # 음식 후보군 종합 수집
+            candidate_foods: List[str] = list(matched_special)
+            for d in food_anchors:
+                if d not in candidate_foods:
+                    candidate_foods.append(d)
+            for d in FoodCommentFocus.RESTAURANT_DISHES + FoodCommentFocus.CAFE_DISHES:
+                if d in combined and d not in candidate_foods:
+                    candidate_foods.append(d)
+
+            ranked_foods = cls.rank_anchors(candidate_foods, title_s, excerpt_s, domain="FOOD")
+            pri = ranked_foods[0] if ranked_foods else "메뉴"
+
+            # 2nd food anchor: 반드시 진짜 음식/재료여야 함 (절대로 '위치', '주차' 등 메타데이터가 아님!)
+            sec = ""
+            for rf in ranked_foods[1:]:
+                if rf != pri and rf not in cls.GENERIC_BANNED_ANCHORS and rf not in FoodCommentFocus.SECONDARY_KEYWORDS:
+                    sec = rf
+                    break
+
+            # Salience 점수 계산
+            combo_salience = 0.0
+            visual_salience = 0.0
+            taste_salience = 0.0
+
+            # 1) 조합 salience
+            for ing in cls.SPECIAL_COMBINATION_INGREDIENTS:
+                if ing in combined:
+                    combo_salience += 4.0
+            for phrase in cls.EXPLICIT_COMBINATION_PHRASES:
+                if phrase in combined:
+                    combo_salience += 4.0
+            if any(k in combined for k in ("단짠", "궁합", "어우러")):
+                combo_salience += 3.0
+
+            # 2) 비주얼 salience (플레이팅, 큼직한 토핑, 색감 등)
+            visual_strong = ("플레이팅", "비주얼", "비쥬얼", "예쁘", "색감", "압도적", "시선을 사로잡", "사진이")
+            for vs in visual_strong:
+                if vs in combined:
+                    visual_salience += 4.0
+            visual_mild = ("푸짐", "두툼", "큼직", "듬뿍", "가득", "비주얼이", "양도", "양이")
+            for vm in visual_mild:
+                if vm in combined:
+                    visual_salience += 2.5
+
+            # 3) 맛/식감 salience
+            taste_hits = sum(1 for kw in cls.TASTE_TEXTURE_KEYWORDS if kw in combined)
+            if taste_hits > 0:
+                taste_salience += 3.0 + min((taste_hits - 1) * 1.5, 9.0)
+
+            # 모드 결정
             has_special_ingredient = any(ing in combined for ing in ("블루치즈", "고르곤졸라", "트러플", "마라", "바질"))
-            has_taste = any(k in combined for k in cls.TASTE_TEXTURE_KEYWORDS)
-            has_visual = any(k in combined for k in cls.VISUAL_KEYWORDS)
+            has_explicit_combo = any(k in combined for k in cls.EXPLICIT_COMBINATION_PHRASES)
 
-            # 우선순위:
-            # A. 명시적 조합/특수재료 -> combination_curiosity
-            #    (len(food_anchors) >= 2 단독으로는 combo 판정하지 않음)
-            # B. 구체적인 맛/식감 근거 -> taste_reaction
-            # C. 비주얼/양/구성 -> visual_reaction
-            # D. 메뉴만 확인됨 -> future_interest
-            if has_explicit_combo or has_special_ingredient:
+            if (combo_salience >= 4.0 and (has_special_ingredient or has_explicit_combo)) and (combo_salience >= visual_salience and combo_salience >= taste_salience):
                 mode = "combination_curiosity"
+                if matched_special:
+                    pri = matched_special[0]
+                    sec = ""
+                    for rf in ranked_foods:
+                        if rf != pri and rf not in cls.GENERIC_BANNED_ANCHORS and rf not in FoodCommentFocus.SECONDARY_KEYWORDS:
+                            sec = rf
+                            break
                 sec_desc = f"와 {sec}" if sec and sec != pri else ""
                 instruction = (
                     f"{pri}{sec_desc} 재료와 조합에 관찰자 입장에서 반응해. "
                     "먹어본 사람처럼 공감하지 말고 맛에 대한 궁금함이나 조합의 독특함을 표현해."
                 )
                 evidence = f"조합/특수재료 근거({pri}{sec_desc})"
-            elif has_taste:
+            elif visual_salience >= 4.0 and visual_salience > taste_salience:
+                mode = "visual_reaction"
+                instruction = (
+                    f"{pri}의 비주얼이나 푸짐한 구성에 가볍게 반응해. 직접 먹어본 척하지 마."
+                )
+                evidence = f"시각/구성 디테일({pri})"
+            elif taste_salience >= 2.5:
                 mode = "taste_reaction"
                 instruction = (
                     f"본문에 언급된 {pri}의 맛이나 식감 디테일에 관찰자 입장에서 반응해. "
                     "본문에 없는 맛이나 식감은 지어내지 마."
                 )
                 evidence = f"본문 맛/식감 언급({pri})"
-            elif has_visual:
+            elif visual_salience >= 2.5:
                 mode = "visual_reaction"
                 instruction = (
                     f"{pri}의 비주얼이나 푸짐한 구성에 가볍게 반응해. 직접 먹어본 척하지 마."
@@ -313,7 +428,7 @@ class ReactionContextPlanner:
                 evidence = f"시각/구성 디테일({pri})"
             else:
                 if downweight_future:
-                    if has_visual:
+                    if visual_salience > 0:
                         mode = "visual_reaction"
                         instruction = f"{pri}의 비주얼이나 구성에 가볍게 반응해. 직접 먹어본 척하지 마."
                         evidence = f"시각/구성 디테일({pri})"
@@ -346,8 +461,10 @@ class ReactionContextPlanner:
         if best_domain == "PLACE":
             matched_places = [kw for kw in cls.PLACE_STRONG_KEYWORDS if kw in combined]
             matched_stays = [kw for kw in cls.PLACE_STAY_KEYWORDS if kw in combined]
-            pri = matched_places[0] if matched_places else (matched_stays[0] if matched_stays else "여행지")
-            sec = matched_stays[0] if (matched_stays and matched_stays[0] != pri) else (matched_places[1] if len(matched_places) > 1 else "")
+            all_places = matched_places + matched_stays
+            ranked_places = cls.rank_anchors(all_places, title_s, excerpt_s, domain="PLACE")
+            pri = ranked_places[0] if ranked_places else "여행지"
+            sec = ranked_places[1] if len(ranked_places) > 1 and ranked_places[1] != pri else ""
 
             mode = "place_observation"
             instruction = (
@@ -370,8 +487,9 @@ class ReactionContextPlanner:
             matched_products = [sig for sig in FoodCommentFocus.NON_FOOD_PRODUCT_SIGNALS if sig in combined]
             if not matched_products:
                 matched_products = [kw for kw in cls.PRODUCT_SIGNALS if kw in combined]
-            pri = matched_products[0] if matched_products else "제품"
-            sec = matched_products[1] if len(matched_products) > 1 else ""
+            ranked_prods = cls.rank_anchors(matched_products, title_s, excerpt_s, domain="PRODUCT")
+            pri = ranked_prods[0] if ranked_prods else "제품"
+            sec = ranked_prods[1] if len(ranked_prods) > 1 and ranked_prods[1] != pri else ""
             instruction = (
                 f"제품의 {pri} 기능이나 디자인, 사용 디테일에 관찰자 입장에서 가볍게 반응해. 직접 써본 척하지 마."
             )
@@ -391,8 +509,18 @@ class ReactionContextPlanner:
             matched_services = [sig for sig in FoodCommentFocus.NON_DINING_SERVICES if sig in combined]
             if not matched_services:
                 matched_services = [kw for kw in cls.SERVICE_SIGNALS if kw in combined]
-            pri = matched_services[0] if matched_services else "서비스"
-            sec = matched_services[1] if len(matched_services) > 1 else ""
+            # 구체적인 시술명이나 서비스 항목 추가 후보군
+            extra_svc_candidates = [
+                "레이어드컷", "피부관리", "수분 진정", "진정 케어", "그라데이션", "네일아트",
+                "스케일링", "디테일링", "헤어클리닉", "손질", "케어", "마스크팩", "앰플"
+            ]
+            for esc in extra_svc_candidates:
+                if esc in combined and esc not in matched_services:
+                    matched_services.append(esc)
+
+            ranked_svcs = cls.rank_anchors(matched_services, title_s, excerpt_s, domain="SERVICE")
+            pri = ranked_svcs[0] if ranked_svcs else "서비스"
+            sec = ranked_svcs[1] if len(ranked_svcs) > 1 and ranked_svcs[1] != pri else ""
             instruction = (
                 f"{pri} 서비스의 구성이나 진행 방식 디테일에 관찰자 입장에서 반응해."
             )
@@ -412,17 +540,11 @@ class ReactionContextPlanner:
             matched_events = [kw for kw in cls.PERSONAL_EVENT_KEYWORDS if kw in combined]
             matched_feelings = [kw for kw in cls.PERSONAL_FEELING_KEYWORDS if kw in combined]
             matched_weak = [kw for kw in cls.PERSONAL_WEAK_KEYWORDS if kw in combined]
+            all_pers = matched_events + matched_feelings + matched_weak
+            ranked_pers = cls.rank_anchors(all_pers, title_s, excerpt_s, domain="PERSONAL")
+            pri = ranked_pers[0] if ranked_pers else "일상"
+            sec = ranked_pers[1] if len(ranked_pers) > 1 and ranked_pers[1] != pri else ""
 
-            if matched_events:
-                pri = matched_events[0]
-            elif matched_feelings:
-                pri = matched_feelings[0]
-            elif matched_weak:
-                pri = matched_weak[0]
-            else:
-                pri = "일상"
-
-            sec = matched_feelings[0] if (matched_feelings and matched_feelings[0] != pri) else ""
             instruction = (
                 "작성자가 겪은 상황이나 마음에 가볍게 호응하거나 응원해. 내 경험을 덧붙이지 마."
             )

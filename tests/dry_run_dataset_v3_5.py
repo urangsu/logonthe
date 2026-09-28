@@ -42,7 +42,7 @@ FIXTURES_50: List[Dict[str, Any]] = [
         "title": "성수동 일식 돈카츠 전문점",
         "body": "주문 즉시 튀겨낸 안심 돈카츠입니다. 튀김옷은 바삭하고 안심은 촉촉하고 부드러웠다. 와사비를 살짝 얹어 먹으니 고기 육즙과 잘 어울렸습니다.",
         "expected_mode": "taste_reaction",
-        "expected_anchor": "안심",
+        "expected_anchor": "돈카츠",
         "sample_allowed_drafts": [
             "바삭한 튀김옷에 촉촉한 안심이라 식감이 제대로겠네요",
             "튀김옷이 바삭해 보여서 식감이 정말 궁금하네요",
@@ -333,7 +333,7 @@ FIXTURES_50: List[Dict[str, Any]] = [
         "title": "청담동 미용실 레이어드컷 변신 후기",
         "body": "모발 손상이 심해서 고민하다가 원장님께 레이어드컷 시술을 받았습니다. 얼굴형에 맞게 층을 섬세하게 내주셔서 손질하기 편해졌습니다.",
         "expected_mode": "service_reaction",
-        "expected_anchor": "시술",
+        "expected_anchor": "레이어드컷",
         "sample_allowed_drafts": [
             "얼굴형에 맞춰 층을 섬세하게 잡아주셔서 라인이 깔끔하네요",
         ],
@@ -363,7 +363,7 @@ FIXTURES_50: List[Dict[str, Any]] = [
         "title": "분당 피부관리 에스테틱 수분 진정 케어",
         "body": "건조했던 피부에 앰플을 듬뿍 흡수시켜 주셨습니다. 마스크팩과 데콜테 마사지까지 친절한 서비스로 힐링하고 왔네요.",
         "expected_mode": "service_reaction",
-        "expected_anchor": "관리",
+        "expected_anchor": "피부관리",
         "sample_allowed_drafts": [
             "차분한 진정 케어와 꼼꼼한 관리 덕분에 한결 편안해 보이네요",
         ],

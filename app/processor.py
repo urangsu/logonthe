@@ -386,6 +386,15 @@ class PostProcessor:
         self._neighbor_suffix_seen_blogs: set[str] = set()
         self._recent_reaction_modes: List[str] = []
 
+    def _record_reaction_mode(self, gen_ctx: Optional[Any]) -> None:
+        if gen_ctx and getattr(gen_ctx, "reaction_plan", None):
+            plan = gen_ctx.reaction_plan
+            mode = getattr(plan, "reaction_mode", None)
+            if mode:
+                self._recent_reaction_modes.append(mode)
+                self._recent_reaction_modes = self._recent_reaction_modes[-10:]
+                logger.log(f"[REACTION_HISTORY] recorded mode={mode} recent_count={len(self._recent_reaction_modes)}")
+
     def _prepare_comment_generation_context(
         self,
         post: FeedPost,
@@ -1775,9 +1784,6 @@ class PostProcessor:
                             if gate_res.valid:
                                 draft_text = cand_composed
                                 draft_source_label = "Gemini 생성"
-                                if gen_ctx.reaction_plan and hasattr(gen_ctx.reaction_plan, "reaction_mode"):
-                                    self._recent_reaction_modes.append(gen_ctx.reaction_plan.reaction_mode)
-                                    self._recent_reaction_modes = self._recent_reaction_modes[-10:]
                                 if self.state_mgr:
                                     self.state_mgr.update(inc_gen_success=True)
                             elif gate_res.code in FinalQualityGate.AUTO_REPAIRABLE_CODES and not getattr(self, "_gemini_auto_repair_done", False):
@@ -1792,9 +1798,6 @@ class PostProcessor:
                                 if repaired_text and repaired_gate.valid:
                                     draft_text = repaired_text
                                     draft_source_label = "Gemini 생성 (자동수정)"
-                                    if gen_ctx.reaction_plan and hasattr(gen_ctx.reaction_plan, "reaction_mode"):
-                                        self._recent_reaction_modes.append(gen_ctx.reaction_plan.reaction_mode)
-                                        self._recent_reaction_modes = self._recent_reaction_modes[-10:]
                                     logger.log(
                                         f"[GEMINI][AUTO_REPAIRED] code={gate_res.code} matched={gate_res.matched!r} "
                                         f"original_chars={len(cand_composed)} repaired_chars={len(repaired_text)}"
@@ -1825,6 +1828,10 @@ class PostProcessor:
                                     detected_category = local_res.category
                                     draft_source_label = f"로컬 분석({local_res.category})"
                                     logger.log(f"💡 [DRAFT] 로컬 맞춤형 초안 생성 ({local_res.category} / '{local_res.anchor}'): \"{local_res.body}\"")
+
+                        # 최종 승인된 초안의 reaction mode를 1회 단일 기록
+                        if draft_text:
+                            self._record_reaction_mode(gen_ctx if "gen_ctx" in locals() else None)
 
                         # Section 29: No generic fallback when all candidates fail
                         if not draft_text:
