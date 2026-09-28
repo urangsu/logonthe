@@ -1,0 +1,1701 @@
+{
+  "kpi": {
+    "total": 30,
+    "approved": 0,
+    "skipped": 30,
+    "rewrite_triggered": 0,
+    "skip_ratio": 1.0,
+    "safety": {
+      "fake_experience_registration": 0,
+      "implied_shared_experience_registration": 0,
+      "unsupported_content_claim_approved": 0,
+      "unsupported_taste_texture_approved": 0,
+      "eating_fun_approved": 0,
+      "terminal_dot_approved": 0,
+      "terminal_fullwidth_approved": 0
+    },
+    "kpi_pass": false
+  },
+  "results": [
+    {
+      "id": "food_01_blue_cheese",
+      "Title": "연남동 화덕피자 맛집 특이한 블루치즈 후기",
+      "title": "연남동 화덕피자 맛집 특이한 블루치즈 후기",
+      "domain": "FOOD",
+      "reaction_mode": "combination_curiosity",
+      "primary_anchor": "블루치즈",
+      "secondary_anchor": "피자",
+      "reaction_instruction": "블루치즈와 피자 재료와 조합에 관찰자 입장에서 반응해. 먹어본 사람처럼 공감하지 말고 맛에 대한 궁금함이나 조합의 독특함을 표현해.",
+      "Selected Context": "연남동 골목에 위치한 화덕피자 전문점에 다녀왔습니다.\n대표 메뉴인 고르곤졸라 피자를 주문했는데, 블루치즈 특유의 향 때문에 호불호가 갈릴 수 있는 피자입니다.\n도우는 쫄깃하고 꿀에 찍어먹으니 단짠 조합이 독특했습니다",
+      "selected_context": "연남동 골목에 위치한 화덕피자 전문점에 다녀왔습니다.\n대표 메뉴인 고르곤졸라 피자를 주문했는데, 블루치즈 특유의 향 때문에 호불호가 갈릴 수 있는 피자입니다.\n도우는 쫄깃하고 꿀에 찍어먹으니 단짠 조합이 독특했습니다",
+      "ReactionPlan": {
+        "domain": "FOOD",
+        "reaction_mode": "combination_curiosity",
+        "primary_anchor": "블루치즈",
+        "secondary_anchor": "피자",
+        "reaction_instruction": "블루치즈와 피자 재료와 조합에 관찰자 입장에서 반응해. 먹어본 사람처럼 공감하지 말고 맛에 대한 궁금함이나 조합의 독특함을 표현해."
+      },
+      "prompt_version": "3.5.0-reaction-planned",
+      "Gemini Raw": null,
+      "gemini_raw": null,
+      "1차 Inspector": {
+        "passed": false,
+        "code": "BRIDGE_UNAVAILABLE"
+      },
+      "inspection": {
+        "passed": false,
+        "code": "BRIDGE_UNAVAILABLE"
+      },
+      "quality_gate": {
+        "valid": false,
+        "code": "BRIDGE_UNAVAILABLE"
+      },
+      "Grounding Result": {
+        "valid": false,
+        "code": "BRIDGE_UNAVAILABLE"
+      },
+      "grounding_gate": {
+        "valid": false,
+        "code": "BRIDGE_UNAVAILABLE"
+      },
+      "Natural Expression Result": {
+        "eating_fun_matched": false
+      },
+      "Period Normalization": {
+        "before": null,
+        "after": null
+      },
+      "rewrite_triggered": false,
+      "Rewrite Raw": null,
+      "rewrite_raw": null,
+      "Final Text": null,
+      "final_text": null,
+      "Final Status": "BRIDGE_UNAVAILABLE",
+      "final_status": "BRIDGE_UNAVAILABLE"
+    },
+    {
+      "id": "food_02_rich_taste_donkatsu",
+      "Title": "성수동 일식 돈카츠 전문점",
+      "title": "성수동 일식 돈카츠 전문점",
+      "domain": "FOOD",
+      "reaction_mode": "taste_reaction",
+      "primary_anchor": "돈카츠",
+      "secondary_anchor": "튀김",
+      "reaction_instruction": "본문에 언급된 돈카츠의 맛이나 식감 디테일에 관찰자 입장에서 반응해. 본문에 없는 맛이나 식감은 지어내지 마.",
+      "Selected Context": "주문 즉시 튀겨낸 안심 돈카츠입니다.\n튀김옷은 바삭하고 안심은 촉촉하고 부드러웠다.\n와사비를 살짝 얹어 먹으니 고기 육즙과 잘 어울렸습니다.",
+      "selected_context": "주문 즉시 튀겨낸 안심 돈카츠입니다.\n튀김옷은 바삭하고 안심은 촉촉하고 부드러웠다.\n와사비를 살짝 얹어 먹으니 고기 육즙과 잘 어울렸습니다.",
+      "ReactionPlan": {
+        "domain": "FOOD",
+        "reaction_mode": "taste_reaction",
+        "primary_anchor": "돈카츠",
+        "secondary_anchor": "튀김",
+        "reaction_instruction": "본문에 언급된 돈카츠의 맛이나 식감 디테일에 관찰자 입장에서 반응해. 본문에 없는 맛이나 식감은 지어내지 마."
+      },
+      "prompt_version": "3.5.0-reaction-planned",
+      "Gemini Raw": null,
+      "gemini_raw": null,
+      "1차 Inspector": {
+        "passed": false,
+        "code": "BRIDGE_UNAVAILABLE"
+      },
+      "inspection": {
+        "passed": false,
+        "code": "BRIDGE_UNAVAILABLE"
+      },
+      "quality_gate": {
+        "valid": false,
+        "code": "BRIDGE_UNAVAILABLE"
+      },
+      "Grounding Result": {
+        "valid": false,
+        "code": "BRIDGE_UNAVAILABLE"
+      },
+      "grounding_gate": {
+        "valid": false,
+        "code": "BRIDGE_UNAVAILABLE"
+      },
+      "Natural Expression Result": {
+        "eating_fun_matched": false
+      },
+      "Period Normalization": {
+        "before": null,
+        "after": null
+      },
+      "rewrite_triggered": false,
+      "Rewrite Raw": null,
+      "rewrite_raw": null,
+      "Final Text": null,
+      "final_text": null,
+      "Final Status": "BRIDGE_UNAVAILABLE",
+      "final_status": "BRIDGE_UNAVAILABLE"
+    },
+    {
+      "id": "food_03_two_items_taste_priority",
+      "Title": "마포 삼겹살 맛집 탐방",
+      "title": "마포 삼겹살 맛집 탐방",
+      "domain": "FOOD",
+      "reaction_mode": "taste_reaction",
+      "primary_anchor": "삼겹살",
+      "secondary_anchor": "된장찌개",
+      "reaction_instruction": "본문에 언급된 삼겹살의 맛이나 식감 디테일에 관찰자 입장에서 반응해. 본문에 없는 맛이나 식감은 지어내지 마.",
+      "Selected Context": "삼겹살도 먹고 된장찌개도 먹었는데 삼겹살은 숯불향이 가득하고 육즙이 많아서 고소했습니다.\n구수한 찌개도 든든했습니다.",
+      "selected_context": "삼겹살도 먹고 된장찌개도 먹었는데 삼겹살은 숯불향이 가득하고 육즙이 많아서 고소했습니다.\n구수한 찌개도 든든했습니다.",
+      "ReactionPlan": {
+        "domain": "FOOD",
+        "reaction_mode": "taste_reaction",
+        "primary_anchor": "삼겹살",
+        "secondary_anchor": "된장찌개",
+        "reaction_instruction": "본문에 언급된 삼겹살의 맛이나 식감 디테일에 관찰자 입장에서 반응해. 본문에 없는 맛이나 식감은 지어내지 마."
+      },
+      "prompt_version": "3.5.0-reaction-planned",
+      "Gemini Raw": null,
+      "gemini_raw": null,
+      "1차 Inspector": {
+        "passed": false,
+        "code": "BRIDGE_UNAVAILABLE"
+      },
+      "inspection": {
+        "passed": false,
+        "code": "BRIDGE_UNAVAILABLE"
+      },
+      "quality_gate": {
+        "valid": false,
+        "code": "BRIDGE_UNAVAILABLE"
+      },
+      "Grounding Result": {
+        "valid": false,
+        "code": "BRIDGE_UNAVAILABLE"
+      },
+      "grounding_gate": {
+        "valid": false,
+        "code": "BRIDGE_UNAVAILABLE"
+      },
+      "Natural Expression Result": {
+        "eating_fun_matched": false
+      },
+      "Period Normalization": {
+        "before": null,
+        "after": null
+      },
+      "rewrite_triggered": false,
+      "Rewrite Raw": null,
+      "rewrite_raw": null,
+      "Final Text": null,
+      "final_text": null,
+      "Final Status": "BRIDGE_UNAVAILABLE",
+      "final_status": "BRIDGE_UNAVAILABLE"
+    },
+    {
+      "id": "food_04_truffle_pasta_combo",
+      "Title": "한남동 파스타 트러플 크림 파스타",
+      "title": "한남동 파스타 트러플 크림 파스타",
+      "domain": "FOOD",
+      "reaction_mode": "combination_curiosity",
+      "primary_anchor": "트러플",
+      "secondary_anchor": "파스타",
+      "reaction_instruction": "트러플와 파스타 재료와 조합에 관찰자 입장에서 반응해. 먹어본 사람처럼 공감하지 말고 맛에 대한 궁금함이나 조합의 독특함을 표현해.",
+      "Selected Context": "트러플 오일 향이 은은하게 퍼지는 크림 파스타입니다.\n버섯과 크림소스 어우러지는 풍미가 인상적인 조합이었습니다.",
+      "selected_context": "트러플 오일 향이 은은하게 퍼지는 크림 파스타입니다.\n버섯과 크림소스 어우러지는 풍미가 인상적인 조합이었습니다.",
+      "ReactionPlan": {
+        "domain": "FOOD",
+        "reaction_mode": "combination_curiosity",
+        "primary_anchor": "트러플",
+        "secondary_anchor": "파스타",
+        "reaction_instruction": "트러플와 파스타 재료와 조합에 관찰자 입장에서 반응해. 먹어본 사람처럼 공감하지 말고 맛에 대한 궁금함이나 조합의 독특함을 표현해."
+      },
+      "prompt_version": "3.5.0-reaction-planned",
+      "Gemini Raw": null,
+      "gemini_raw": null,
+      "1차 Inspector": {
+        "passed": false,
+        "code": "BRIDGE_UNAVAILABLE"
+      },
+      "inspection": {
+        "passed": false,
+        "code": "BRIDGE_UNAVAILABLE"
+      },
+      "quality_gate": {
+        "valid": false,
+        "code": "BRIDGE_UNAVAILABLE"
+      },
+      "Grounding Result": {
+        "valid": false,
+        "code": "BRIDGE_UNAVAILABLE"
+      },
+      "grounding_gate": {
+        "valid": false,
+        "code": "BRIDGE_UNAVAILABLE"
+      },
+      "Natural Expression Result": {
+        "eating_fun_matched": false
+      },
+      "Period Normalization": {
+        "before": null,
+        "after": null
+      },
+      "rewrite_triggered": false,
+      "Rewrite Raw": null,
+      "rewrite_raw": null,
+      "Final Text": null,
+      "final_text": null,
+      "Final Status": "BRIDGE_UNAVAILABLE",
+      "final_status": "BRIDGE_UNAVAILABLE"
+    },
+    {
+      "id": "food_05_ramen_broth",
+      "Title": "홍대 일본 라멘 돈코츠 라멘",
+      "title": "홍대 일본 라멘 돈코츠 라멘",
+      "domain": "FOOD",
+      "reaction_mode": "taste_reaction",
+      "primary_anchor": "라멘",
+      "secondary_anchor": "",
+      "reaction_instruction": "본문에 언급된 라멘의 맛이나 식감 디테일에 관찰자 입장에서 반응해. 본문에 없는 맛이나 식감은 지어내지 마.",
+      "Selected Context": "진하게 우려낸 돼지뼈 육수가 일품이었습니다.\n면발은 꼬들꼬들하고 국물이 진하고 깊은 맛이 나네요.",
+      "selected_context": "진하게 우려낸 돼지뼈 육수가 일품이었습니다.\n면발은 꼬들꼬들하고 국물이 진하고 깊은 맛이 나네요.",
+      "ReactionPlan": {
+        "domain": "FOOD",
+        "reaction_mode": "taste_reaction",
+        "primary_anchor": "라멘",
+        "secondary_anchor": "",
+        "reaction_instruction": "본문에 언급된 라멘의 맛이나 식감 디테일에 관찰자 입장에서 반응해. 본문에 없는 맛이나 식감은 지어내지 마."
+      },
+      "prompt_version": "3.5.0-reaction-planned",
+      "Gemini Raw": null,
+      "gemini_raw": null,
+      "1차 Inspector": {
+        "passed": false,
+        "code": "BRIDGE_UNAVAILABLE"
+      },
+      "inspection": {
+        "passed": false,
+        "code": "BRIDGE_UNAVAILABLE"
+      },
+      "quality_gate": {
+        "valid": false,
+        "code": "BRIDGE_UNAVAILABLE"
+      },
+      "Grounding Result": {
+        "valid": false,
+        "code": "BRIDGE_UNAVAILABLE"
+      },
+      "grounding_gate": {
+        "valid": false,
+        "code": "BRIDGE_UNAVAILABLE"
+      },
+      "Natural Expression Result": {
+        "eating_fun_matched": false
+      },
+      "Period Normalization": {
+        "before": null,
+        "after": null
+      },
+      "rewrite_triggered": false,
+      "Rewrite Raw": null,
+      "rewrite_raw": null,
+      "Final Text": null,
+      "final_text": null,
+      "Final Status": "BRIDGE_UNAVAILABLE",
+      "final_status": "BRIDGE_UNAVAILABLE"
+    },
+    {
+      "id": "food_06_burger_visual",
+      "Title": "이태원 수제버거 더블 패티 버거",
+      "title": "이태원 수제버거 더블 패티 버거",
+      "domain": "FOOD",
+      "reaction_mode": "visual_reaction",
+      "primary_anchor": "수제버거",
+      "secondary_anchor": "",
+      "reaction_instruction": "수제버거의 비주얼이나 푸짐한 구성에 가볍게 반응해. 직접 먹어본 척하지 마.",
+      "Selected Context": "치즈와 두툼한 소고기 패티가 푸짐하게 쌓여 비주얼이 압도적이었습니다.\n비주얼부터 시선을 사로잡는 구성이네요.",
+      "selected_context": "치즈와 두툼한 소고기 패티가 푸짐하게 쌓여 비주얼이 압도적이었습니다.\n비주얼부터 시선을 사로잡는 구성이네요.",
+      "ReactionPlan": {
+        "domain": "FOOD",
+        "reaction_mode": "visual_reaction",
+        "primary_anchor": "수제버거",
+        "secondary_anchor": "",
+        "reaction_instruction": "수제버거의 비주얼이나 푸짐한 구성에 가볍게 반응해. 직접 먹어본 척하지 마."
+      },
+      "prompt_version": "3.5.0-reaction-planned",
+      "Gemini Raw": null,
+      "gemini_raw": null,
+      "1차 Inspector": {
+        "passed": false,
+        "code": "BRIDGE_UNAVAILABLE"
+      },
+      "inspection": {
+        "passed": false,
+        "code": "BRIDGE_UNAVAILABLE"
+      },
+      "quality_gate": {
+        "valid": false,
+        "code": "BRIDGE_UNAVAILABLE"
+      },
+      "Grounding Result": {
+        "valid": false,
+        "code": "BRIDGE_UNAVAILABLE"
+      },
+      "grounding_gate": {
+        "valid": false,
+        "code": "BRIDGE_UNAVAILABLE"
+      },
+      "Natural Expression Result": {
+        "eating_fun_matched": false
+      },
+      "Period Normalization": {
+        "before": null,
+        "after": null
+      },
+      "rewrite_triggered": false,
+      "Rewrite Raw": null,
+      "rewrite_raw": null,
+      "Final Text": null,
+      "final_text": null,
+      "Final Status": "BRIDGE_UNAVAILABLE",
+      "final_status": "BRIDGE_UNAVAILABLE"
+    },
+    {
+      "id": "food_07_salt_bread_texture",
+      "Title": "성수동 베이커리 소금빵 카페",
+      "title": "성수동 베이커리 소금빵 카페",
+      "domain": "FOOD",
+      "reaction_mode": "taste_reaction",
+      "primary_anchor": "소금빵",
+      "secondary_anchor": "",
+      "reaction_instruction": "본문에 언급된 소금빵의 맛이나 식감 디테일에 관찰자 입장에서 반응해. 본문에 없는 맛이나 식감은 지어내지 마.",
+      "Selected Context": "갓 구워 나온 소금빵 결이 쫄깃하고 버터 풍미가 진하네요.\n바닥면은 바삭하고 속은 촉촉해서 식감이 뛰어납니다.",
+      "selected_context": "갓 구워 나온 소금빵 결이 쫄깃하고 버터 풍미가 진하네요.\n바닥면은 바삭하고 속은 촉촉해서 식감이 뛰어납니다.",
+      "ReactionPlan": {
+        "domain": "FOOD",
+        "reaction_mode": "taste_reaction",
+        "primary_anchor": "소금빵",
+        "secondary_anchor": "",
+        "reaction_instruction": "본문에 언급된 소금빵의 맛이나 식감 디테일에 관찰자 입장에서 반응해. 본문에 없는 맛이나 식감은 지어내지 마."
+      },
+      "prompt_version": "3.5.0-reaction-planned",
+      "Gemini Raw": null,
+      "gemini_raw": null,
+      "1차 Inspector": {
+        "passed": false,
+        "code": "BRIDGE_UNAVAILABLE"
+      },
+      "inspection": {
+        "passed": false,
+        "code": "BRIDGE_UNAVAILABLE"
+      },
+      "quality_gate": {
+        "valid": false,
+        "code": "BRIDGE_UNAVAILABLE"
+      },
+      "Grounding Result": {
+        "valid": false,
+        "code": "BRIDGE_UNAVAILABLE"
+      },
+      "grounding_gate": {
+        "valid": false,
+        "code": "BRIDGE_UNAVAILABLE"
+      },
+      "Natural Expression Result": {
+        "eating_fun_matched": false
+      },
+      "Period Normalization": {
+        "before": null,
+        "after": null
+      },
+      "rewrite_triggered": false,
+      "Rewrite Raw": null,
+      "rewrite_raw": null,
+      "Final Text": null,
+      "final_text": null,
+      "Final Status": "BRIDGE_UNAVAILABLE",
+      "final_status": "BRIDGE_UNAVAILABLE"
+    },
+    {
+      "id": "food_08_croffle_visual",
+      "Title": "익선동 디저트 카페 아이스크림 크로플",
+      "title": "익선동 디저트 카페 아이스크림 크로플",
+      "domain": "FOOD",
+      "reaction_mode": "visual_reaction",
+      "primary_anchor": "아이스크림",
+      "secondary_anchor": "크로플",
+      "reaction_instruction": "아이스크림의 비주얼이나 푸짐한 구성에 가볍게 반응해. 직접 먹어본 척하지 마.",
+      "Selected Context": "바삭한 크로플 위에 바닐라 아이스크림이 큼직하게 올라가 있어 플레이팅 비주얼이 너무 예쁩니다.",
+      "selected_context": "바삭한 크로플 위에 바닐라 아이스크림이 큼직하게 올라가 있어 플레이팅 비주얼이 너무 예쁩니다.",
+      "ReactionPlan": {
+        "domain": "FOOD",
+        "reaction_mode": "visual_reaction",
+        "primary_anchor": "아이스크림",
+        "secondary_anchor": "크로플",
+        "reaction_instruction": "아이스크림의 비주얼이나 푸짐한 구성에 가볍게 반응해. 직접 먹어본 척하지 마."
+      },
+      "prompt_version": "3.5.0-reaction-planned",
+      "Gemini Raw": null,
+      "gemini_raw": null,
+      "1차 Inspector": {
+        "passed": false,
+        "code": "BRIDGE_UNAVAILABLE"
+      },
+      "inspection": {
+        "passed": false,
+        "code": "BRIDGE_UNAVAILABLE"
+      },
+      "quality_gate": {
+        "valid": false,
+        "code": "BRIDGE_UNAVAILABLE"
+      },
+      "Grounding Result": {
+        "valid": false,
+        "code": "BRIDGE_UNAVAILABLE"
+      },
+      "grounding_gate": {
+        "valid": false,
+        "code": "BRIDGE_UNAVAILABLE"
+      },
+      "Natural Expression Result": {
+        "eating_fun_matched": false
+      },
+      "Period Normalization": {
+        "before": null,
+        "after": null
+      },
+      "rewrite_triggered": false,
+      "Rewrite Raw": null,
+      "rewrite_raw": null,
+      "Final Text": null,
+      "final_text": null,
+      "Final Status": "BRIDGE_UNAVAILABLE",
+      "final_status": "BRIDGE_UNAVAILABLE"
+    },
+    {
+      "id": "food_09_tteokbokki_taste",
+      "Title": "신당동 즉석 떡볶이 맛집",
+      "title": "신당동 즉석 떡볶이 맛집",
+      "domain": "FOOD",
+      "reaction_mode": "taste_reaction",
+      "primary_anchor": "떡볶이",
+      "secondary_anchor": "",
+      "reaction_instruction": "본문에 언급된 떡볶이의 맛이나 식감 디테일에 관찰자 입장에서 반응해. 본문에 없는 맛이나 식감은 지어내지 마.",
+      "Selected Context": "양념 소스가 매콤달콤하고 쌀떡 식감이 아주 쫀득쫀득합니다.\n라면사리와 함께 끓이니 감칠맛이 도네요.",
+      "selected_context": "양념 소스가 매콤달콤하고 쌀떡 식감이 아주 쫀득쫀득합니다.\n라면사리와 함께 끓이니 감칠맛이 도네요.",
+      "ReactionPlan": {
+        "domain": "FOOD",
+        "reaction_mode": "taste_reaction",
+        "primary_anchor": "떡볶이",
+        "secondary_anchor": "",
+        "reaction_instruction": "본문에 언급된 떡볶이의 맛이나 식감 디테일에 관찰자 입장에서 반응해. 본문에 없는 맛이나 식감은 지어내지 마."
+      },
+      "prompt_version": "3.5.0-reaction-planned",
+      "Gemini Raw": null,
+      "gemini_raw": null,
+      "1차 Inspector": {
+        "passed": false,
+        "code": "BRIDGE_UNAVAILABLE"
+      },
+      "inspection": {
+        "passed": false,
+        "code": "BRIDGE_UNAVAILABLE"
+      },
+      "quality_gate": {
+        "valid": false,
+        "code": "BRIDGE_UNAVAILABLE"
+      },
+      "Grounding Result": {
+        "valid": false,
+        "code": "BRIDGE_UNAVAILABLE"
+      },
+      "grounding_gate": {
+        "valid": false,
+        "code": "BRIDGE_UNAVAILABLE"
+      },
+      "Natural Expression Result": {
+        "eating_fun_matched": false
+      },
+      "Period Normalization": {
+        "before": null,
+        "after": null
+      },
+      "rewrite_triggered": false,
+      "Rewrite Raw": null,
+      "rewrite_raw": null,
+      "Final Text": null,
+      "final_text": null,
+      "Final Status": "BRIDGE_UNAVAILABLE",
+      "final_status": "BRIDGE_UNAVAILABLE"
+    },
+    {
+      "id": "food_10_bagel_combo",
+      "Title": "런던 베이글 뮤지엄 쪽파 크림치즈",
+      "title": "런던 베이글 뮤지엄 쪽파 크림치즈",
+      "domain": "FOOD",
+      "reaction_mode": "combination_curiosity",
+      "primary_anchor": "베이글",
+      "secondary_anchor": "",
+      "reaction_instruction": "베이글 재료와 조합에 관찰자 입장에서 반응해. 먹어본 사람처럼 공감하지 말고 맛에 대한 궁금함이나 조합의 독특함을 표현해.",
+      "Selected Context": "쪽파와 베이컨이 듬뿍 들어간 크림치즈 조합이 독특했습니다.\n쫄깃한 베이글과 궁합이 환상적이네요.",
+      "selected_context": "쪽파와 베이컨이 듬뿍 들어간 크림치즈 조합이 독특했습니다.\n쫄깃한 베이글과 궁합이 환상적이네요.",
+      "ReactionPlan": {
+        "domain": "FOOD",
+        "reaction_mode": "combination_curiosity",
+        "primary_anchor": "베이글",
+        "secondary_anchor": "",
+        "reaction_instruction": "베이글 재료와 조합에 관찰자 입장에서 반응해. 먹어본 사람처럼 공감하지 말고 맛에 대한 궁금함이나 조합의 독특함을 표현해."
+      },
+      "prompt_version": "3.5.0-reaction-planned",
+      "Gemini Raw": null,
+      "gemini_raw": null,
+      "1차 Inspector": {
+        "passed": false,
+        "code": "BRIDGE_UNAVAILABLE"
+      },
+      "inspection": {
+        "passed": false,
+        "code": "BRIDGE_UNAVAILABLE"
+      },
+      "quality_gate": {
+        "valid": false,
+        "code": "BRIDGE_UNAVAILABLE"
+      },
+      "Grounding Result": {
+        "valid": false,
+        "code": "BRIDGE_UNAVAILABLE"
+      },
+      "grounding_gate": {
+        "valid": false,
+        "code": "BRIDGE_UNAVAILABLE"
+      },
+      "Natural Expression Result": {
+        "eating_fun_matched": false
+      },
+      "Period Normalization": {
+        "before": null,
+        "after": null
+      },
+      "rewrite_triggered": false,
+      "Rewrite Raw": null,
+      "rewrite_raw": null,
+      "Final Text": null,
+      "final_text": null,
+      "Final Status": "BRIDGE_UNAVAILABLE",
+      "final_status": "BRIDGE_UNAVAILABLE"
+    },
+    {
+      "id": "service_01_hair_cut",
+      "Title": "청담동 미용실 레이어드컷 변신 후기",
+      "title": "청담동 미용실 레이어드컷 변신 후기",
+      "domain": "SERVICE",
+      "reaction_mode": "service_reaction",
+      "primary_anchor": "레이어드컷",
+      "secondary_anchor": "손질",
+      "reaction_instruction": "레이어드컷 서비스의 구성이나 진행 방식 디테일에 관찰자 입장에서 반응해.",
+      "Selected Context": "모발 손상이 심해서 고민하다가 원장님께 레이어드컷 시술을 받았습니다.\n얼굴형에 맞게 층을 섬세하게 내주셔서 손질하기 편해졌습니다.",
+      "selected_context": "모발 손상이 심해서 고민하다가 원장님께 레이어드컷 시술을 받았습니다.\n얼굴형에 맞게 층을 섬세하게 내주셔서 손질하기 편해졌습니다.",
+      "ReactionPlan": {
+        "domain": "SERVICE",
+        "reaction_mode": "service_reaction",
+        "primary_anchor": "레이어드컷",
+        "secondary_anchor": "손질",
+        "reaction_instruction": "레이어드컷 서비스의 구성이나 진행 방식 디테일에 관찰자 입장에서 반응해."
+      },
+      "prompt_version": "3.5.0-reaction-planned",
+      "Gemini Raw": null,
+      "gemini_raw": null,
+      "1차 Inspector": {
+        "passed": false,
+        "code": "BRIDGE_UNAVAILABLE"
+      },
+      "inspection": {
+        "passed": false,
+        "code": "BRIDGE_UNAVAILABLE"
+      },
+      "quality_gate": {
+        "valid": false,
+        "code": "BRIDGE_UNAVAILABLE"
+      },
+      "Grounding Result": {
+        "valid": false,
+        "code": "BRIDGE_UNAVAILABLE"
+      },
+      "grounding_gate": {
+        "valid": false,
+        "code": "BRIDGE_UNAVAILABLE"
+      },
+      "Natural Expression Result": {
+        "eating_fun_matched": false
+      },
+      "Period Normalization": {
+        "before": null,
+        "after": null
+      },
+      "rewrite_triggered": false,
+      "Rewrite Raw": null,
+      "rewrite_raw": null,
+      "Final Text": null,
+      "final_text": null,
+      "Final Status": "BRIDGE_UNAVAILABLE",
+      "final_status": "BRIDGE_UNAVAILABLE"
+    },
+    {
+      "id": "service_02_nail_art",
+      "Title": "강남 네일샵 봄맞이 그라데이션 네일",
+      "title": "강남 네일샵 봄맞이 그라데이션 네일",
+      "domain": "SERVICE",
+      "reaction_mode": "service_reaction",
+      "primary_anchor": "그라데이션",
+      "secondary_anchor": "케어",
+      "reaction_instruction": "그라데이션 서비스의 구성이나 진행 방식 디테일에 관찰자 입장에서 반응해.",
+      "Selected Context": "큐티클 케어도 꼼꼼하게 해주시고 파스텔톤 시럽 그라데이션 컬러가 깔끔하고 자연스럽게 완성되었습니다.",
+      "selected_context": "큐티클 케어도 꼼꼼하게 해주시고 파스텔톤 시럽 그라데이션 컬러가 깔끔하고 자연스럽게 완성되었습니다.",
+      "ReactionPlan": {
+        "domain": "SERVICE",
+        "reaction_mode": "service_reaction",
+        "primary_anchor": "그라데이션",
+        "secondary_anchor": "케어",
+        "reaction_instruction": "그라데이션 서비스의 구성이나 진행 방식 디테일에 관찰자 입장에서 반응해."
+      },
+      "prompt_version": "3.5.0-reaction-planned",
+      "Gemini Raw": null,
+      "gemini_raw": null,
+      "1차 Inspector": {
+        "passed": false,
+        "code": "BRIDGE_UNAVAILABLE"
+      },
+      "inspection": {
+        "passed": false,
+        "code": "BRIDGE_UNAVAILABLE"
+      },
+      "quality_gate": {
+        "valid": false,
+        "code": "BRIDGE_UNAVAILABLE"
+      },
+      "Grounding Result": {
+        "valid": false,
+        "code": "BRIDGE_UNAVAILABLE"
+      },
+      "grounding_gate": {
+        "valid": false,
+        "code": "BRIDGE_UNAVAILABLE"
+      },
+      "Natural Expression Result": {
+        "eating_fun_matched": false
+      },
+      "Period Normalization": {
+        "before": null,
+        "after": null
+      },
+      "rewrite_triggered": false,
+      "Rewrite Raw": null,
+      "rewrite_raw": null,
+      "Final Text": null,
+      "final_text": null,
+      "Final Status": "BRIDGE_UNAVAILABLE",
+      "final_status": "BRIDGE_UNAVAILABLE"
+    },
+    {
+      "id": "service_03_skin_care",
+      "Title": "분당 피부관리 에스테틱 수분 진정 케어",
+      "title": "분당 피부관리 에스테틱 수분 진정 케어",
+      "domain": "SERVICE",
+      "reaction_mode": "service_reaction",
+      "primary_anchor": "마스크팩",
+      "secondary_anchor": "수분 진정",
+      "reaction_instruction": "마스크팩 서비스의 구성이나 진행 방식 디테일에 관찰자 입장에서 반응해.",
+      "Selected Context": "건조했던 피부에 앰플을 듬뿍 흡수시켜 주셨습니다.\n마스크팩과 데콜테 마사지까지 친절한 서비스로 힐링하고 왔네요.",
+      "selected_context": "건조했던 피부에 앰플을 듬뿍 흡수시켜 주셨습니다.\n마스크팩과 데콜테 마사지까지 친절한 서비스로 힐링하고 왔네요.",
+      "ReactionPlan": {
+        "domain": "SERVICE",
+        "reaction_mode": "service_reaction",
+        "primary_anchor": "마스크팩",
+        "secondary_anchor": "수분 진정",
+        "reaction_instruction": "마스크팩 서비스의 구성이나 진행 방식 디테일에 관찰자 입장에서 반응해."
+      },
+      "prompt_version": "3.5.0-reaction-planned",
+      "Gemini Raw": null,
+      "gemini_raw": null,
+      "1차 Inspector": {
+        "passed": false,
+        "code": "BRIDGE_UNAVAILABLE"
+      },
+      "inspection": {
+        "passed": false,
+        "code": "BRIDGE_UNAVAILABLE"
+      },
+      "quality_gate": {
+        "valid": false,
+        "code": "BRIDGE_UNAVAILABLE"
+      },
+      "Grounding Result": {
+        "valid": false,
+        "code": "BRIDGE_UNAVAILABLE"
+      },
+      "grounding_gate": {
+        "valid": false,
+        "code": "BRIDGE_UNAVAILABLE"
+      },
+      "Natural Expression Result": {
+        "eating_fun_matched": false
+      },
+      "Period Normalization": {
+        "before": null,
+        "after": null
+      },
+      "rewrite_triggered": false,
+      "Rewrite Raw": null,
+      "rewrite_raw": null,
+      "Final Text": null,
+      "final_text": null,
+      "Final Status": "BRIDGE_UNAVAILABLE",
+      "final_status": "BRIDGE_UNAVAILABLE"
+    },
+    {
+      "id": "service_04_pt_gym",
+      "Title": "역삼 헬스장 1:1 PT 체형 교정 운동",
+      "title": "역삼 헬스장 1:1 PT 체형 교정 운동",
+      "domain": "SERVICE",
+      "reaction_mode": "service_reaction",
+      "primary_anchor": "헬스장",
+      "secondary_anchor": "",
+      "reaction_instruction": "헬스장 서비스의 구성이나 진행 방식 디테일에 관찰자 입장에서 반응해.",
+      "Selected Context": "트레이너 선생님이 라운드숄더 자세를 정밀하게 분석해 주시고 스쿼트할 때 무릎 각도를 친절하게 교정해 주셨습니다.",
+      "selected_context": "트레이너 선생님이 라운드숄더 자세를 정밀하게 분석해 주시고 스쿼트할 때 무릎 각도를 친절하게 교정해 주셨습니다.",
+      "ReactionPlan": {
+        "domain": "SERVICE",
+        "reaction_mode": "service_reaction",
+        "primary_anchor": "헬스장",
+        "secondary_anchor": "",
+        "reaction_instruction": "헬스장 서비스의 구성이나 진행 방식 디테일에 관찰자 입장에서 반응해."
+      },
+      "prompt_version": "3.5.0-reaction-planned",
+      "Gemini Raw": null,
+      "gemini_raw": null,
+      "1차 Inspector": {
+        "passed": false,
+        "code": "BRIDGE_UNAVAILABLE"
+      },
+      "inspection": {
+        "passed": false,
+        "code": "BRIDGE_UNAVAILABLE"
+      },
+      "quality_gate": {
+        "valid": false,
+        "code": "BRIDGE_UNAVAILABLE"
+      },
+      "Grounding Result": {
+        "valid": false,
+        "code": "BRIDGE_UNAVAILABLE"
+      },
+      "grounding_gate": {
+        "valid": false,
+        "code": "BRIDGE_UNAVAILABLE"
+      },
+      "Natural Expression Result": {
+        "eating_fun_matched": false
+      },
+      "Period Normalization": {
+        "before": null,
+        "after": null
+      },
+      "rewrite_triggered": false,
+      "Rewrite Raw": null,
+      "rewrite_raw": null,
+      "Final Text": null,
+      "final_text": null,
+      "Final Status": "BRIDGE_UNAVAILABLE",
+      "final_status": "BRIDGE_UNAVAILABLE"
+    },
+    {
+      "id": "service_05_car_detailing",
+      "Title": "일산 프리미엄 손세차 광택 디테일링",
+      "title": "일산 프리미엄 손세차 광택 디테일링",
+      "domain": "SERVICE",
+      "reaction_mode": "service_reaction",
+      "primary_anchor": "디테일링",
+      "secondary_anchor": "세차",
+      "reaction_instruction": "디테일링 서비스의 구성이나 진행 방식 디테일에 관찰자 입장에서 반응해.",
+      "Selected Context": "휠에 낀 분진과 도장면 물때를 말끔하게 제거하고 유리막 코팅까지 깔끔한 마무리로 새 차처럼 반짝입니다.",
+      "selected_context": "휠에 낀 분진과 도장면 물때를 말끔하게 제거하고 유리막 코팅까지 깔끔한 마무리로 새 차처럼 반짝입니다.",
+      "ReactionPlan": {
+        "domain": "SERVICE",
+        "reaction_mode": "service_reaction",
+        "primary_anchor": "디테일링",
+        "secondary_anchor": "세차",
+        "reaction_instruction": "디테일링 서비스의 구성이나 진행 방식 디테일에 관찰자 입장에서 반응해."
+      },
+      "prompt_version": "3.5.0-reaction-planned",
+      "Gemini Raw": null,
+      "gemini_raw": null,
+      "1차 Inspector": {
+        "passed": false,
+        "code": "BRIDGE_UNAVAILABLE"
+      },
+      "inspection": {
+        "passed": false,
+        "code": "BRIDGE_UNAVAILABLE"
+      },
+      "quality_gate": {
+        "valid": false,
+        "code": "BRIDGE_UNAVAILABLE"
+      },
+      "Grounding Result": {
+        "valid": false,
+        "code": "BRIDGE_UNAVAILABLE"
+      },
+      "grounding_gate": {
+        "valid": false,
+        "code": "BRIDGE_UNAVAILABLE"
+      },
+      "Natural Expression Result": {
+        "eating_fun_matched": false
+      },
+      "Period Normalization": {
+        "before": null,
+        "after": null
+      },
+      "rewrite_triggered": false,
+      "Rewrite Raw": null,
+      "rewrite_raw": null,
+      "Final Text": null,
+      "final_text": null,
+      "Final Status": "BRIDGE_UNAVAILABLE",
+      "final_status": "BRIDGE_UNAVAILABLE"
+    },
+    {
+      "id": "place_01_weekend_jeju_travel",
+      "Title": "주말 제주 여행 코스 정리",
+      "title": "주말 제주 여행 코스 정리",
+      "domain": "PLACE",
+      "reaction_mode": "place_observation",
+      "primary_anchor": "코스",
+      "secondary_anchor": "제주",
+      "reaction_instruction": "코스 관련 풍경이나 코스, 공간 디테일에 관찰자 입장에서 반응해. 직접 가본 척하지 마.",
+      "Selected Context": "이번 주말에 친구들과 함께 다녀온 제주도 바다 명소와 산책로 코스입니다.\n협재 해변의 에메랄드빛 바다 풍경이 참 평화로웠습니다.",
+      "selected_context": "이번 주말에 친구들과 함께 다녀온 제주도 바다 명소와 산책로 코스입니다.\n협재 해변의 에메랄드빛 바다 풍경이 참 평화로웠습니다.",
+      "ReactionPlan": {
+        "domain": "PLACE",
+        "reaction_mode": "place_observation",
+        "primary_anchor": "코스",
+        "secondary_anchor": "제주",
+        "reaction_instruction": "코스 관련 풍경이나 코스, 공간 디테일에 관찰자 입장에서 반응해. 직접 가본 척하지 마."
+      },
+      "prompt_version": "3.5.0-reaction-planned",
+      "Gemini Raw": null,
+      "gemini_raw": null,
+      "1차 Inspector": {
+        "passed": false,
+        "code": "BRIDGE_UNAVAILABLE"
+      },
+      "inspection": {
+        "passed": false,
+        "code": "BRIDGE_UNAVAILABLE"
+      },
+      "quality_gate": {
+        "valid": false,
+        "code": "BRIDGE_UNAVAILABLE"
+      },
+      "Grounding Result": {
+        "valid": false,
+        "code": "BRIDGE_UNAVAILABLE"
+      },
+      "grounding_gate": {
+        "valid": false,
+        "code": "BRIDGE_UNAVAILABLE"
+      },
+      "Natural Expression Result": {
+        "eating_fun_matched": false
+      },
+      "Period Normalization": {
+        "before": null,
+        "after": null
+      },
+      "rewrite_triggered": false,
+      "Rewrite Raw": null,
+      "rewrite_raw": null,
+      "Final Text": null,
+      "final_text": null,
+      "Final Status": "BRIDGE_UNAVAILABLE",
+      "final_status": "BRIDGE_UNAVAILABLE"
+    },
+    {
+      "id": "place_02_child_jeju_trip",
+      "Title": "아이와 다녀온 제주 여행 후기",
+      "title": "아이와 다녀온 제주 여행 후기",
+      "domain": "PLACE",
+      "reaction_mode": "place_observation",
+      "primary_anchor": "제주",
+      "secondary_anchor": "산책로",
+      "reaction_instruction": "제주 관련 풍경이나 코스, 공간 디테일에 관찰자 입장에서 반응해. 직접 가본 척하지 마.",
+      "Selected Context": "아이와 함께 제주도 해변 산책로를 걸으며 예쁜 바다 풍경을 눈에 담고 왔습니다.\n올레길 코스가 완만해서 걷기 편했습니다.",
+      "selected_context": "아이와 함께 제주도 해변 산책로를 걸으며 예쁜 바다 풍경을 눈에 담고 왔습니다.\n올레길 코스가 완만해서 걷기 편했습니다.",
+      "ReactionPlan": {
+        "domain": "PLACE",
+        "reaction_mode": "place_observation",
+        "primary_anchor": "제주",
+        "secondary_anchor": "산책로",
+        "reaction_instruction": "제주 관련 풍경이나 코스, 공간 디테일에 관찰자 입장에서 반응해. 직접 가본 척하지 마."
+      },
+      "prompt_version": "3.5.0-reaction-planned",
+      "Gemini Raw": null,
+      "gemini_raw": null,
+      "1차 Inspector": {
+        "passed": false,
+        "code": "BRIDGE_UNAVAILABLE"
+      },
+      "inspection": {
+        "passed": false,
+        "code": "BRIDGE_UNAVAILABLE"
+      },
+      "quality_gate": {
+        "valid": false,
+        "code": "BRIDGE_UNAVAILABLE"
+      },
+      "Grounding Result": {
+        "valid": false,
+        "code": "BRIDGE_UNAVAILABLE"
+      },
+      "grounding_gate": {
+        "valid": false,
+        "code": "BRIDGE_UNAVAILABLE"
+      },
+      "Natural Expression Result": {
+        "eating_fun_matched": false
+      },
+      "Period Normalization": {
+        "before": null,
+        "after": null
+      },
+      "rewrite_triggered": false,
+      "Rewrite Raw": null,
+      "rewrite_raw": null,
+      "Final Text": null,
+      "final_text": null,
+      "Final Status": "BRIDGE_UNAVAILABLE",
+      "final_status": "BRIDGE_UNAVAILABLE"
+    },
+    {
+      "id": "place_03_hotel_stay_trip",
+      "Title": "강릉 호텔 1박 2일 여행 후기",
+      "title": "강릉 호텔 1박 2일 여행 후기",
+      "domain": "PLACE",
+      "reaction_mode": "place_observation",
+      "primary_anchor": "강릉",
+      "secondary_anchor": "1박",
+      "reaction_instruction": "강릉 관련 풍경이나 코스, 공간 디테일에 관찰자 입장에서 반응해. 직접 가본 척하지 마.",
+      "Selected Context": "바다가 한눈에 내려다보이는 강릉 호텔 숙소에서 1박 하며 힐링 관광하고 왔습니다.\n통창으로 보이는 일출 풍경이 장관이었습니다.",
+      "selected_context": "바다가 한눈에 내려다보이는 강릉 호텔 숙소에서 1박 하며 힐링 관광하고 왔습니다.\n통창으로 보이는 일출 풍경이 장관이었습니다.",
+      "ReactionPlan": {
+        "domain": "PLACE",
+        "reaction_mode": "place_observation",
+        "primary_anchor": "강릉",
+        "secondary_anchor": "1박",
+        "reaction_instruction": "강릉 관련 풍경이나 코스, 공간 디테일에 관찰자 입장에서 반응해. 직접 가본 척하지 마."
+      },
+      "prompt_version": "3.5.0-reaction-planned",
+      "Gemini Raw": null,
+      "gemini_raw": null,
+      "1차 Inspector": {
+        "passed": false,
+        "code": "BRIDGE_UNAVAILABLE"
+      },
+      "inspection": {
+        "passed": false,
+        "code": "BRIDGE_UNAVAILABLE"
+      },
+      "quality_gate": {
+        "valid": false,
+        "code": "BRIDGE_UNAVAILABLE"
+      },
+      "Grounding Result": {
+        "valid": false,
+        "code": "BRIDGE_UNAVAILABLE"
+      },
+      "grounding_gate": {
+        "valid": false,
+        "code": "BRIDGE_UNAVAILABLE"
+      },
+      "Natural Expression Result": {
+        "eating_fun_matched": false
+      },
+      "Period Normalization": {
+        "before": null,
+        "after": null
+      },
+      "rewrite_triggered": false,
+      "Rewrite Raw": null,
+      "rewrite_raw": null,
+      "Final Text": null,
+      "final_text": null,
+      "Final Status": "BRIDGE_UNAVAILABLE",
+      "final_status": "BRIDGE_UNAVAILABLE"
+    },
+    {
+      "id": "place_04_gyeongju_cherry_blossom",
+      "Title": "경주 보문단지 벚꽃 산책길 여행",
+      "title": "경주 보문단지 벚꽃 산책길 여행",
+      "domain": "PLACE",
+      "reaction_mode": "place_observation",
+      "primary_anchor": "둘레길",
+      "secondary_anchor": "산책길",
+      "reaction_instruction": "둘레길 관련 풍경이나 코스, 공간 디테일에 관찰자 입장에서 반응해. 직접 가본 척하지 마.",
+      "Selected Context": "보문호수 둘레길을 따라 만개한 벚꽃 터널이 이어져 있었습니다.\n호수 물결과 흩날리는 꽃잎 풍경이 낭만적이네요.",
+      "selected_context": "보문호수 둘레길을 따라 만개한 벚꽃 터널이 이어져 있었습니다.\n호수 물결과 흩날리는 꽃잎 풍경이 낭만적이네요.",
+      "ReactionPlan": {
+        "domain": "PLACE",
+        "reaction_mode": "place_observation",
+        "primary_anchor": "둘레길",
+        "secondary_anchor": "산책길",
+        "reaction_instruction": "둘레길 관련 풍경이나 코스, 공간 디테일에 관찰자 입장에서 반응해. 직접 가본 척하지 마."
+      },
+      "prompt_version": "3.5.0-reaction-planned",
+      "Gemini Raw": null,
+      "gemini_raw": null,
+      "1차 Inspector": {
+        "passed": false,
+        "code": "BRIDGE_UNAVAILABLE"
+      },
+      "inspection": {
+        "passed": false,
+        "code": "BRIDGE_UNAVAILABLE"
+      },
+      "quality_gate": {
+        "valid": false,
+        "code": "BRIDGE_UNAVAILABLE"
+      },
+      "Grounding Result": {
+        "valid": false,
+        "code": "BRIDGE_UNAVAILABLE"
+      },
+      "grounding_gate": {
+        "valid": false,
+        "code": "BRIDGE_UNAVAILABLE"
+      },
+      "Natural Expression Result": {
+        "eating_fun_matched": false
+      },
+      "Period Normalization": {
+        "before": null,
+        "after": null
+      },
+      "rewrite_triggered": false,
+      "Rewrite Raw": null,
+      "rewrite_raw": null,
+      "Final Text": null,
+      "final_text": null,
+      "Final Status": "BRIDGE_UNAVAILABLE",
+      "final_status": "BRIDGE_UNAVAILABLE"
+    },
+    {
+      "id": "place_05_busan_night_view",
+      "Title": "부산 광안리 해수욕장 야경 코스",
+      "title": "부산 광안리 해수욕장 야경 코스",
+      "domain": "PLACE",
+      "reaction_mode": "place_observation",
+      "primary_anchor": "바다",
+      "secondary_anchor": "해변",
+      "reaction_instruction": "바다 관련 풍경이나 코스, 공간 디테일에 관찰자 입장에서 반응해. 직접 가본 척하지 마.",
+      "Selected Context": "광안대교에 불이 켜지며 반짝이는 불빛이 밤바다에 은은하게 비쳤습니다.\n해변 버스킹 음악을 들으며 밤 산책을 즐겼습니다.",
+      "selected_context": "광안대교에 불이 켜지며 반짝이는 불빛이 밤바다에 은은하게 비쳤습니다.\n해변 버스킹 음악을 들으며 밤 산책을 즐겼습니다.",
+      "ReactionPlan": {
+        "domain": "PLACE",
+        "reaction_mode": "place_observation",
+        "primary_anchor": "바다",
+        "secondary_anchor": "해변",
+        "reaction_instruction": "바다 관련 풍경이나 코스, 공간 디테일에 관찰자 입장에서 반응해. 직접 가본 척하지 마."
+      },
+      "prompt_version": "3.5.0-reaction-planned",
+      "Gemini Raw": null,
+      "gemini_raw": null,
+      "1차 Inspector": {
+        "passed": false,
+        "code": "BRIDGE_UNAVAILABLE"
+      },
+      "inspection": {
+        "passed": false,
+        "code": "BRIDGE_UNAVAILABLE"
+      },
+      "quality_gate": {
+        "valid": false,
+        "code": "BRIDGE_UNAVAILABLE"
+      },
+      "Grounding Result": {
+        "valid": false,
+        "code": "BRIDGE_UNAVAILABLE"
+      },
+      "grounding_gate": {
+        "valid": false,
+        "code": "BRIDGE_UNAVAILABLE"
+      },
+      "Natural Expression Result": {
+        "eating_fun_matched": false
+      },
+      "Period Normalization": {
+        "before": null,
+        "after": null
+      },
+      "rewrite_triggered": false,
+      "Rewrite Raw": null,
+      "rewrite_raw": null,
+      "Final Text": null,
+      "final_text": null,
+      "Final Status": "BRIDGE_UNAVAILABLE",
+      "final_status": "BRIDGE_UNAVAILABLE"
+    },
+    {
+      "id": "prod_01_cordless_vacuum",
+      "Title": "무선청소기 흡입력 실사용 솔직 리뷰",
+      "title": "무선청소기 흡입력 실사용 솔직 리뷰",
+      "domain": "PRODUCT",
+      "reaction_mode": "feature_reaction",
+      "primary_anchor": "청소기",
+      "secondary_anchor": "",
+      "reaction_instruction": "제품의 청소기 기능이나 디자인, 사용 디테일에 관찰자 입장에서 가볍게 반응해. 직접 써본 척하지 마.",
+      "Selected Context": "본체 무게가 1.5kg으로 가벼워서 손목에 무리가 덜 갑니다.\n틈새 노즐로 구석진 먼지까지 시원하게 청소할 수 있는 흡입력이었습니다.",
+      "selected_context": "본체 무게가 1.5kg으로 가벼워서 손목에 무리가 덜 갑니다.\n틈새 노즐로 구석진 먼지까지 시원하게 청소할 수 있는 흡입력이었습니다.",
+      "ReactionPlan": {
+        "domain": "PRODUCT",
+        "reaction_mode": "feature_reaction",
+        "primary_anchor": "청소기",
+        "secondary_anchor": "",
+        "reaction_instruction": "제품의 청소기 기능이나 디자인, 사용 디테일에 관찰자 입장에서 가볍게 반응해. 직접 써본 척하지 마."
+      },
+      "prompt_version": "3.5.0-reaction-planned",
+      "Gemini Raw": null,
+      "gemini_raw": null,
+      "1차 Inspector": {
+        "passed": false,
+        "code": "BRIDGE_UNAVAILABLE"
+      },
+      "inspection": {
+        "passed": false,
+        "code": "BRIDGE_UNAVAILABLE"
+      },
+      "quality_gate": {
+        "valid": false,
+        "code": "BRIDGE_UNAVAILABLE"
+      },
+      "Grounding Result": {
+        "valid": false,
+        "code": "BRIDGE_UNAVAILABLE"
+      },
+      "grounding_gate": {
+        "valid": false,
+        "code": "BRIDGE_UNAVAILABLE"
+      },
+      "Natural Expression Result": {
+        "eating_fun_matched": false
+      },
+      "Period Normalization": {
+        "before": null,
+        "after": null
+      },
+      "rewrite_triggered": false,
+      "Rewrite Raw": null,
+      "rewrite_raw": null,
+      "Final Text": null,
+      "final_text": null,
+      "Final Status": "BRIDGE_UNAVAILABLE",
+      "final_status": "BRIDGE_UNAVAILABLE"
+    },
+    {
+      "id": "prod_02_bluetooth_headphone",
+      "Title": "노이즈캔슬링 블루투스 헤드폰 개봉기",
+      "title": "노이즈캔슬링 블루투스 헤드폰 개봉기",
+      "domain": "PRODUCT",
+      "reaction_mode": "feature_reaction",
+      "primary_anchor": "헤드폰",
+      "secondary_anchor": "",
+      "reaction_instruction": "제품의 헤드폰 기능이나 디자인, 사용 디테일에 관찰자 입장에서 가볍게 반응해. 직접 써본 척하지 마.",
+      "Selected Context": "지하철 소음을 차단해주는 노이즈캔슬링 성능이 우수했습니다.\n이어패드 쿠션감이 푹신해서 장시간 착용해도 편안하네요.",
+      "selected_context": "지하철 소음을 차단해주는 노이즈캔슬링 성능이 우수했습니다.\n이어패드 쿠션감이 푹신해서 장시간 착용해도 편안하네요.",
+      "ReactionPlan": {
+        "domain": "PRODUCT",
+        "reaction_mode": "feature_reaction",
+        "primary_anchor": "헤드폰",
+        "secondary_anchor": "",
+        "reaction_instruction": "제품의 헤드폰 기능이나 디자인, 사용 디테일에 관찰자 입장에서 가볍게 반응해. 직접 써본 척하지 마."
+      },
+      "prompt_version": "3.5.0-reaction-planned",
+      "Gemini Raw": null,
+      "gemini_raw": null,
+      "1차 Inspector": {
+        "passed": false,
+        "code": "BRIDGE_UNAVAILABLE"
+      },
+      "inspection": {
+        "passed": false,
+        "code": "BRIDGE_UNAVAILABLE"
+      },
+      "quality_gate": {
+        "valid": false,
+        "code": "BRIDGE_UNAVAILABLE"
+      },
+      "Grounding Result": {
+        "valid": false,
+        "code": "BRIDGE_UNAVAILABLE"
+      },
+      "grounding_gate": {
+        "valid": false,
+        "code": "BRIDGE_UNAVAILABLE"
+      },
+      "Natural Expression Result": {
+        "eating_fun_matched": false
+      },
+      "Period Normalization": {
+        "before": null,
+        "after": null
+      },
+      "rewrite_triggered": false,
+      "Rewrite Raw": null,
+      "rewrite_raw": null,
+      "Final Text": null,
+      "final_text": null,
+      "Final Status": "BRIDGE_UNAVAILABLE",
+      "final_status": "BRIDGE_UNAVAILABLE"
+    },
+    {
+      "id": "prod_03_mechanical_keyboard",
+      "Title": "기계식 키보드 저소음 적축 타건감",
+      "title": "기계식 키보드 저소음 적축 타건감",
+      "domain": "PRODUCT",
+      "reaction_mode": "feature_reaction",
+      "primary_anchor": "키보드",
+      "secondary_anchor": "",
+      "reaction_instruction": "제품의 키보드 기능이나 디자인, 사용 디테일에 관찰자 입장에서 가볍게 반응해. 직접 써본 척하지 마.",
+      "Selected Context": "통울림 없는 알루미늄 하우징에 정갈한 타건음이 인상적입니다.\n키압이 가벼워서 타이핑 작업할 때 손가락 피로가 적었습니다.",
+      "selected_context": "통울림 없는 알루미늄 하우징에 정갈한 타건음이 인상적입니다.\n키압이 가벼워서 타이핑 작업할 때 손가락 피로가 적었습니다.",
+      "ReactionPlan": {
+        "domain": "PRODUCT",
+        "reaction_mode": "feature_reaction",
+        "primary_anchor": "키보드",
+        "secondary_anchor": "",
+        "reaction_instruction": "제품의 키보드 기능이나 디자인, 사용 디테일에 관찰자 입장에서 가볍게 반응해. 직접 써본 척하지 마."
+      },
+      "prompt_version": "3.5.0-reaction-planned",
+      "Gemini Raw": null,
+      "gemini_raw": null,
+      "1차 Inspector": {
+        "passed": false,
+        "code": "BRIDGE_UNAVAILABLE"
+      },
+      "inspection": {
+        "passed": false,
+        "code": "BRIDGE_UNAVAILABLE"
+      },
+      "quality_gate": {
+        "valid": false,
+        "code": "BRIDGE_UNAVAILABLE"
+      },
+      "Grounding Result": {
+        "valid": false,
+        "code": "BRIDGE_UNAVAILABLE"
+      },
+      "grounding_gate": {
+        "valid": false,
+        "code": "BRIDGE_UNAVAILABLE"
+      },
+      "Natural Expression Result": {
+        "eating_fun_matched": false
+      },
+      "Period Normalization": {
+        "before": null,
+        "after": null
+      },
+      "rewrite_triggered": false,
+      "Rewrite Raw": null,
+      "rewrite_raw": null,
+      "Final Text": null,
+      "final_text": null,
+      "Final Status": "BRIDGE_UNAVAILABLE",
+      "final_status": "BRIDGE_UNAVAILABLE"
+    },
+    {
+      "id": "prod_04_air_purifier",
+      "Title": "원룸 공기청정기 저소음 모드 리뷰",
+      "title": "원룸 공기청정기 저소음 모드 리뷰",
+      "domain": "PRODUCT",
+      "reaction_mode": "feature_reaction",
+      "primary_anchor": "공기청정기",
+      "secondary_anchor": "",
+      "reaction_instruction": "제품의 공기청정기 기능이나 디자인, 사용 디테일에 관찰자 입장에서 가볍게 반응해. 직접 써본 척하지 마.",
+      "Selected Context": "취침 모드로 켜두면 모터 소음이 거의 들리지 않아 숙면에 방해되지 않았습니다.\n헤파필터 교체 방식도 간편했습니다.",
+      "selected_context": "취침 모드로 켜두면 모터 소음이 거의 들리지 않아 숙면에 방해되지 않았습니다.\n헤파필터 교체 방식도 간편했습니다.",
+      "ReactionPlan": {
+        "domain": "PRODUCT",
+        "reaction_mode": "feature_reaction",
+        "primary_anchor": "공기청정기",
+        "secondary_anchor": "",
+        "reaction_instruction": "제품의 공기청정기 기능이나 디자인, 사용 디테일에 관찰자 입장에서 가볍게 반응해. 직접 써본 척하지 마."
+      },
+      "prompt_version": "3.5.0-reaction-planned",
+      "Gemini Raw": null,
+      "gemini_raw": null,
+      "1차 Inspector": {
+        "passed": false,
+        "code": "BRIDGE_UNAVAILABLE"
+      },
+      "inspection": {
+        "passed": false,
+        "code": "BRIDGE_UNAVAILABLE"
+      },
+      "quality_gate": {
+        "valid": false,
+        "code": "BRIDGE_UNAVAILABLE"
+      },
+      "Grounding Result": {
+        "valid": false,
+        "code": "BRIDGE_UNAVAILABLE"
+      },
+      "grounding_gate": {
+        "valid": false,
+        "code": "BRIDGE_UNAVAILABLE"
+      },
+      "Natural Expression Result": {
+        "eating_fun_matched": false
+      },
+      "Period Normalization": {
+        "before": null,
+        "after": null
+      },
+      "rewrite_triggered": false,
+      "Rewrite Raw": null,
+      "rewrite_raw": null,
+      "Final Text": null,
+      "final_text": null,
+      "Final Status": "BRIDGE_UNAVAILABLE",
+      "final_status": "BRIDGE_UNAVAILABLE"
+    },
+    {
+      "id": "prod_05_smartwatch_battery",
+      "Title": "스마트워치 배터리 사용 시간 사용기",
+      "title": "스마트워치 배터리 사용 시간 사용기",
+      "domain": "PRODUCT",
+      "reaction_mode": "feature_reaction",
+      "primary_anchor": "배터리",
+      "secondary_anchor": "사용기",
+      "reaction_instruction": "제품의 배터리 기능이나 디자인, 사용 디테일에 관찰자 입장에서 가볍게 반응해. 직접 써본 척하지 마.",
+      "Selected Context": "완충 후 일반 사용 시 4일 이상 유지되는 긴 배터리가 마음에 들었습니다.\n수면 측정 센서 반응도 신속하네요.",
+      "selected_context": "완충 후 일반 사용 시 4일 이상 유지되는 긴 배터리가 마음에 들었습니다.\n수면 측정 센서 반응도 신속하네요.",
+      "ReactionPlan": {
+        "domain": "PRODUCT",
+        "reaction_mode": "feature_reaction",
+        "primary_anchor": "배터리",
+        "secondary_anchor": "사용기",
+        "reaction_instruction": "제품의 배터리 기능이나 디자인, 사용 디테일에 관찰자 입장에서 가볍게 반응해. 직접 써본 척하지 마."
+      },
+      "prompt_version": "3.5.0-reaction-planned",
+      "Gemini Raw": null,
+      "gemini_raw": null,
+      "1차 Inspector": {
+        "passed": false,
+        "code": "BRIDGE_UNAVAILABLE"
+      },
+      "inspection": {
+        "passed": false,
+        "code": "BRIDGE_UNAVAILABLE"
+      },
+      "quality_gate": {
+        "valid": false,
+        "code": "BRIDGE_UNAVAILABLE"
+      },
+      "Grounding Result": {
+        "valid": false,
+        "code": "BRIDGE_UNAVAILABLE"
+      },
+      "grounding_gate": {
+        "valid": false,
+        "code": "BRIDGE_UNAVAILABLE"
+      },
+      "Natural Expression Result": {
+        "eating_fun_matched": false
+      },
+      "Period Normalization": {
+        "before": null,
+        "after": null
+      },
+      "rewrite_triggered": false,
+      "Rewrite Raw": null,
+      "rewrite_raw": null,
+      "Final Text": null,
+      "final_text": null,
+      "Final Status": "BRIDGE_UNAVAILABLE",
+      "final_status": "BRIDGE_UNAVAILABLE"
+    },
+    {
+      "id": "pers_01_exam_pass",
+      "Title": "기사 자격증 최종 합격 후기",
+      "title": "기사 자격증 최종 합격 후기",
+      "domain": "PERSONAL",
+      "reaction_mode": "writer_feeling",
+      "primary_anchor": "합격",
+      "secondary_anchor": "자격증",
+      "reaction_instruction": "작성자가 겪은 상황이나 마음에 가볍게 호응하거나 응원해. 내 경험을 덧붙이지 마.",
+      "Selected Context": "3개월 동안 퇴근 후 도서관에서 공부한 끝에 드디어 합격자 명단에 이름을 올렸습니다.\n그동안의 피로가 한순간에 씻겨 내려가는 기분입니다.",
+      "selected_context": "3개월 동안 퇴근 후 도서관에서 공부한 끝에 드디어 합격자 명단에 이름을 올렸습니다.\n그동안의 피로가 한순간에 씻겨 내려가는 기분입니다.",
+      "ReactionPlan": {
+        "domain": "PERSONAL",
+        "reaction_mode": "writer_feeling",
+        "primary_anchor": "합격",
+        "secondary_anchor": "자격증",
+        "reaction_instruction": "작성자가 겪은 상황이나 마음에 가볍게 호응하거나 응원해. 내 경험을 덧붙이지 마."
+      },
+      "prompt_version": "3.5.0-reaction-planned",
+      "Gemini Raw": null,
+      "gemini_raw": null,
+      "1차 Inspector": {
+        "passed": false,
+        "code": "BRIDGE_UNAVAILABLE"
+      },
+      "inspection": {
+        "passed": false,
+        "code": "BRIDGE_UNAVAILABLE"
+      },
+      "quality_gate": {
+        "valid": false,
+        "code": "BRIDGE_UNAVAILABLE"
+      },
+      "Grounding Result": {
+        "valid": false,
+        "code": "BRIDGE_UNAVAILABLE"
+      },
+      "grounding_gate": {
+        "valid": false,
+        "code": "BRIDGE_UNAVAILABLE"
+      },
+      "Natural Expression Result": {
+        "eating_fun_matched": false
+      },
+      "Period Normalization": {
+        "before": null,
+        "after": null
+      },
+      "rewrite_triggered": false,
+      "Rewrite Raw": null,
+      "rewrite_raw": null,
+      "Final Text": null,
+      "final_text": null,
+      "Final Status": "BRIDGE_UNAVAILABLE",
+      "final_status": "BRIDGE_UNAVAILABLE"
+    },
+    {
+      "id": "pers_02_birthday_letter",
+      "Title": "생일날 친구들의 손편지와 축하",
+      "title": "생일날 친구들의 손편지와 축하",
+      "domain": "PERSONAL",
+      "reaction_mode": "writer_feeling",
+      "primary_anchor": "친구",
+      "secondary_anchor": "마음이",
+      "reaction_instruction": "작성자가 겪은 상황이나 마음에 가볍게 호응하거나 응원해. 내 경험을 덧붙이지 마.",
+      "Selected Context": "오랜 친구들이 써준 정성스러운 손편지를 읽으며 마음이 뭉클해졌습니다.\n소중한 사람들과 따뜻한 온기를 나눈 행복한 하루였습니다.",
+      "selected_context": "오랜 친구들이 써준 정성스러운 손편지를 읽으며 마음이 뭉클해졌습니다.\n소중한 사람들과 따뜻한 온기를 나눈 행복한 하루였습니다.",
+      "ReactionPlan": {
+        "domain": "PERSONAL",
+        "reaction_mode": "writer_feeling",
+        "primary_anchor": "친구",
+        "secondary_anchor": "마음이",
+        "reaction_instruction": "작성자가 겪은 상황이나 마음에 가볍게 호응하거나 응원해. 내 경험을 덧붙이지 마."
+      },
+      "prompt_version": "3.5.0-reaction-planned",
+      "Gemini Raw": null,
+      "gemini_raw": null,
+      "1차 Inspector": {
+        "passed": false,
+        "code": "BRIDGE_UNAVAILABLE"
+      },
+      "inspection": {
+        "passed": false,
+        "code": "BRIDGE_UNAVAILABLE"
+      },
+      "quality_gate": {
+        "valid": false,
+        "code": "BRIDGE_UNAVAILABLE"
+      },
+      "Grounding Result": {
+        "valid": false,
+        "code": "BRIDGE_UNAVAILABLE"
+      },
+      "grounding_gate": {
+        "valid": false,
+        "code": "BRIDGE_UNAVAILABLE"
+      },
+      "Natural Expression Result": {
+        "eating_fun_matched": false
+      },
+      "Period Normalization": {
+        "before": null,
+        "after": null
+      },
+      "rewrite_triggered": false,
+      "Rewrite Raw": null,
+      "rewrite_raw": null,
+      "Final Text": null,
+      "final_text": null,
+      "Final Status": "BRIDGE_UNAVAILABLE",
+      "final_status": "BRIDGE_UNAVAILABLE"
+    },
+    {
+      "id": "pers_03_recovery_day",
+      "Title": "감기 몸살 푹 쉬고 회복한 하루",
+      "title": "감기 몸살 푹 쉬고 회복한 하루",
+      "domain": "PERSONAL",
+      "reaction_mode": "writer_feeling",
+      "primary_anchor": "회복",
+      "secondary_anchor": "하루",
+      "reaction_instruction": "작성자가 겪은 상황이나 마음에 가볍게 호응하거나 응원해. 내 경험을 덧붙이지 마.",
+      "Selected Context": "며칠 동안 열과 오한으로 앓아누웠다가 따뜻한 죽을 먹고 푹 자고 일어났습니다.\n가뿐해진 몸으로 따뜻한 차 한 잔을 마시니 살 것 같네요.",
+      "selected_context": "며칠 동안 열과 오한으로 앓아누웠다가 따뜻한 죽을 먹고 푹 자고 일어났습니다.\n가뿐해진 몸으로 따뜻한 차 한 잔을 마시니 살 것 같네요.",
+      "ReactionPlan": {
+        "domain": "PERSONAL",
+        "reaction_mode": "writer_feeling",
+        "primary_anchor": "회복",
+        "secondary_anchor": "하루",
+        "reaction_instruction": "작성자가 겪은 상황이나 마음에 가볍게 호응하거나 응원해. 내 경험을 덧붙이지 마."
+      },
+      "prompt_version": "3.5.0-reaction-planned",
+      "Gemini Raw": null,
+      "gemini_raw": null,
+      "1차 Inspector": {
+        "passed": false,
+        "code": "BRIDGE_UNAVAILABLE"
+      },
+      "inspection": {
+        "passed": false,
+        "code": "BRIDGE_UNAVAILABLE"
+      },
+      "quality_gate": {
+        "valid": false,
+        "code": "BRIDGE_UNAVAILABLE"
+      },
+      "Grounding Result": {
+        "valid": false,
+        "code": "BRIDGE_UNAVAILABLE"
+      },
+      "grounding_gate": {
+        "valid": false,
+        "code": "BRIDGE_UNAVAILABLE"
+      },
+      "Natural Expression Result": {
+        "eating_fun_matched": false
+      },
+      "Period Normalization": {
+        "before": null,
+        "after": null
+      },
+      "rewrite_triggered": false,
+      "Rewrite Raw": null,
+      "rewrite_raw": null,
+      "Final Text": null,
+      "final_text": null,
+      "Final Status": "BRIDGE_UNAVAILABLE",
+      "final_status": "BRIDGE_UNAVAILABLE"
+    },
+    {
+      "id": "pers_04_first_workday",
+      "Title": "새로운 직장 첫 출근 일기",
+      "title": "새로운 직장 첫 출근 일기",
+      "domain": "PERSONAL",
+      "reaction_mode": "writer_feeling",
+      "primary_anchor": "일기",
+      "secondary_anchor": "출근",
+      "reaction_instruction": "작성자가 겪은 상황이나 마음에 가볍게 호응하거나 응원해. 내 경험을 덧붙이지 마.",
+      "Selected Context": "낯선 환경과 새로운 팀원들 앞에서 긴장했지만 다들 따뜻하게 맞아주셨습니다.\n설렘과 긴장이 교차했던 첫날을 무사히 마쳤습니다.",
+      "selected_context": "낯선 환경과 새로운 팀원들 앞에서 긴장했지만 다들 따뜻하게 맞아주셨습니다.\n설렘과 긴장이 교차했던 첫날을 무사히 마쳤습니다.",
+      "ReactionPlan": {
+        "domain": "PERSONAL",
+        "reaction_mode": "writer_feeling",
+        "primary_anchor": "일기",
+        "secondary_anchor": "출근",
+        "reaction_instruction": "작성자가 겪은 상황이나 마음에 가볍게 호응하거나 응원해. 내 경험을 덧붙이지 마."
+      },
+      "prompt_version": "3.5.0-reaction-planned",
+      "Gemini Raw": null,
+      "gemini_raw": null,
+      "1차 Inspector": {
+        "passed": false,
+        "code": "BRIDGE_UNAVAILABLE"
+      },
+      "inspection": {
+        "passed": false,
+        "code": "BRIDGE_UNAVAILABLE"
+      },
+      "quality_gate": {
+        "valid": false,
+        "code": "BRIDGE_UNAVAILABLE"
+      },
+      "Grounding Result": {
+        "valid": false,
+        "code": "BRIDGE_UNAVAILABLE"
+      },
+      "grounding_gate": {
+        "valid": false,
+        "code": "BRIDGE_UNAVAILABLE"
+      },
+      "Natural Expression Result": {
+        "eating_fun_matched": false
+      },
+      "Period Normalization": {
+        "before": null,
+        "after": null
+      },
+      "rewrite_triggered": false,
+      "Rewrite Raw": null,
+      "rewrite_raw": null,
+      "Final Text": null,
+      "final_text": null,
+      "Final Status": "BRIDGE_UNAVAILABLE",
+      "final_status": "BRIDGE_UNAVAILABLE"
+    },
+    {
+      "id": "pers_05_moving_cleaning",
+      "Title": "새집 이사 짐 정리 끝내고 뿌듯한 밤",
+      "title": "새집 이사 짐 정리 끝내고 뿌듯한 밤",
+      "domain": "PERSONAL",
+      "reaction_mode": "writer_feeling",
+      "primary_anchor": "뿌듯",
+      "secondary_anchor": "이사",
+      "reaction_instruction": "작성자가 겪은 상황이나 마음에 가볍게 호응하거나 응원해. 내 경험을 덧붙이지 마.",
+      "Selected Context": "산더미 같던 이삿짐 박스를 모두 풀고 바닥까지 닦고 나니 밤이 깊었습니다.\n깨끗해진 방 안에서 차 한잔 마시니 참 뿌듯합니다.",
+      "selected_context": "산더미 같던 이삿짐 박스를 모두 풀고 바닥까지 닦고 나니 밤이 깊었습니다.\n깨끗해진 방 안에서 차 한잔 마시니 참 뿌듯합니다.",
+      "ReactionPlan": {
+        "domain": "PERSONAL",
+        "reaction_mode": "writer_feeling",
+        "primary_anchor": "뿌듯",
+        "secondary_anchor": "이사",
+        "reaction_instruction": "작성자가 겪은 상황이나 마음에 가볍게 호응하거나 응원해. 내 경험을 덧붙이지 마."
+      },
+      "prompt_version": "3.5.0-reaction-planned",
+      "Gemini Raw": null,
+      "gemini_raw": null,
+      "1차 Inspector": {
+        "passed": false,
+        "code": "BRIDGE_UNAVAILABLE"
+      },
+      "inspection": {
+        "passed": false,
+        "code": "BRIDGE_UNAVAILABLE"
+      },
+      "quality_gate": {
+        "valid": false,
+        "code": "BRIDGE_UNAVAILABLE"
+      },
+      "Grounding Result": {
+        "valid": false,
+        "code": "BRIDGE_UNAVAILABLE"
+      },
+      "grounding_gate": {
+        "valid": false,
+        "code": "BRIDGE_UNAVAILABLE"
+      },
+      "Natural Expression Result": {
+        "eating_fun_matched": false
+      },
+      "Period Normalization": {
+        "before": null,
+        "after": null
+      },
+      "rewrite_triggered": false,
+      "Rewrite Raw": null,
+      "rewrite_raw": null,
+      "Final Text": null,
+      "final_text": null,
+      "Final Status": "BRIDGE_UNAVAILABLE",
+      "final_status": "BRIDGE_UNAVAILABLE"
+    }
+  ]
+}

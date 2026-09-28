@@ -38,11 +38,15 @@ class TestCommunityRhythmPolicy(unittest.TestCase):
                 self.assertTrue(FinalQualityGate.validate(text).valid)
 
     def test_rejects_period_anywhere(self):
-        for text in ("분위기가 참 좋아요.", "비쥬얼. 참 좋아요", "가격 3.5가 눈에 들어와요"):
+        for text in ("분위기가 참 좋아요.", "비쥬얼. 참 좋아요", "가격도 참 좋아요。"):
             with self.subTest(text=text):
                 result = FinalQualityGate.validate(text)
                 self.assertFalse(result.valid)
                 self.assertEqual(result.code, "forbidden_period")
+
+    def test_preserves_decimal_numbers(self):
+        result = FinalQualityGate.validate("무게가 1.5kg이라 들고 다니기 참 편하겠네요")
+        self.assertTrue(result.valid)
 
     def test_rejects_hard_max_and_reports_preferred_band(self):
         accepted = FinalQualityGate.validate("분위기가 정말 좋아 보여서 다음에 한번 들러보고 싶어요")

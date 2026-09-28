@@ -812,6 +812,13 @@ class CommentInteractionService:
                 retryable = (origin in (SubmitOrigin.USER_ENTER, SubmitOrigin.AUTO_TIMER))
                 state = CommentSubmitState.PRECLICK_BLOCKED if retryable else CommentSubmitState.FAILED
                 return CommentSubmitOutcome(state=state, reason=gate_res.code, click_dispatched=False, retryable_same_post=retryable)
+
+            import re as _re
+            if final_text.endswith(".") or final_text.endswith("。") or bool(_re.search(r"。|(?<!\d)\.|\.(?!\d)", final_text)):
+                logger.log(f"  ❌ [COMMENT] 등록 직전 마침표 검증 실패로 제출을 차단합니다: {final_text!r}", "ERROR")
+                retryable = (origin in (SubmitOrigin.USER_ENTER, SubmitOrigin.AUTO_TIMER))
+                state = CommentSubmitState.PRECLICK_BLOCKED if retryable else CommentSubmitState.FAILED
+                return CommentSubmitOutcome(state=state, reason="forbidden_period", click_dispatched=False, retryable_same_post=retryable)
         else:
             logger.log(
                 "  ℹ️ [COMMENT][NATIVE_SUBMIT_VERIFY_ONLY] native click already occurred; final quality gate is not used as a blocker"

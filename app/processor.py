@@ -24,7 +24,7 @@ from naver.interaction import LikeInteractionService, CommentInteractionService
 from naver.editor_adapter import CommentEditorAdapter
 from naver.comment_guard import ServerCommentDuplicateGuard, CommentPresenceState
 from naver.content_extractor import ContentContextExtractor
-from services.draft import DraftService, normalize_naver_comment_text
+from services.draft import DraftService, normalize_naver_comment_text, normalize_comment_punctuation
 from services.contextual_draft import ContextualDraftEngine
 from services.like_eligibility import LikeEligibilityService, LikeEligibility
 from services.like_transaction import LikeTransactionService, LikeConfidence, LikeCircuitBreaker
@@ -1483,6 +1483,7 @@ class PostProcessor:
                                                 else:
                                                     # Step 2: Combined / Suffix validation
                                                     candidate_with_suffix = DraftService.compose_body_and_suffix(gemini_answer, suffix)
+                                                    candidate_with_suffix = normalize_comment_punctuation(candidate_with_suffix)
                                                     combined_gate = FinalQualityGate.validate_final_text(
                                                         candidate_with_suffix, preset=preset, source="gemini_suffix",
                                                         style_profile=getattr(gen_ctx, "style_profile", None),
@@ -1851,6 +1852,7 @@ class PostProcessor:
                         elif gemini_answer:
                             logger.log(f"[GEMINI_GENERATION_SUCCESS] rid={request_id} post={post.key} nav={navigation_version}")
                             cand_composed = DraftService.compose_body_and_suffix(gemini_answer, suffix)
+                            cand_composed = normalize_comment_punctuation(cand_composed)
                             gate_res = FinalQualityGate.validate_final_text(
                                 cand_composed, preset=preset, source="gemini",
                                 style_profile=getattr(gen_ctx, "style_profile", None) if "gen_ctx" in locals() else None,
@@ -1893,6 +1895,7 @@ class PostProcessor:
                             local_res = ContextualDraftEngine.generate(post.title or "", post.excerpt or "", preset=preset)
                             if local_res and local_res.body:
                                 cand_composed = DraftService.compose_body_and_suffix(local_res.body, suffix)
+                                cand_composed = normalize_comment_punctuation(cand_composed)
                                 gate_res = FinalQualityGate.validate_final_text(
                                     cand_composed, preset=preset, source="local",
                                     style_profile=getattr(gen_ctx, "style_profile", None),
@@ -1934,6 +1937,7 @@ class PostProcessor:
                                     self.state_mgr.update(new_state=FeedState.SKIPPING, inc_skip=True)
                             return result
 
+                        draft_text = normalize_comment_punctuation(draft_text)
                         pre_inject_gate = FinalQualityGate.validate_final_text(
                             draft_text, preset=preset, source="editor_injection",
                             style_profile=getattr(gen_ctx, "style_profile", None),

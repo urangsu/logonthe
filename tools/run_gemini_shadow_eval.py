@@ -201,18 +201,40 @@ async def evaluate_case(
     )
     if not gemini_raw:
         return {
-            "id": cid, "title": title, "domain": plan.domain,
-            "reaction_mode": plan.reaction_mode, "primary_anchor": plan.primary_anchor,
+            "id": cid,
+            "Title": title,
+            "title": title,
+            "domain": plan.domain,
+            "reaction_mode": plan.reaction_mode,
+            "primary_anchor": plan.primary_anchor,
             "secondary_anchor": plan.secondary_anchor,
             "reaction_instruction": plan.reaction_instruction,
+            "Selected Context": (context_res.excerpt or "")[:120],
             "selected_context": (context_res.excerpt or "")[:120],
+            "ReactionPlan": {
+                "domain": plan.domain,
+                "reaction_mode": plan.reaction_mode,
+                "primary_anchor": plan.primary_anchor,
+                "secondary_anchor": plan.secondary_anchor,
+                "reaction_instruction": plan.reaction_instruction,
+            },
             "prompt_version": "3.5.0-reaction-planned",
+            "Gemini Raw": None,
             "gemini_raw": None,
-            "inspection": {"passed": False, "code": "bridge_timeout"},
-            "quality_gate": {"valid": False, "code": "bridge_timeout"},
-            "grounding_gate": {"valid": False, "code": "bridge_timeout"},
-            "rewrite_triggered": False, "rewrite_raw": None,
-            "final_text": None, "final_status": "SKIP",
+            "1차 Inspector": {"passed": False, "code": "BRIDGE_UNAVAILABLE"},
+            "inspection": {"passed": False, "code": "BRIDGE_UNAVAILABLE"},
+            "quality_gate": {"valid": False, "code": "BRIDGE_UNAVAILABLE"},
+            "Grounding Result": {"valid": False, "code": "BRIDGE_UNAVAILABLE"},
+            "grounding_gate": {"valid": False, "code": "BRIDGE_UNAVAILABLE"},
+            "Natural Expression Result": {"eating_fun_matched": False},
+            "Period Normalization": {"before": None, "after": None},
+            "rewrite_triggered": False,
+            "Rewrite Raw": None,
+            "rewrite_raw": None,
+            "Final Text": None,
+            "final_text": None,
+            "Final Status": "BRIDGE_UNAVAILABLE",
+            "final_status": "BRIDGE_UNAVAILABLE",
         }
 
     # 5. Contamination Gate
@@ -266,7 +288,12 @@ async def evaluate_case(
             rewrite_prompt, rewrite_request_id, host=bridge_host, port=bridge_port, bridge=bridge
         )
 
-    final_text = rewrite_raw if rewrite_triggered and rewrite_raw else gemini_raw
+    chosen_draft = rewrite_raw if rewrite_triggered and rewrite_raw else gemini_raw
+
+    # Period Normalization
+    from services.draft import normalize_comment_punctuation
+    period_norm_before = chosen_draft
+    final_text = normalize_comment_punctuation(chosen_draft) if chosen_draft else None
 
     # 최종 검증
     final_quality = FinalQualityGate.validate_final_text(
@@ -298,30 +325,52 @@ async def evaluate_case(
 
     return {
         "id": cid,
+        "Title": title,
         "title": title,
         "domain": plan.domain,
         "reaction_mode": plan.reaction_mode,
         "primary_anchor": plan.primary_anchor,
         "secondary_anchor": plan.secondary_anchor,
         "reaction_instruction": plan.reaction_instruction,
+        "Selected Context": (context_res.excerpt or "")[:120],
         "selected_context": (context_res.excerpt or "")[:120],
+        "ReactionPlan": {
+            "domain": plan.domain,
+            "reaction_mode": plan.reaction_mode,
+            "primary_anchor": plan.primary_anchor,
+            "secondary_anchor": plan.secondary_anchor,
+            "reaction_instruction": plan.reaction_instruction,
+        },
         "prompt_version": "3.5.0-reaction-planned",
 
+        "Gemini Raw": gemini_raw,
         "gemini_raw": gemini_raw,
 
-        "contamination": {
-            "is_contaminated": contam.is_contaminated,
-            "code": contam.code,
+        "1차 Inspector": {
+            "passed": inspection.passed,
+            "code": inspection.code,
+            "feedback": inspection.feedback,
         },
         "inspection": {
             "passed": inspection.passed,
             "code": inspection.code,
             "feedback": inspection.feedback,
         },
+        "contamination": {
+            "is_contaminated": contam.is_contaminated,
+            "code": contam.code,
+        },
         "quality_gate": {
             "valid": quality_gate.valid,
             "code": quality_gate.code,
             "reason": quality_gate.reason,
+        },
+        "Grounding Result": {
+            "valid": grounding.valid,
+            "code": grounding.code,
+            "reason": grounding.reason,
+            "unsupported_terms": list(grounding.unsupported_terms),
+            "supported_terms": list(grounding.supported_terms),
         },
         "grounding_gate": {
             "valid": grounding.valid,
@@ -330,9 +379,17 @@ async def evaluate_case(
             "unsupported_terms": list(grounding.unsupported_terms),
             "supported_terms": list(grounding.supported_terms),
         },
+        "Natural Expression Result": {
+            "eating_fun_matched": bool(FinalQualityGate._EATING_FUN_CLICHE_RE.search(gemini_raw)) if gemini_raw else False,
+        },
+        "Period Normalization": {
+            "before": period_norm_before,
+            "after": final_text,
+        },
 
         "rewrite_triggered": rewrite_triggered,
         "rewrite_feedback": rewrite_feedback,
+        "Rewrite Raw": rewrite_raw,
         "rewrite_raw": rewrite_raw,
 
         "final_quality_gate": {
@@ -345,7 +402,9 @@ async def evaluate_case(
             "unsupported_terms": list(final_grounding.unsupported_terms) if final_grounding else [],
         },
 
+        "Final Text": final_text,
         "final_text": final_text,
+        "Final Status": final_status,
         "final_status": final_status,
         "food_relevance": food_rel,
     }
@@ -366,16 +425,24 @@ def compute_kpi(results: List[Dict[str, Any]]) -> Dict[str, Any]:
     implied_violations = 0
     unsupported_content_violations = 0
     unsupported_taste_violations = 0
+    eating_fun_violations = 0
+    terminal_dot_violations = 0
+    terminal_fullwidth_violations = 0
 
     for r in results:
+        final = r.get("Final Text") or r.get("final_text") or ""
         if r["final_status"] != "APPROVED":
             continue
-        # final_text에 위반 사항이 있으면 카운트
-        final = r.get("final_text") or ""
         if any(p in final for p in ("가봤어요", "먹어봤어요", "다녀왔어요", "방문했어요")):
             fake_exp_violations += 1
         if "공감돼요" in final or "저도 그래요" in final:
             implied_violations += 1
+        if FinalQualityGate._EATING_FUN_CLICHE_RE.search(final):
+            eating_fun_violations += 1
+        if final.endswith("."):
+            terminal_dot_violations += 1
+        if final.endswith("。"):
+            terminal_fullwidth_violations += 1
         fg = r.get("final_grounding_gate", {})
         if fg and not fg.get("valid"):
             unsupported_content_violations += 1
@@ -394,12 +461,18 @@ def compute_kpi(results: List[Dict[str, Any]]) -> Dict[str, Any]:
             "implied_shared_experience_registration": implied_violations,
             "unsupported_content_claim_approved": unsupported_content_violations,
             "unsupported_taste_texture_approved": unsupported_taste_violations,
+            "eating_fun_approved": eating_fun_violations,
+            "terminal_dot_approved": terminal_dot_violations,
+            "terminal_fullwidth_approved": terminal_fullwidth_violations,
         },
         "kpi_pass": (
             fake_exp_violations == 0
             and implied_violations == 0
             and unsupported_content_violations == 0
             and unsupported_taste_violations == 0
+            and eating_fun_violations == 0
+            and terminal_dot_violations == 0
+            and terminal_fullwidth_violations == 0
             and (skipped / total <= KPI["final_skip_ratio_max"] if total else True)
         ),
     }
@@ -425,24 +498,28 @@ def generate_markdown_report(results: List[Dict[str, Any]], kpi: Dict[str, Any],
         sf = kpi['safety']
         f.write(f"| Grounding 위반 | {sf['unsupported_content_claim_approved']} |\n")
         f.write(f"| 경험 암시 위반 | {sf['implied_shared_experience_registration']} |\n")
+        f.write(f"| '먹는 재미' 계열 최종 승인 | {sf.get('eating_fun_approved', 0)} |\n")
+        f.write(f"| 말끝 '.' 최종 승인 | {sf.get('terminal_dot_approved', 0)} |\n")
+        f.write(f"| 말끝 '。' 최종 승인 | {sf.get('terminal_fullwidth_approved', 0)} |\n")
         f.write(f"| **네이버 등록** | **0** |\n\n")
         f.write(f"**Safety KPI Pass**: {'✅ PASS' if kpi['kpi_pass'] else '❌ FAIL'}\n\n")
 
-        # 상세 케이스 (최대 10건)
-        f.write("## 케이스별 상세 결과 (최초 10건)\n\n")
+        # 상세 케이스 (최소 10건 원문 그대로 제공)
+        f.write("## 케이스별 상세 결과 (최소 10건 원문 상세)\n\n")
         for r in results[:10]:
             f.write(f"### [{r['id']}] {r['title']}\n")
-            f.write(f"- **ReactionPlan**: domain=`{r['domain']}` mode=`{r['reaction_mode']}` anchor=`{r['primary_anchor']}`\n")
-            f.write(f"- **Selected Context**: {r['selected_context'][:60]}...\n")
-            f.write(f"- **Gemini Raw**: \"{r.get('gemini_raw', 'N/A')}\"\n")
-            f.write(f"- **1차 판정**: inspect={r['inspection']['passed']} gate={r['quality_gate']['valid']} grounding={r['grounding_gate']['valid']}\n")
+            f.write(f"- **Title**: {r.get('Title', r['title'])}\n")
+            f.write(f"- **Selected Context**: {r.get('Selected Context', '')}\n")
+            f.write(f"- **ReactionPlan**: {json.dumps(r.get('ReactionPlan', {}), ensure_ascii=False)}\n")
+            f.write(f"- **Gemini Raw**: \"{r.get('Gemini Raw', 'N/A')}\"\n")
+            f.write(f"- **1차 Inspector**: {json.dumps(r.get('1차 Inspector', {}), ensure_ascii=False)}\n")
+            f.write(f"- **Grounding Result**: {json.dumps(r.get('Grounding Result', {}), ensure_ascii=False)}\n")
+            f.write(f"- **Natural Expression Result**: {json.dumps(r.get('Natural Expression Result', {}), ensure_ascii=False)}\n")
+            f.write(f"- **Period Normalization**: {json.dumps(r.get('Period Normalization', {}), ensure_ascii=False)}\n")
             if r.get("rewrite_triggered"):
-                f.write(f"- **Rewrite**: {r.get('rewrite_feedback', '')}\n")
-                f.write(f"- **Rewrite Raw**: \"{r.get('rewrite_raw', 'N/A')}\"\n")
-            f.write(f"- **Final**: **\"{r.get('final_text', 'N/A')}\"**\n")
-            fg = r.get("final_grounding_gate", {})
-            f.write(f"- **Grounding Evidence**: code={fg.get('code')} unsupported={fg.get('unsupported_terms', [])}\n")
-            f.write(f"- **최종 판정**: **{r['final_status']}**\n\n")
+                f.write(f"- **Rewrite Raw**: \"{r.get('Rewrite Raw', 'N/A')}\"\n")
+            f.write(f"- **Final Text**: **\"{r.get('Final Text', 'N/A')}\"**\n")
+            f.write(f"- **Final Status**: **{r.get('Final Status', 'N/A')}**\n\n")
 
     print(f"  📊 Markdown 리포트 저장: {path}")
 
@@ -461,11 +538,20 @@ async def main():
     parser.add_argument("--start-bridge", action="store_true", help="GeminiExtensionBridge 서버를 직접 시작하여 대기")
     args = parser.parse_args()
 
-    # 케이스 필터
-    fixtures = FIXTURES_50
-    if args.category != "ALL":
-        fixtures = [f for f in fixtures if f.get("domain", "").upper() == args.category.upper()]
-    fixtures = fixtures[:args.cases]
+    # 케이스 필터 (기본 30건: FOOD 10, SERVICE 5, PLACE 5, PRODUCT 5, PERSONAL 5)
+    if args.category == "ALL":
+        food_c = [f for f in FIXTURES_50 if f.get("category") == "FOOD"][:10]
+        serv_c = [f for f in FIXTURES_50 if f.get("category") == "SERVICE"][:5]
+        place_c = [f for f in FIXTURES_50 if f.get("category") in ("PLACE", "TRAVEL")][:5]
+        prod_c = [f for f in FIXTURES_50 if f.get("category") == "PRODUCT"][:5]
+        pers_c = [f for f in FIXTURES_50 if f.get("category") in ("PERSONAL", "DAILY")][:5]
+        fixtures = food_c + serv_c + place_c + prod_c + pers_c
+        if len(fixtures) < args.cases:
+            remaining = [f for f in FIXTURES_50 if f not in fixtures]
+            fixtures.extend(remaining[:args.cases - len(fixtures)])
+    else:
+        fixtures = [f for f in FIXTURES_50 if f.get("category", "").upper() == args.category.upper()]
+        fixtures = fixtures[:args.cases]
 
     if not fixtures:
         print(f"⚠️ 평가할 케이스가 없습니다. (category={args.category}, total fixtures={len(FIXTURES_50)})")
@@ -522,8 +608,11 @@ async def main():
 
     generate_markdown_report(results, kpi, md_path)
 
-    # Safety KPI 위반 시 exit code 1
-    if not kpi["kpi_pass"]:
+    has_gemini = any(r.get("gemini_raw") is not None for r in results)
+    if not has_gemini:
+        print("\n⚠️ Gemini Bridge 미연결 (BRIDGE_UNAVAILABLE). 실제 Gemini 네트워크 호출이 수행되지 않았으므로 Shadow Evaluation 미수행 상태입니다.")
+        sys.exit(2)
+    elif not kpi["kpi_pass"]:
         print("\n❌ Safety KPI 위반이 발생했습니다. 자동등록 전환 전 검토가 필요합니다.")
         sys.exit(1)
     else:

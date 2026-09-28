@@ -102,6 +102,9 @@ def _run_simulated_pipeline(case: Dict[str, Any], initial_raw: str, rewritten_ra
     if rewrite_triggered and rewritten_raw:
         final_draft = rewritten_raw
 
+    from services.draft import normalize_comment_punctuation
+    final_draft = normalize_comment_punctuation(final_draft)
+
     # 5. 최종 검증
     final_inspect = CommentDraftInspector.inspect(
         final_draft, excerpt=context_res.excerpt, preset="community", source="gemini"
@@ -146,9 +149,10 @@ class TestV35SimulatedPipelineContract(unittest.TestCase):
     """
     v3.5 파이프라인의 simulated contract 검증.
 
-    ※ 이 테스트는 실제 Gemini 네트워크를 호출하지 않는다.
-    ※ 네이버 댓글 등록이 없으며 외부 부작용이 0이다.
-    ※ simulated output을 사용하여 파이프라인 계약(ReactionPlan, Inspector, Gate, GroundingGate)을 검증한다.
+    - 실제 Gemini 네트워크 호출을 수행하지 않는다
+    - 사전 정의된 simulated model output을 이용한 pipeline contract test이다
+    - 실제 모델 품질 벤치마크가 아니다
+    - 네이버 댓글 등록이 없으며 외부 부작용이 0이다.
     """
 
     @classmethod
@@ -427,6 +431,125 @@ class TestV35SimulatedPipelineContract(unittest.TestCase):
         # 2. 실제 등록 성공 시점: submitted에 기록됨
         processor._record_submitted_reaction_mode(mock_ctx)
         self.assertEqual(processor._recent_submitted_modes, ["taste_reaction"])
+
+    # ------------------------------------------------------------------
+    # P0-9 ~ P0-14: "먹는 재미" 섭취-재미 기계적 연결 금지 테스트
+    # ------------------------------------------------------------------
+
+    def test_food_eating_fun_expression_fails(self):
+        """P0-10: FOOD 문맥에서 '먹는 재미' 표현은 unnatural_food_expression으로 FAIL"""
+        draft = "종류별로 먹는 재미가 있겠어요"
+        res = CommentDraftInspector.inspect(draft, excerpt="메뉴가 다양합니다", preset="community", source="gemini")
+        self.assertFalse(res.passed)
+        self.assertEqual(res.code, "unnatural_food_expression")
+
+        gate_res = FinalQualityGate.validate_final_text(draft, preset="community", source="gemini")
+        self.assertFalse(gate_res.valid)
+        self.assertEqual(gate_res.code, "unnatural_food_expression")
+
+    def test_food_choose_and_eat_fun_expression_fails(self):
+        """P0-10: '골라 먹는 재미' 표현 FAIL"""
+        draft = "메뉴가 많아서 골라 먹는 재미가 있겠네요"
+        res = CommentDraftInspector.inspect(draft, excerpt="다양한 메뉴가 있습니다", preset="community", source="gemini")
+        self.assertFalse(res.passed)
+        self.assertEqual(res.code, "unnatural_food_expression")
+
+    def test_food_tasting_fun_expression_fails(self):
+        """P0-10: '맛보는 재미', '찍어 먹는 재미' 표현 FAIL"""
+        draft_taste = "하나씩 맛보는 재미가 있겠네요"
+        res1 = CommentDraftInspector.inspect(draft_taste, excerpt="구성", preset="community", source="gemini")
+        self.assertFalse(res1.passed)
+        self.assertEqual(res1.code, "unnatural_food_expression")
+
+        draft_dip = "소스에 찍어 먹는 재미도 있겠어요"
+        res2 = CommentDraftInspector.inspect(draft_dip, excerpt="소스", preset="community", source="gemini")
+        self.assertFalse(res2.passed)
+        self.assertEqual(res2.code, "unnatural_food_expression")
+
+    def test_food_eating_fun_rewrite_to_variety_passes(self):
+        """P0-12: '골라 먹는 재미' 대신 다양성/선택지/구성으로 재작성된 댓글은 PASS"""
+        draft_variety = "메뉴 종류가 다양해서 취향대로 고르기 좋겠네요"
+        res = CommentDraftInspector.inspect(draft_variety, excerpt="메뉴 종류가 많습니다", preset="community", source="gemini")
+        self.assertTrue(res.passed)
+
+        gate_res = FinalQualityGate.validate_final_text(draft_variety, preset="community", source="gemini")
+        self.assertTrue(gate_res.valid)
+
+        draft_choice = "선택지가 많아서 어떤 메뉴를 고를지 고민되겠네요"
+        res2 = CommentDraftInspector.inspect(draft_choice, excerpt="메뉴 선택", preset="community", source="gemini")
+        self.assertTrue(res2.passed)
+
+    # ------------------------------------------------------------------
+    # P0-15 ~ P0-20: 마침표(., 。) 금지 및 소수점 보존 테스트
+    # ------------------------------------------------------------------
+
+    def test_terminal_period_removed(self):
+        """P0-15 / P0-17: terminal period 제거 ('맛있어 보이네요.' -> '맛있어 보이네요')"""
+        from services.draft import normalize_comment_punctuation
+        raw = "블루치즈 조합이 독특해서 궁금하네요."
+        normalized = normalize_comment_punctuation(raw)
+        self.assertEqual(normalized, "블루치즈 조합이 독특해서 궁금하네요")
+        self.assertFalse(normalized.endswith("."))
+
+    def test_fullwidth_terminal_period_removed(self):
+        """P0-17: full-width period 제거 ('맛있어 보이네요。' -> '맛있어 보이네요')"""
+        from services.draft import normalize_comment_punctuation
+        raw = "맛있어 보이네요。"
+        normalized = normalize_comment_punctuation(raw)
+        self.assertEqual(normalized, "맛있어 보이네요")
+        self.assertFalse(normalized.endswith("。"))
+
+    def test_inter_sentence_period_removed_or_rewritten(self):
+        """P0-17: 문장 사이 마침표 제거 및 공백 치환 ('비주얼이 좋네요. 조합도 궁금해요.' -> '비주얼이 좋네요 조합도 궁금해요')"""
+        from services.draft import normalize_comment_punctuation
+        raw = "비주얼이 좋네요. 조합도 궁금해요."
+        normalized = normalize_comment_punctuation(raw)
+        self.assertEqual(normalized, "비주얼이 좋네요 조합도 궁금해요")
+        self.assertNotIn(".", normalized)
+
+    def test_decimal_period_preserved(self):
+        """P0-16 / P0-17: 1.5kg, 3.5mm, 4.2점 등 소수점은 절대 훼손하지 않고 원형 보존"""
+        from services.draft import normalize_comment_punctuation
+        raw = "무게가 1.5kg이라 가볍네요."
+        normalized = normalize_comment_punctuation(raw)
+        self.assertEqual(normalized, "무게가 1.5kg이라 가볍네요")
+        self.assertIn("1.5kg", normalized)
+        self.assertFalse(normalized.endswith("."))
+
+        # 3.5mm 및 4.2점 보존 확인
+        raw_spec = "두께가 3.5mm이고 평점이 4.2점이라 알차네요."
+        norm_spec = normalize_comment_punctuation(raw_spec)
+        self.assertEqual(norm_spec, "두께가 3.5mm이고 평점이 4.2점이라 알차네요")
+        self.assertIn("3.5mm", norm_spec)
+        self.assertIn("4.2점", norm_spec)
+
+    def test_suffix_terminal_period_removed(self):
+        """P0-19: Suffix 결합본 전체를 대상으로 마침표 제거 수행"""
+        from services.draft import DraftService, normalize_comment_punctuation
+        body = "튀김옷이 바삭해 보여서 식감이 제대로겠네요"
+        suffix = "오늘도 좋은 하루 보내세요."
+        composed = DraftService.compose_body_and_suffix(body, suffix)
+        normalized = normalize_comment_punctuation(composed)
+        self.assertFalse(normalized.endswith("."))
+        self.assertFalse(normalized.endswith("。"))
+        self.assertNotIn(".", normalized)
+
+    def test_editor_readback_terminal_period_blocks_submit(self):
+        """P0-20: Editor readback 결과에 마침표가 남아있으면 submit을 차단함"""
+        from naver.editor_adapter import CommentEditorAdapter
+        from unittest.mock import MagicMock
+
+        # _verify_and_confirm에 마침표 포함된 actual 전달 시 False 반환
+        mock_editor = MagicMock()
+        mock_frame = MagicMock()
+        mock_page = MagicMock()
+        mock_editor.evaluate.return_value = "textarea"
+        mock_editor.input_value.return_value = "맛있어 보이네요."
+
+        verified = CommentEditorAdapter._verify_and_confirm(
+            mock_editor, "맛있어 보이네요", True, mock_frame, mock_page
+        )
+        self.assertFalse(verified, "마침표가 남아있는 readback은 반드시 차단(False)되어야 함")
 
     # ------------------------------------------------------------------
     # P0-1 계약 검증: pytest에서 Gemini 호출 없음 보장

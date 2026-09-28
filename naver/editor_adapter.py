@@ -1,7 +1,7 @@
 from typing import Optional
 from playwright.sync_api import Page, Locator
 from naver.resolver import MobileDOMResolver
-from services.draft import normalize_naver_comment_text
+from services.draft import normalize_naver_comment_text, normalize_comment_punctuation
 from src.logger import logger
 
 
@@ -250,6 +250,21 @@ class CommentEditorAdapter:
             )
             return False
 
+        # P0-20: Readback 말끝 및 문장 마침표 검증
+        import re as _re
+        has_forbidden_period = (
+            norm_actual.endswith(".")
+            or norm_actual.endswith("。")
+            or bool(_re.search(r"。|(?<!\d)\.|\.(?!\d)", norm_actual))
+        )
+        if has_forbidden_period:
+            logger.log(
+                f"❌ [NAVER][EDITOR_READBACK_FORBIDDEN_PERIOD] "
+                f"actualChars={len(norm_actual)} actual={norm_actual!r}",
+                "ERROR",
+            )
+            return False
+
         logger.log(f"[NAVER][EDITOR_READBACK_OK] chars={len(raw_read)} normChars={len(norm_actual)} stableRounds={stable_count}")
 
         # --- submit button enabled polling ---
@@ -300,7 +315,7 @@ class CommentEditorAdapter:
             clean_t = clean_t.strip("`")
             if clean_t.startswith("text") or clean_t.startswith("markdown"):
                 clean_t = clean_t.split("\n", 1)[-1]
-        clean_t = clean_t.strip()
+        clean_t = normalize_comment_punctuation(clean_t)
 
         try:
             # 1. Comment DOM Context 획득

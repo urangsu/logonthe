@@ -42,6 +42,51 @@ def normalize_naver_comment_text(text: str) -> str:
     return t.strip()
 
 
+def normalize_comment_punctuation(text: str) -> str:
+    """
+    P0-15 ~ P0-17: Sentence-final & Inter-sentence Period Normalizer.
+
+    규칙:
+    1. 전각 마침표(。)를 공백으로 치환
+    2. 일반 문장 마침표(.) 제거/치환:
+       - 문장 끝(terminal) 마침표 제거
+       - 문장 사이 마침표(.)를 공백으로 치환
+    3. 소수점((?<=\\d)\\.(?=\\d))은 절대 삭제하지 않고 원형 보존! (1.5kg, 3.5mm, 4.2점 등 사실 왜곡 방지)
+    4. 연속 공백은 한 칸으로 정리
+    5. 줄 끝 및 전체 공백 strip
+    """
+    if not isinstance(text, str) or not text:
+        return ""
+
+    t = text
+    # 1. 전각 마침표(。) 치환
+    t = t.replace("。", " ")
+
+    # 2. 숫자 사이 소수점이 아닌 마침표(.) 치환
+    # 소수점((?<=\\d)\\.(?=\\d))을 제외한 모든 마침표를 공백으로 치환
+    t = re.sub(r"(?<!\d)\.+|\.+(?!\d)", " ", t)
+
+    # 3. 연속 공백 정리 및 줄별 strip, 내부의 단일 빈 줄(\n\n) 유지
+    lines = [re.sub(r"[ \t]+", " ", line).strip(".。 ") for line in t.split("\n")]
+    # 앞뒤 빈 줄 제거
+    while lines and not lines[0]:
+        lines.pop(0)
+    while lines and not lines[-1]:
+        lines.pop()
+
+    # 연속 2개 이상의 빈 줄은 최대 1개 빈 줄(\n\n)로 압축
+    res_lines = []
+    for line in lines:
+        if not line and res_lines and not res_lines[-1]:
+            continue
+        res_lines.append(line)
+
+    return "\n".join(res_lines).strip(".。 ")
+
+
+normalize_comment_for_editor = normalize_comment_punctuation
+
+
 class DraftService:
     @staticmethod
     def parse_spintax(text: str) -> str:

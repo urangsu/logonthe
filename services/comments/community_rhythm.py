@@ -98,6 +98,7 @@ LEGACY_COMMENT_POLICY = CommentLengthPolicy(
 _CODE_CATEGORIES: dict = {
     # fact_violation — 절대 등록 불가
     "unverified_service_fact": "fact_violation",
+    "unsupported_content_claim": "fact_violation",
     "fabricated_texture": "fact_violation",
     "unsupported_texture": "fact_violation",
     "invented_causality": "fact_violation",
@@ -108,6 +109,8 @@ _CODE_CATEGORIES: dict = {
     "food_focus_miss": "fact_violation",
     "semantic_mismatch": "fact_violation",
     # style_penalty — auto_repair/재작성으로 복구 시도 후 실패 시 FAILED
+    "unnatural_food_expression": "style_penalty",
+    "unnatural_eating_fun": "style_penalty",
     "laughter_or_emoticon": "style_penalty",
     "emoji": "style_penalty",
     "excessive_tilde": "style_penalty",
@@ -506,6 +509,15 @@ class FinalQualityGate:
         r"(?:(?<![가-힣])(?:먹|가|써|사먹|다녀|주문해|시켜|구매해|방문해|이용해|사용해)(?:어|아)?(?:보니까|보니|봤는데|봤더니|본\s*(?:결과|경험)|봤어요|봤습니다))"
     )
 
+    # P0-9 ~ P0-11: "먹다 + 재미" 기계적 결합 금지 패턴
+    _EATING_FUN_CLICHE_RE: ClassVar[re.Pattern[str]] = re.compile(
+        r"(?:먹|먹어|먹는|먹을|골라\s*먹|찍어\s*먹|섞어\s*먹|곁들여\s*먹|하나씩\s*먹|맛보는|맛볼|맛봐|씹는|씹을|씹어)[가-힣\s]{0,12}재미"
+    )
+
+    # P0-15 ~ P0-17: 전각 마침표(。) 및 소수점을 제외한 일반 마침표(.) 감지 패턴
+    # 소수점((?<=\d)\.(?=\d))은 매칭하지 않음 (1.5kg, 3.5mm 보존)
+    _FORBIDDEN_PERIOD_RE: ClassVar[re.Pattern[str]] = re.compile(r"。|(?<!\d)\.|\.(?!\d)")
+
     # Descriptive aliases make the policy easy to consume from UI and tests
     # without coupling callers to the internal naming of the lists above.
     BANNED_FORMAL_SUBSTRINGS: ClassVar[Tuple[str, ...]] = FORMAL_SUBSTRINGS
@@ -600,8 +612,9 @@ class FinalQualityGate:
         )
         if not isinstance(text, str):
             return result(False, "invalid_text", "comment text must be a string")
-        if not effective_allow_period and not legacy and ("." in normalized or "。" in normalized):
-            matched = "." if "." in normalized else "。"
+        period_match = cls._FORBIDDEN_PERIOD_RE.search(normalized)
+        if not effective_allow_period and not legacy and period_match:
+            matched = period_match.group(0)
             return result(False, "forbidden_period", f"period is forbidden: {matched}", matched=matched)
         if not legacy and not is_user_source and normalized.count("~") > (2 if is_thoughtful else 1):
             max_tilde = 2 if is_thoughtful else 1
@@ -639,6 +652,15 @@ class FinalQualityGate:
                 return result(False, "implied_shared_experience", "the word '공감' is forbidden in AI generated comments", matched="공감")
 
             # 2. 문체 및 형식 위반 검사 (style_penalty)
+            fun_match = cls._EATING_FUN_CLICHE_RE.search(normalized)
+            if fun_match:
+                return result(
+                    False,
+                    "unnatural_food_expression",
+                    f"eating fun cliche is forbidden: {fun_match.group(0)}",
+                    matched=fun_match.group(0),
+                )
+
             for phrase in cls.FORMAL_SUBSTRINGS:
                 if phrase in normalized:
                     return result(False, "formal_register", f"formal register is forbidden: {phrase}", matched=phrase)
@@ -856,6 +878,7 @@ class FinalQualityGate:
         "excessive_tilde",
         "excessive_slang",
         "emoji",
+        "forbidden_period",
     )
 
     @classmethod
@@ -909,6 +932,10 @@ class FinalQualityGate:
         elif gate_result.code == "emoji":
             # Remove emojis
             repaired = cls._EMOJI_RE.sub("", repaired).strip()
+
+        elif gate_result.code == "forbidden_period":
+            from services.draft import normalize_comment_punctuation
+            repaired = normalize_comment_punctuation(repaired)
 
         if not repaired or repaired == text.strip():
             # Nothing changed or empty result after repair — not useful
@@ -1161,7 +1188,17 @@ class CommentDraftInspector:
         if is_user_edit:
             return DraftInspectionResult(passed=True, stage=0, code="ok", feedback="", matched=None)
 
-        # 3단계: 상투적인 요약·평가·중복 마무리
+        # 3단계: 상투적인 요약·평가·중복 마무리 및 부자연스러운 댓글 표현
+        fun_match = FinalQualityGate._EATING_FUN_CLICHE_RE.search(normalized)
+        if fun_match:
+            return DraftInspectionResult(
+                passed=False,
+                stage=3,
+                code="unnatural_food_expression",
+                matched=fun_match.group(0),
+                feedback="음식을 '먹는 재미'라고 표현하지 말고 메뉴의 다양성, 선택지, 구성처럼 실제 댓글에서 자연스러운 표현으로 다시 써 주세요",
+            )
+
         if any(rc and FinalQualityGate.normalize(rc.strip()) == normalized for rc in (recent_comments or [])[-5:]):
             return DraftInspectionResult(
                 passed=False, stage=4, code="exact_duplicate",
