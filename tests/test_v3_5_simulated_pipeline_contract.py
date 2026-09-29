@@ -686,6 +686,88 @@ class TestV35SimulatedPipelineContract(unittest.TestCase):
         self.assertTrue(os.path.exists(json_path))
         self.assertTrue(os.path.exists(md_path))
 
+    # ------------------------------------------------------------------
+    # Emoji & Style Normalization 계약 검증
+    # ------------------------------------------------------------------
+    def test_emoji_multiple_and_exaggerated_stripped(self):
+        """반복 및 과장형 이모티콘(🔥🔥🔥, 😂😂, ❤️❤️❤️, 😋😋😋🔥 등)은 전면 제거된다"""
+        from services.comments.style_normalizer import CommentStyleNormalizer
+
+        cases = [
+            ("김말이 너무 맛있어 보여요 😋😋😋🔥", "김말이 너무 맛있어 보여요"),
+            ("사진 보니 웃음이 나네요 😂😂", "사진 보니 웃음이 나네요"),
+            ("비주얼 완전 대박이네요 🔥🔥🔥", "비주얼 완전 대박이네요"),
+            ("플레이팅이 참 예쁘네요 ❤️❤️❤️", "플레이팅이 참 예쁘네요"),
+        ]
+        for inp, expected_base in cases:
+            res = CommentStyleNormalizer.normalize_style(inp, post_key="test_pk", allow_tilde_when_no_emoji=False)
+            self.assertEqual(res.emoji_action, "removed")
+            self.assertEqual(res.reason, "exaggerated_or_multiple_emojis")
+            self.assertEqual(res.text, expected_base)
+
+    def test_emoji_single_preserved_when_no_recent_and_sampled(self):
+        """단일 자연스러운 이모지는 최근 등록 이력에 이모지가 없고 sampling 통과 시 보존된다"""
+        from services.comments.style_normalizer import CommentStyleNormalizer
+
+        # Deterministic sampling (< 20) post_key 탐색
+        target_pk = ""
+        for i in range(100):
+            pk = f"sample_post_{i}"
+            if CommentStyleNormalizer.stable_hash(f"emoji:{pk}") % 100 < 20:
+                target_pk = pk
+                break
+
+        res = CommentStyleNormalizer.normalize_style(
+            "매콤달콤한 국물 머금은 김말이라니 비주얼부터 맛있어 보여요 😋",
+            post_key=target_pk,
+            recent_comments=["댓글 하나", "댓글 둘", "댓글 셋", "댓글 넷", "댓글 다섯"],
+        )
+        self.assertEqual(res.emoji_action, "kept")
+        self.assertEqual(res.reason, "recent_emoji_count_0")
+        self.assertIn("😋", res.text)
+
+    def test_emoji_single_stripped_when_recent_history_has_emoji(self):
+        """최근 등록 이력에 이모지가 있으면 쿨다운 정책에 의해 단일 이모지도 제거된다"""
+        from services.comments.style_normalizer import CommentStyleNormalizer
+
+        target_pk = ""
+        for i in range(100):
+            pk = f"sample_post_{i}"
+            if CommentStyleNormalizer.stable_hash(f"emoji:{pk}") % 100 < 20:
+                target_pk = pk
+                break
+
+        res = CommentStyleNormalizer.normalize_style(
+            "매콤달콤한 국물 머금은 김말이라니 비주얼부터 맛있어 보여요 😋",
+            post_key=target_pk,
+            recent_comments=["댓글 하나", "댓글 둘 😋", "댓글 셋", "댓글 넷", "댓글 다섯"],
+            allow_tilde_when_no_emoji=False,
+        )
+        self.assertEqual(res.emoji_action, "removed")
+        self.assertEqual(res.reason, "recent_emoji_cooldown_1")
+        self.assertNotIn("😋", res.text)
+
+    def test_tilde_added_when_no_emoji_and_polite_ending(self):
+        """이모티콘이 없을 경우 친근한 어미에서 가끔(25%) 단일 물결표(~)가 부가되며 마침표는 없다"""
+        from services.comments.style_normalizer import CommentStyleNormalizer
+
+        # Deterministic sampling (< 25) post_key 탐색
+        tilde_pk = ""
+        for i in range(100):
+            pk = f"tilde_post_{i}"
+            if CommentStyleNormalizer.stable_hash(f"tilde:{pk}") % 100 < 25:
+                tilde_pk = pk
+                break
+
+        res = CommentStyleNormalizer.normalize_style(
+            "국물이 얼큰해서 맛있어 보여요",
+            post_key=tilde_pk,
+            allow_tilde_when_no_emoji=True,
+        )
+        self.assertTrue(res.tilde_added)
+        self.assertTrue(res.text.endswith("~"))
+        self.assertFalse(res.text.endswith("."))
+
 
 if __name__ == "__main__":
     unittest.main()

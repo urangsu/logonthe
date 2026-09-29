@@ -168,6 +168,7 @@ async def evaluate_case(
     bridge_host: str,
     bridge_port: int,
     bridge: Optional[GeminiExtensionBridge] = None,
+    recent_submits: Optional[List[str]] = None,
 ) -> Dict[str, Any]:
     """단일 포스트 케이스에 대해 Shadow Evaluation을 수행한다."""
     cid = case["id"]
@@ -237,22 +238,45 @@ async def evaluate_case(
             "final_status": "BRIDGE_UNAVAILABLE",
         }
 
+    # 필수 로깅: [GEMINI][RAW_COMMENT]
+    print(f"    [GEMINI][RAW_COMMENT] {gemini_raw}")
+
+    # Style Normalization (이모지 희소 보존 및 문체 정규화)
+    from services.comments.style_normalizer import CommentStyleNormalizer
+    style_res = CommentStyleNormalizer.normalize_style(
+        gemini_raw,
+        post_key=cid,
+        recent_comments=recent_submits,
+    )
+    print(
+        f"    [COMMENT][STYLE_NORMALIZE] emoji_found={style_res.emoji_found or 'none'} "
+        f"emoji_action={style_res.emoji_action} reason={style_res.reason}"
+    )
+    normalized_initial = style_res.text
+
     # 5. Contamination Gate
-    contam = ResponseContaminationGate.validate(gemini_raw)
+    contam = ResponseContaminationGate.validate(normalized_initial)
 
     # 6. Inspector
     inspection = CommentDraftInspector.inspect(
-        gemini_raw, excerpt=context_res.excerpt, preset="community", source="gemini"
+        normalized_initial, excerpt=context_res.excerpt, preset="community", source="gemini"
     )
 
     # 7. FinalQualityGate
+    from services.comments.policy import CommentStylePolicy
+    case_policy = CommentStylePolicy.from_context(preset="community")
+    if style_res.emoji_action == "kept":
+        case_policy.allow_soft_emoji = True
+        case_policy.max_combined_decorations = max(case_policy.max_combined_decorations, 1)
+
     quality_gate = FinalQualityGate.validate_final_text(
-        gemini_raw, preset="community", source="gemini", excerpt=context_res.excerpt
+        normalized_initial, preset="community", source="gemini", excerpt=context_res.excerpt,
+        style_policy=case_policy,
     )
 
     # 8. GroundingGate
     grounding = CommentGroundingGate.validate(
-        gemini_raw, context_res.excerpt, domain=plan.domain, reaction_plan=plan
+        normalized_initial, context_res.excerpt, domain=plan.domain, reaction_plan=plan
     )
 
     first_pass = not contam.is_contaminated and inspection.passed and quality_gate.valid and grounding.valid
@@ -282,13 +306,21 @@ async def evaluate_case(
             reaction_plan=plan,
             request_id=rewrite_request_id,
             rewrite_feedback=rewrite_feedback,
-            previous_draft=gemini_raw,
+            previous_draft=normalized_initial,
         )
         rewrite_raw = await call_gemini_bridge(
             rewrite_prompt, rewrite_request_id, host=bridge_host, port=bridge_port, bridge=bridge
         )
+        if rewrite_raw:
+            print(f"    [GEMINI][RAW_COMMENT] (rewrite) {rewrite_raw}")
+            rewrite_style = CommentStyleNormalizer.normalize_style(
+                rewrite_raw,
+                post_key=cid,
+                recent_comments=recent_submits,
+            )
+            rewrite_raw = rewrite_style.text
 
-    chosen_draft = rewrite_raw if rewrite_triggered and rewrite_raw else gemini_raw
+    chosen_draft = rewrite_raw if rewrite_triggered and rewrite_raw else normalized_initial
 
     # Period Normalization
     from services.draft import normalize_comment_punctuation
@@ -297,7 +329,8 @@ async def evaluate_case(
 
     # 최종 검증
     final_quality = FinalQualityGate.validate_final_text(
-        final_text, preset="community", source="gemini", excerpt=context_res.excerpt
+        final_text, preset="community", source="gemini", excerpt=context_res.excerpt,
+        style_policy=case_policy,
     ) if final_text else None
     final_grounding = CommentGroundingGate.validate(
         final_text, context_res.excerpt, domain=plan.domain, reaction_plan=plan
@@ -311,6 +344,9 @@ async def evaluate_case(
         and final_grounding.valid
     )
     final_status = "APPROVED" if final_approved else "SKIP"
+
+    if final_text:
+        print(f"    [COMMENT][FINAL_TEXT] {final_text}")
 
     # FOOD Relevance
     food_rel = None
@@ -570,11 +606,14 @@ async def main():
     print()
 
     results = []
+    recent_submits = []
     for i, case in enumerate(fixtures, 1):
         print(f"  [{i}/{len(fixtures)}] {case['title'][:40]}...")
         try:
-            result = await evaluate_case(case, args.bridge_host, args.bridge_port, bridge=bridge)
+            result = await evaluate_case(case, args.bridge_host, args.bridge_port, bridge=bridge, recent_submits=recent_submits)
             results.append(result)
+            if result.get("final_status") == "APPROVED" and result.get("Final Text"):
+                recent_submits.append(result["Final Text"])
             status_icon = "✅" if result["final_status"] == "APPROVED" else "⏭️"
             print(f"    {status_icon} final_status={result['final_status']} mode={result['reaction_mode']} anchor={result['primary_anchor']}")
             if result.get("rewrite_triggered"):

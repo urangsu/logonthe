@@ -161,17 +161,17 @@ class TestQualityAutoRepairAndPause(unittest.TestCase):
         def mock_wait_result(cmd, **kwargs):
             attempt_counter[0] += 1
             if attempt_counter[0] == 1:
-                # 1차 시도: 그림 이모지 포함 (FinalQualityGate 탈락)
+                # 1차 시도: 과도한 초성 웃음 포함 (FinalQualityGate 탈락)
                 return GeminiResult(
                     request_id=cmd.request_id,
                     post_key=cmd.post_key,
                     navigation_version=cmd.navigation_version,
                     status=GeminiResultStatus.COMPLETED,
-                    text="솥뚜껑 삼겹살에 김치 조합 너무 맛있어 보여요 ❤️",
+                    text="솥뚜껑 삼겹살에 김치 조합 너무 맛있어 보여요 ㅎㅎㅎ",
                     error="",
                 )
             else:
-                # 2차 시도: ㅎㅎ 제거 (FinalQualityGate 통과)
+                # 2차 시도: ㅎㅎㅎ 제거 (FinalQualityGate 통과)
                 return GeminiResult(
                     request_id=cmd.request_id,
                     post_key=cmd.post_key,
@@ -208,7 +208,7 @@ class TestQualityAutoRepairAndPause(unittest.TestCase):
         self.assertEqual(len(published_prompts), 2)
         # 2번째 프롬프트에 재작성 피드백이 주입되었는지 확인
         self.assertTrue("수정 요청 (1회 재작성)" in published_prompts[1] or "수정 사유" in published_prompts[1])
-        self.assertIn("그림 이모지", published_prompts[1])
+        self.assertIn("초성 웃음", published_prompts[1])
         # 최종 댓글 성공 확인
         self.assertEqual(res.comment_result.status, CommentSubmitState.SUBMITTED)
         self.assertEqual(processor._quality_body_retry_done, True)
@@ -232,14 +232,14 @@ class TestQualityAutoRepairAndPause(unittest.TestCase):
         mock_gemini_bridge = MagicMock()
         mock_gemini_bridge.preflight.return_value = MagicMock(ready=True)
 
-        # 1차, 2차 모두 허용되지 않은 그림 이모지로 탈락
+        # 1차, 2차 모두 과도한 초성 웃음으로 탈락
         mock_gemini_bridge.wait_for_result.side_effect = [
             GeminiResult(
                 request_id="r1",
                 post_key="testuser:12345",
                 navigation_version=1,
                 status=GeminiResultStatus.COMPLETED,
-                text="솥뚜껑 삼겹살 너무 맛있겠어요 ❤️",
+                text="솥뚜껑 삼겹살 너무 맛있겠어요 ㅎㅎㅎ",
                 error="",
             ),
             GeminiResult(
@@ -247,7 +247,7 @@ class TestQualityAutoRepairAndPause(unittest.TestCase):
                 post_key="testuser:12345",
                 navigation_version=1,
                 status=GeminiResultStatus.COMPLETED,
-                text="솥뚜껑 삼겹살 최고네요 😊",
+                text="솥뚜껑 삼겹살 최고네요 ㅋㅋㅋ",
                 error="",
             ),
         ]

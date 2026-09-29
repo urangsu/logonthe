@@ -386,6 +386,7 @@ class PostProcessor:
         self._neighbor_suffix_seen_blogs: set[str] = set()
         self._recent_submitted_modes: List[str] = []  # 실제 등록 성공 후 기록 (반복 방지 기준)
         self._recent_generated_modes: List[str] = []  # 초안 확정 시점 기록 (모니터링/디버깅용)
+        self._recent_submitted_comments: List[str] = []  # 실제 등록 성공 댓글 본문 기록 (이모지 쿨다운 관리용)
         # 하위 호환: _recent_reaction_modes → _recent_submitted_modes 별칭
         self._recent_reaction_modes = self._recent_submitted_modes
 
@@ -409,6 +410,12 @@ class PostProcessor:
                 self._recent_submitted_modes = self._recent_submitted_modes[-10:]
                 # _recent_reaction_modes와 동일 객체이므로 별도 갱신 불필요
                 logger.log(f"[REACTION_HISTORY][SUBMITTED] mode={mode} recent_count={len(self._recent_submitted_modes)}")
+
+    def _record_submitted_comment(self, text: Optional[str]) -> None:
+        """댓글이 실제 등록 성공(SUBMITTED) 이후에 등록 댓글 히스토리를 기록한다 (이모지 쿨다운 관리용)."""
+        if text and isinstance(text, str) and text.strip():
+            self._recent_submitted_comments.append(text.strip())
+            self._recent_submitted_comments = self._recent_submitted_comments[-10:]
 
     def _record_reaction_mode(self, gen_ctx: Optional[Any]) -> None:
         """하위 호환용 메서드: _record_generated_reaction_mode 로 위임."""
@@ -507,9 +514,11 @@ class PostProcessor:
         if content_focus != "GENERAL":
             logger.log(f"[FOOD_FOCUS] focus={content_focus} anchors={food_anchors[:3]} secondary={sec_anchors[:3]}")
 
-        recent_submits = []
+        recent_submits = list(self._recent_submitted_comments)
         if self.history_store and hasattr(self.history_store, "get_recent_submitted_comments"):
-            recent_submits = self.history_store.get_recent_submitted_comments(limit=5)
+            hist_submits = self.history_store.get_recent_submitted_comments(limit=5)
+            if hist_submits:
+                recent_submits = hist_submits
 
         from services.user_learning_service import UserLearningService
         corpus_examples, corpus_stats, style_profile = UserLearningService.get_learning_context(
@@ -1336,6 +1345,35 @@ class PostProcessor:
                                                     return result
 
                                             if gemini_answer:
+                                                logger.log(f"[GEMINI][RAW_COMMENT] {gemini_answer}")
+
+                                                # Style Normalization: 이모지 희소 보존 및 문체 정규화
+                                                from services.comments.style_normalizer import CommentStyleNormalizer
+                                                _recent_norm_comments = (
+                                                    getattr(self, "_recent_submitted_comments", [])
+                                                    or getattr(gen_ctx, "recent_comments", [])
+                                                )
+                                                _style_norm_res = CommentStyleNormalizer.normalize_style(
+                                                    gemini_answer,
+                                                    post_key=post.key,
+                                                    recent_comments=_recent_norm_comments,
+                                                )
+                                                logger.log(
+                                                    f"[COMMENT][STYLE_NORMALIZE] emoji_found={_style_norm_res.emoji_found or 'none'} "
+                                                    f"emoji_action={_style_norm_res.emoji_action} reason={_style_norm_res.reason}"
+                                                )
+                                                gemini_answer = _style_norm_res.text
+                                                if _style_norm_res.emoji_action == "kept":
+                                                    if getattr(gen_ctx, "style_policy", None):
+                                                        gen_ctx.style_policy.allow_soft_emoji = True
+                                                        gen_ctx.style_policy.max_combined_decorations = max(
+                                                            getattr(gen_ctx.style_policy, "max_combined_decorations", 1), 1
+                                                        )
+                                                    if getattr(gen_ctx, "style_profile", None):
+                                                        gen_ctx.style_profile.emoji_ratio = max(
+                                                            getattr(gen_ctx.style_profile, "emoji_ratio", 0.0), 0.05
+                                                        )
+
                                                 self.current_stage = "comment_quality_gate"
                                                 # Step 0: 5단계 초안 검사 (사람 말투, 사실성 검사, 중복 마무리, 설명조 등)
                                                 inspection = CommentDraftInspector.inspect(
@@ -1908,8 +1946,9 @@ class PostProcessor:
                                     draft_source_label = f"로컬 분석({local_res.category})"
                                     logger.log(f"💡 [DRAFT] 로컬 맞춤형 초안 생성 ({local_res.category} / '{local_res.anchor}'): \"{local_res.body}\"")
 
-                        # 최종 승인된 초안의 reaction mode를 1회 단일 기록
+                        # 최종 승인된 초안의 reaction mode 및 최종 댓글 로그 기록
                         if draft_text:
+                            logger.log(f"[COMMENT][FINAL_TEXT] {draft_text}")
                             self._record_reaction_mode(gen_ctx if "gen_ctx" in locals() else None)
 
                         # Section 29: No generic fallback when all candidates fail
@@ -2200,10 +2239,11 @@ class PostProcessor:
                                         )
                                         if self.state_mgr:
                                             self.state_mgr.update(inc_comment=True)
-                                        # P1: 실제 등록 성공(SUBMITTED) 시점에 반복 방지 히스토리 기록
+                                        # P1: 실제 등록 성공(SUBMITTED) 시점에 반복 방지 및 이모지 이력 기록
                                         self._record_submitted_reaction_mode(
                                             gen_ctx if "gen_ctx" in locals() else None
                                         )
+                                        self._record_submitted_comment(cmt_res.submitted_text)
                                         if self.on_comment_committed:
                                             try:
                                                 self.on_comment_committed(post, cmt_res)
