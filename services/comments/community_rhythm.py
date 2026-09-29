@@ -541,17 +541,17 @@ class FinalQualityGate:
     def normalize(cls, text: str) -> str:
         return unicodedata.normalize("NFC", text)
 
+    NON_EMOJI_SYMBOLS: ClassVar[frozenset[str]] = frozenset({
+        "℃", "℉", "㎏", "㎎", "㎞", "㎝", "㎜", "㏄", "㎖", "ℓ", "㎡", "㎦",
+        "©", "™", "®", "℗", "℠", "№", "℡", "§", "¶", "†", "‡", "※", "°",
+    })
+
     @classmethod
     def _extract_emojis(cls, text: str) -> List[str]:
-        matches = list(cls._EMOJI_RE.finditer(text))
-        matched_spans = [m.span() for m in matches]
-        result = [m.group() for m in matches]
-        for idx, ch in enumerate(text):
-            if any(start <= idx < end for start, end in matched_spans):
-                continue
-            if unicodedata.category(ch) in ("So",):
-                result.append(ch)
-        return result
+        if not text:
+            return []
+        matches = [m.group() for m in cls._EMOJI_RE.finditer(text)]
+        return [em for em in matches if em not in cls.NON_EMOJI_SYMBOLS]
 
     @classmethod
     def validate(
@@ -930,8 +930,11 @@ class FinalQualityGate:
                 repaired = repaired.replace(gate_result.matched, "", 1).strip()
 
         elif gate_result.code == "emoji":
-            # Remove emojis
-            repaired = cls._EMOJI_RE.sub("", repaired).strip()
+            # Remove emojis while preserving non-emoji symbols
+            repaired = cls._EMOJI_RE.sub(
+                lambda m: m.group() if m.group() in cls.NON_EMOJI_SYMBOLS else "",
+                repaired,
+            ).strip()
 
         elif gate_result.code == "forbidden_period":
             from services.draft import normalize_comment_punctuation

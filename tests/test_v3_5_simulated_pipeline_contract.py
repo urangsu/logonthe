@@ -768,6 +768,51 @@ class TestV35SimulatedPipelineContract(unittest.TestCase):
         self.assertTrue(res.text.endswith("~"))
         self.assertFalse(res.text.endswith("."))
 
+    def test_special_symbols_preserved_not_treated_as_emoji(self):
+        """20℃, 1.5㎏, ©, ™ 등 일반 단위 및 특수 기호는 이모지로 간주되지 않고 100% 원형 유지된다"""
+        from services.comments.style_normalizer import CommentStyleNormalizer
+        from services.comments.community_rhythm import FinalQualityGate
+
+        cases = [
+            "오늘 날씨가 20℃ 안팎이라 딱 좋네요",
+            "고기 1.5㎏ 포장해서 맛있게 먹었어요",
+            "포스팅 저작권 표기 © 가 깔끔하네요",
+            "브랜드 로고 ™ 표시가 인상적이네요",
+        ]
+        for text in cases:
+            # 1. CommentStyleNormalizer 검증
+            emojis = CommentStyleNormalizer.extract_emojis(text)
+            self.assertEqual(emojis, [], f"Special symbols in '{text}' must not be extracted as emoji")
+            norm_res = CommentStyleNormalizer.normalize_style(text, post_key="pk_sym", allow_tilde_when_no_emoji=False)
+            self.assertEqual(norm_res.emoji_action, "none")
+            self.assertIn("20℃" if "20℃" in text else ("1.5㎏" if "1.5㎏" in text else ("©" if "©" in text else "™")), norm_res.text)
+
+            # 2. FinalQualityGate 검증 (emoji 에러로 오인되지 않아야 함)
+            gate_res = FinalQualityGate.validate_final_text(text, preset="community", source="gemini")
+            self.assertNotEqual(gate_res.code, "emoji", f"Special symbols must not trigger emoji violation in {text}")
+
+    def test_non_whitelisted_emoji_stripped_even_if_single(self):
+        """Soft Emoji Whitelist에 없는 단일 과장/이질적 이모지(🔥 등)는 단일이어도 제거된다"""
+        from services.comments.style_normalizer import CommentStyleNormalizer
+
+        # Deterministic sampling (< 20) post_key 탐색
+        target_pk = ""
+        for i in range(100):
+            pk = f"sample_post_{i}"
+            if CommentStyleNormalizer.stable_hash(f"emoji:{pk}") % 100 < 20:
+                target_pk = pk
+                break
+
+        res = CommentStyleNormalizer.normalize_style(
+            "김말이 너무 맛있어 보여요 🔥",
+            post_key=target_pk,
+            recent_comments=[],
+            allow_tilde_when_no_emoji=False,
+        )
+        self.assertEqual(res.emoji_action, "removed")
+        self.assertEqual(res.reason, "non_whitelisted_emoji")
+        self.assertNotIn("🔥", res.text)
+
 
 if __name__ == "__main__":
     unittest.main()

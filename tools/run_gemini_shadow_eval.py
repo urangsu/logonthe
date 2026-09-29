@@ -263,11 +263,15 @@ async def evaluate_case(
     )
 
     # 7. FinalQualityGate
+    import dataclasses
     from services.comments.policy import CommentStylePolicy
     case_policy = CommentStylePolicy.from_context(preset="community")
     if style_res.emoji_action == "kept":
-        case_policy.allow_soft_emoji = True
-        case_policy.max_combined_decorations = max(case_policy.max_combined_decorations, 1)
+        case_policy = dataclasses.replace(
+            case_policy,
+            allow_soft_emoji=True,
+            max_combined_decorations=max(case_policy.max_combined_decorations, 1),
+        )
 
     quality_gate = FinalQualityGate.validate_final_text(
         normalized_initial, preset="community", source="gemini", excerpt=context_res.excerpt,

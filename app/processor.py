@@ -1348,6 +1348,7 @@ class PostProcessor:
                                                 logger.log(f"[GEMINI][RAW_COMMENT] {gemini_answer}")
 
                                                 # Style Normalization: 이모지 희소 보존 및 문체 정규화
+                                                import dataclasses
                                                 from services.comments.style_normalizer import CommentStyleNormalizer
                                                 _recent_norm_comments = (
                                                     getattr(self, "_recent_submitted_comments", [])
@@ -1365,13 +1366,11 @@ class PostProcessor:
                                                 gemini_answer = _style_norm_res.text
                                                 if _style_norm_res.emoji_action == "kept":
                                                     if getattr(gen_ctx, "style_policy", None):
-                                                        gen_ctx.style_policy.allow_soft_emoji = True
-                                                        gen_ctx.style_policy.max_combined_decorations = max(
-                                                            getattr(gen_ctx.style_policy, "max_combined_decorations", 1), 1
-                                                        )
-                                                    if getattr(gen_ctx, "style_profile", None):
-                                                        gen_ctx.style_profile.emoji_ratio = max(
-                                                            getattr(gen_ctx.style_profile, "emoji_ratio", 0.0), 0.05
+                                                        curr_decor = getattr(gen_ctx.style_policy, "max_combined_decorations", 0)
+                                                        gen_ctx.style_policy = dataclasses.replace(
+                                                            gen_ctx.style_policy,
+                                                            allow_soft_emoji=True,
+                                                            max_combined_decorations=max(curr_decor, 1),
                                                         )
 
                                                 self.current_stage = "comment_quality_gate"
