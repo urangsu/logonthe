@@ -1,6 +1,52 @@
+import re
 from dataclasses import dataclass, field
 from typing import Optional, List, Any, Dict
 from playwright.sync_api import Page, Locator
+
+
+def parse_neighbor_count(text: Optional[str]) -> Optional[int]:
+    """
+    모바일 네이버 블로그 프로필/피드 카드의 이웃 수 텍스트를 정수로 파싱한다.
+    - "16,385" -> 16385
+    - "9,821" -> 9821
+    - "500" -> 500
+    - "1.6만" -> 16000
+    - "1만" -> 10000
+    - "8천" -> 8000
+    - "이웃 16,385명" -> 16385
+    - "0" 또는 "이웃 0명" -> 0
+    - 공백, 파싱 실패, 빈 문자열 -> None (fail-open)
+    """
+    if not text or not isinstance(text, str):
+        return None
+    raw = text.strip().replace(" ", "")
+
+    # 1. '만' 단위 축약 (e.g. 1.6만, 1만, 1.5만명)
+    m_man = re.search(r"(\d+(?:\.\d+)?)만", raw)
+    if m_man:
+        try:
+            return int(float(m_man.group(1)) * 10000)
+        except ValueError:
+            pass
+
+    # 2. '천' 단위 축약 (e.g. 8천, 8.5천)
+    m_cheon = re.search(r"(\d+(?:\.\d+)?)천", raw)
+    if m_cheon:
+        try:
+            return int(float(m_cheon.group(1)) * 1000)
+        except ValueError:
+            pass
+
+    # 3. 콤마 포함 또는 일반 정수 (e.g. 16,385, 9821, 0)
+    m_num = re.search(r"(\d{1,3}(?:,\d{3})+|\d+)", raw)
+    if m_num:
+        try:
+            val_str = m_num.group(1).replace(",", "")
+            return int(val_str)
+        except ValueError:
+            pass
+
+    return None
 
 
 @dataclass
@@ -74,6 +120,37 @@ class MobileDOMResolver:
             title_el = card.locator("strong[class*='title__'], .title").first
             if title_el.count() > 0:
                 return title_el.inner_text().strip()
+        except Exception:
+            pass
+        return None
+
+    @staticmethod
+    def get_card_neighbor_count(card: Locator) -> Optional[int]:
+        """
+        추천 피드 카드에서 작성자의 이웃 수를 추출하여 정수로 반환한다.
+        - DOM 예시: <span class="ProfileBlock__text--FblnI">이웃<span class="ProfileBlock__number--eW_QR">16,385</span>명</span>
+        - CSS Module suffix 변경 대비 prefix/contains selector 사용
+        - 숫자를 찾지 못하면 None 반환 (fail-open)
+        """
+        if not card:
+            return None
+        try:
+            # 1. ProfileBlock__number-- 우선 탐색
+            num_el = card.locator("span[class^='ProfileBlock__number--'], span[class*='ProfileBlock__number--']").first
+            if num_el.count() > 0:
+                txt = num_el.inner_text().strip()
+                parsed = parse_neighbor_count(txt)
+                if parsed is not None:
+                    return parsed
+
+            # 2. '이웃' 텍스트를 포함하는 ProfileBlock 컨테이너 탐색
+            text_el = card.locator("span[class*='ProfileBlock__text'], [class*='ProfileBlock']").first
+            if text_el.count() > 0:
+                raw_text = text_el.inner_text().strip()
+                if "이웃" in raw_text:
+                    parsed = parse_neighbor_count(raw_text)
+                    if parsed is not None:
+                        return parsed
         except Exception:
             pass
         return None

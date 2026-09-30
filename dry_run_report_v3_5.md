@@ -6,17 +6,17 @@
 | 2 | food_02_rich_taste_donkatsu | FOOD | FOOD | taste_reaction | 돈카츠 | True |
 | 3 | food_03_two_items_taste_priority | FOOD | FOOD | taste_reaction | 삼겹살 | False |
 | 4 | food_04_truffle_pasta_combo | FOOD | FOOD | combination_curiosity | 트러플 | True |
-| 5 | food_05_ramen_broth | FOOD | FOOD | taste_reaction | 라멘 | True |
-| 6 | food_06_burger_visual | FOOD | FOOD | visual_reaction | 수제버거 | False |
+| 5 | food_05_ramen_broth | FOOD | FOOD | taste_reaction | 돈코츠 | True |
+| 6 | food_06_burger_visual | FOOD | FOOD | visual_reaction | 패티 | False |
 | 7 | food_07_salt_bread_texture | FOOD | FOOD | taste_reaction | 소금빵 | False |
 | 8 | food_08_croffle_visual | FOOD | FOOD | visual_reaction | 아이스크림 | False |
 | 9 | food_09_tteokbokki_taste | FOOD | FOOD | taste_reaction | 떡볶이 | False |
-| 10 | food_10_bagel_combo | FOOD | FOOD | combination_curiosity | 베이글 | False |
+| 10 | food_10_bagel_combo | FOOD | FOOD | combination_curiosity | 크림치즈 | False |
 | 11 | food_11_espresso_crema | FOOD | FOOD | taste_reaction | 에스프레소 | True |
 | 12 | food_12_mala_special | FOOD | FOOD | combination_curiosity | 마라 | False |
 | 13 | food_13_eel_texture | FOOD | FOOD | taste_reaction | 장어구이 | True |
-| 14 | food_14_tendon_visual | FOOD | FOOD | visual_reaction | 튀김 | False |
-| 15 | food_15_sashimi_fresh | FOOD | FOOD | taste_reaction | 연어회 | False |
+| 14 | food_14_tendon_visual | FOOD | FOOD | visual_reaction | 튀김덮밥 | False |
+| 15 | food_15_sashimi_fresh | FOOD | FOOD | taste_reaction | 수산시장 | False |
 | 16 | food_16_pancake_fluffy | FOOD | FOOD | taste_reaction | 팬케이크 | True |
 | 17 | food_17_pho_broth | FOOD | FOOD | taste_reaction | 쌀국수 | True |
 | 18 | food_18_dakgalbi_taste | FOOD | FOOD | taste_reaction | 볶음밥 | False |
@@ -57,9 +57,9 @@
 
 ### [food_01_blue_cheese] 연남동 화덕피자 맛집 특이한 블루치즈 후기
 - **Domain / Mode**: `FOOD` / `combination_curiosity`
-- **Primary / Secondary Anchor**: `블루치즈` / `피자`
-- **Evidence**: 조합/특수재료 근거(블루치즈와 피자)
-- **Instruction**: 블루치즈와 피자 재료와 조합에 관찰자 입장에서 반응해. 먹어본 사람처럼 공감하지 말고 맛에 대한 궁금함이나 조합의 독특함을 표현해.
+- **Primary / Secondary Anchor**: `블루치즈` / `화덕피자`
+- **Evidence**: 조합/특수재료 근거(블루치즈와 화덕피자)
+- **Instruction**: 블루치즈와 화덕피자 재료와 조합에 관찰자 입장에서 반응해. 먹어본 사람처럼 공감하지 말고 맛에 대한 궁금함이나 조합의 독특함을 표현해.
 
 ### [food_02_rich_taste_donkatsu] 성수동 일식 돈카츠 전문점
 - **Domain / Mode**: `FOOD` / `taste_reaction`
@@ -75,25 +75,25 @@
 
 ### [food_04_truffle_pasta_combo] 한남동 파스타 트러플 크림 파스타
 - **Domain / Mode**: `FOOD` / `combination_curiosity`
-- **Primary / Secondary Anchor**: `트러플` / `파스타`
-- **Evidence**: 조합/특수재료 근거(트러플와 파스타)
-- **Instruction**: 트러플와 파스타 재료와 조합에 관찰자 입장에서 반응해. 먹어본 사람처럼 공감하지 말고 맛에 대한 궁금함이나 조합의 독특함을 표현해.
+- **Primary / Secondary Anchor**: `트러플` / `크림`
+- **Evidence**: 조합/특수재료 근거(트러플와 크림)
+- **Instruction**: 트러플와 크림 재료와 조합에 관찰자 입장에서 반응해. 먹어본 사람처럼 공감하지 말고 맛에 대한 궁금함이나 조합의 독특함을 표현해.
 
 ### [food_05_ramen_broth] 홍대 일본 라멘 돈코츠 라멘
 - **Domain / Mode**: `FOOD` / `taste_reaction`
-- **Primary / Secondary Anchor**: `라멘` / ``
-- **Evidence**: 본문 맛/식감 언급(라멘)
-- **Instruction**: 본문에 언급된 라멘의 맛이나 식감 디테일에 관찰자 입장에서 반응해. 본문에 없는 맛이나 식감은 지어내지 마.
+- **Primary / Secondary Anchor**: `돈코츠` / `라멘`
+- **Evidence**: 본문 맛/식감 언급(돈코츠)
+- **Instruction**: 본문에 언급된 돈코츠의 맛이나 식감 디테일에 관찰자 입장에서 반응해. 본문에 없는 맛이나 식감은 지어내지 마.
 
 ### [food_06_burger_visual] 이태원 수제버거 더블 패티 버거
 - **Domain / Mode**: `FOOD` / `visual_reaction`
-- **Primary / Secondary Anchor**: `수제버거` / ``
-- **Evidence**: 시각/구성 디테일(수제버거)
-- **Instruction**: 수제버거의 비주얼이나 푸짐한 구성에 가볍게 반응해. 직접 먹어본 척하지 마.
+- **Primary / Secondary Anchor**: `패티` / `수제버거`
+- **Evidence**: 시각/구성 디테일(패티)
+- **Instruction**: 패티의 비주얼이나 푸짐한 구성에 가볍게 반응해. 직접 먹어본 척하지 마.
 
 ### [food_07_salt_bread_texture] 성수동 베이커리 소금빵 카페
 - **Domain / Mode**: `FOOD` / `taste_reaction`
-- **Primary / Secondary Anchor**: `소금빵` / ``
+- **Primary / Secondary Anchor**: `소금빵` / `베이커리`
 - **Evidence**: 본문 맛/식감 언급(소금빵)
 - **Instruction**: 본문에 언급된 소금빵의 맛이나 식감 디테일에 관찰자 입장에서 반응해. 본문에 없는 맛이나 식감은 지어내지 마.
 
@@ -105,15 +105,15 @@
 
 ### [food_09_tteokbokki_taste] 신당동 즉석 떡볶이 맛집
 - **Domain / Mode**: `FOOD` / `taste_reaction`
-- **Primary / Secondary Anchor**: `떡볶이` / ``
+- **Primary / Secondary Anchor**: `떡볶이` / `즉석`
 - **Evidence**: 본문 맛/식감 언급(떡볶이)
 - **Instruction**: 본문에 언급된 떡볶이의 맛이나 식감 디테일에 관찰자 입장에서 반응해. 본문에 없는 맛이나 식감은 지어내지 마.
 
 ### [food_10_bagel_combo] 런던 베이글 뮤지엄 쪽파 크림치즈
 - **Domain / Mode**: `FOOD` / `combination_curiosity`
-- **Primary / Secondary Anchor**: `베이글` / ``
-- **Evidence**: 조합/특수재료 근거(베이글)
-- **Instruction**: 베이글 재료와 조합에 관찰자 입장에서 반응해. 먹어본 사람처럼 공감하지 말고 맛에 대한 궁금함이나 조합의 독특함을 표현해.
+- **Primary / Secondary Anchor**: `크림치즈` / `베이글`
+- **Evidence**: 조합/특수재료 근거(크림치즈와 베이글)
+- **Instruction**: 크림치즈와 베이글 재료와 조합에 관찰자 입장에서 반응해. 먹어본 사람처럼 공감하지 말고 맛에 대한 궁금함이나 조합의 독특함을 표현해.
 
 ### [food_11_espresso_crema] 약수동 에스프레소 바 커피 탐방
 - **Domain / Mode**: `FOOD` / `taste_reaction`
@@ -123,27 +123,27 @@
 
 ### [food_12_mala_special] 건대 마라탕 특유의 얼얼한 맛
 - **Domain / Mode**: `FOOD` / `combination_curiosity`
-- **Primary / Secondary Anchor**: `마라` / ``
-- **Evidence**: 조합/특수재료 근거(마라)
-- **Instruction**: 마라 재료와 조합에 관찰자 입장에서 반응해. 먹어본 사람처럼 공감하지 말고 맛에 대한 궁금함이나 조합의 독특함을 표현해.
+- **Primary / Secondary Anchor**: `마라` / `얼얼한`
+- **Evidence**: 조합/특수재료 근거(마라와 얼얼한)
+- **Instruction**: 마라와 얼얼한 재료와 조합에 관찰자 입장에서 반응해. 먹어본 사람처럼 공감하지 말고 맛에 대한 궁금함이나 조합의 독특함을 표현해.
 
 ### [food_13_eel_texture] 파주 장어구이 몸보신 식당
 - **Domain / Mode**: `FOOD` / `taste_reaction`
-- **Primary / Secondary Anchor**: `장어구이` / `숯불`
+- **Primary / Secondary Anchor**: `장어구이` / `몸보신`
 - **Evidence**: 본문 맛/식감 언급(장어구이)
 - **Instruction**: 본문에 언급된 장어구이의 맛이나 식감 디테일에 관찰자 입장에서 반응해. 본문에 없는 맛이나 식감은 지어내지 마.
 
 ### [food_14_tendon_visual] 샤로수길 텐동 바삭한 튀김덮밥
 - **Domain / Mode**: `FOOD` / `visual_reaction`
-- **Primary / Secondary Anchor**: `튀김` / `텐동`
-- **Evidence**: 시각/구성 디테일(튀김)
-- **Instruction**: 튀김의 비주얼이나 푸짐한 구성에 가볍게 반응해. 직접 먹어본 척하지 마.
+- **Primary / Secondary Anchor**: `튀김덮밥` / `바삭한`
+- **Evidence**: 시각/구성 디테일(튀김덮밥)
+- **Instruction**: 튀김덮밥의 비주얼이나 푸짐한 구성에 가볍게 반응해. 직접 먹어본 척하지 마.
 
 ### [food_15_sashimi_fresh] 노량진 수산시장 모듬회 포장
 - **Domain / Mode**: `FOOD` / `taste_reaction`
-- **Primary / Secondary Anchor**: `연어회` / `모듬회`
-- **Evidence**: 본문 맛/식감 언급(연어회)
-- **Instruction**: 본문에 언급된 연어회의 맛이나 식감 디테일에 관찰자 입장에서 반응해. 본문에 없는 맛이나 식감은 지어내지 마.
+- **Primary / Secondary Anchor**: `수산시장` / `연어회`
+- **Evidence**: 본문 맛/식감 언급(수산시장)
+- **Instruction**: 본문에 언급된 수산시장의 맛이나 식감 디테일에 관찰자 입장에서 반응해. 본문에 없는 맛이나 식감은 지어내지 마.
 
 ### [food_16_pancake_fluffy] 가로수길 수플레 팬케이크 브런치
 - **Domain / Mode**: `FOOD` / `taste_reaction`
@@ -153,7 +153,7 @@
 
 ### [food_17_pho_broth] 을지로 베트남 쌀국수 맛집
 - **Domain / Mode**: `FOOD` / `taste_reaction`
-- **Primary / Secondary Anchor**: `쌀국수` / ``
+- **Primary / Secondary Anchor**: `쌀국수` / `베트남`
 - **Evidence**: 본문 맛/식감 언급(쌀국수)
 - **Instruction**: 본문에 언급된 쌀국수의 맛이나 식감 디테일에 관찰자 입장에서 반응해. 본문에 없는 맛이나 식감은 지어내지 마.
 
@@ -165,7 +165,7 @@
 
 ### [food_19_macaron_texture] 망원동 수제 마카롱 선물 세트
 - **Domain / Mode**: `FOOD` / `taste_reaction`
-- **Primary / Secondary Anchor**: `마카롱` / ``
+- **Primary / Secondary Anchor**: `마카롱` / `수제`
 - **Evidence**: 본문 맛/식감 언급(마카롱)
 - **Instruction**: 본문에 언급된 마카롱의 맛이나 식감 디테일에 관찰자 입장에서 반응해. 본문에 없는 맛이나 식감은 지어내지 마.
 

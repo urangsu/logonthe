@@ -27,6 +27,7 @@ DEFAULT_CONFIG_V2: Dict[str, Any] = {
     "fixed_suffix": "",
     "recommendation_suffix_enabled": False,
     "recommendation_suffix": "",
+    "recommendation_neighbor_count_max": 0,  # 추천피드 작성자 이웃 수 상한 (0: 제한 없음)
     "comment_style_preset": "community",
     "secret_comment": False,
     "browser_mode": "persistent",

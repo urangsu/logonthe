@@ -138,6 +138,7 @@ class RecommendationFeedSource(FeedSource):
         fallback_category: str = "푸드",
         pause_event: Optional[threading.Event] = None,
         run_control = None,
+        neighbor_count_max: Optional[int] = None,
     ):
         self.page = page
         self.max_items = max_items
@@ -146,6 +147,7 @@ class RecommendationFeedSource(FeedSource):
         self.pause_event = pause_event or getattr(run_control, "pause_event", None)
         self.preferred_category = preferred_category
         self.fallback_category = fallback_category
+        self.neighbor_count_max = neighbor_count_max
         self.seen_keys: Set[str] = set()
         self.seen_blogs: Set[str] = set()
         self._exhausted = False
@@ -251,6 +253,8 @@ class RecommendationFeedSource(FeedSource):
         cards_seen = card_count
         cards_parsed = 0
         cards_topic_blocked = 0
+        cards_neighbor_blocked = 0
+        cards_neighbor_unknown = 0
         cards_same_blog = 0
         card_dom_errors = 0
 
@@ -272,6 +276,7 @@ class RecommendationFeedSource(FeedSource):
 
                 title = MobileDOMResolver.get_card_title(card)
                 author = MobileDOMResolver.get_card_author(card)
+                neighbor_count = MobileDOMResolver.get_card_neighbor_count(card)
                 try:
                     snippet = card.inner_text().strip()
                 except Exception:
@@ -281,7 +286,20 @@ class RecommendationFeedSource(FeedSource):
                 if not post:
                     continue
 
+                post.neighbor_count = neighbor_count
                 cards_parsed += 1
+
+                # 추천피드 작성자 이웃 수 상한 필터 (P0: 초과 시 상세 진입/좋아요/댓글 차단)
+                if neighbor_count is None:
+                    cards_neighbor_unknown += 1
+                elif self.neighbor_count_max and self.neighbor_count_max > 0:
+                    if neighbor_count > self.neighbor_count_max:
+                        cards_neighbor_blocked += 1
+                        logger.log(
+                            f"  ⏭️ [SOURCE][NEIGHBOR_COUNT_FILTER] blog={post.blog_id} "
+                            f"count={neighbor_count} max={self.neighbor_count_max} -> skip"
+                        )
+                        continue
 
                 # 동일 블로그 1세션 1글 제한
                 if post.blog_id in self.seen_blogs:
@@ -312,7 +330,9 @@ class RecommendationFeedSource(FeedSource):
 
         logger.log(
             f"[DISCOVERY_SUMMARY] recommendation seen={cards_seen} parsed={cards_parsed} "
-            f"allowed={len(discovered)} topicBlocked={cards_topic_blocked} sameBlog={cards_same_blog} domError={card_dom_errors}"
+            f"allowed={len(discovered)} topicBlocked={cards_topic_blocked} "
+            f"neighborBlocked={cards_neighbor_blocked} neighborUnknown={cards_neighbor_unknown} "
+            f"sameBlog={cards_same_blog} domError={card_dom_errors}"
         )
 
         return discovered

@@ -138,6 +138,7 @@ class FeedPost:
     title: Optional[str] = None
     author: Optional[str] = None
     excerpt: Optional[str] = None
+    neighbor_count: Optional[int] = None
 
 
 @dataclass

@@ -395,7 +395,19 @@ class FeedController:
                     posts_per_query=int(self.config.get("posts_per_query", 3))
                 )
             elif source_type == FeedSourceType.RECOMMENDATION:
-                source = RecommendationFeedSource(feed_page, max_items=max_items, stop_event=self.stop_event)
+                rec_neighbor_max = self.config.get("recommendation_neighbor_count_max")
+                try:
+                    rec_neighbor_max = int(rec_neighbor_max) if rec_neighbor_max is not None else None
+                    if rec_neighbor_max is not None and rec_neighbor_max < 0:
+                        rec_neighbor_max = 0
+                except (ValueError, TypeError):
+                    rec_neighbor_max = None
+                source = RecommendationFeedSource(
+                    feed_page,
+                    max_items=max_items,
+                    stop_event=self.stop_event,
+                    neighbor_count_max=rec_neighbor_max,
+                )
             else:
                 source = DirectUrlSource(direct_urls)
 

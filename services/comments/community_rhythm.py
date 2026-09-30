@@ -500,7 +500,8 @@ class FinalQualityGate:
         r"[\U0001F300-\U0001F9FF\U0001FA00-\U0001FAFF]"
         r"(?:[\U0001F3FB-\U0001F3FF])?"
         r"(?:\u200D[\U0001F300-\U0001F9FF\U0001FA00-\U0001FAFF](?:[\U0001F3FB-\U0001F3FF])?)*|"
-        r"[\u2600-\u27BF]"
+        r"[\u2600-\u27BF]|"
+        r"[\u3297\u3299][\ufe00-\ufe0f]?"
         r")"
     )
     _FAKE_EXPERIENCE_RE: ClassVar[re.Pattern[str]] = re.compile(

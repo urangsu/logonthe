@@ -61,7 +61,8 @@ class CommentStyleNormalizer:
         r"[\U0001F300-\U0001F9FF\U0001FA00-\U0001FAFF]"
         r"[\ufe00-\ufe0f\U0001f3fb-\U0001f3ff]?"
         r"(?:\u200d[\U0001F300-\U0001F9FF\U0001FA00-\U0001FAFF][\ufe00-\ufe0f\U0001f3fb-\U0001f3ff]?)*|"
-        r"[\u2600-\u27bf][\ufe00-\ufe0f]?"
+        r"[\u2600-\u27bf][\ufe00-\ufe0f]?|"
+        r"[\u3297\u3299][\ufe00-\ufe0f]?"
         r")",
         flags=re.UNICODE,
     )
@@ -91,23 +92,67 @@ class CommentStyleNormalizer:
         """이모지 포함 여부 판별"""
         return bool(cls.extract_emojis(text))
 
+    _CLOSING_ENDING_RE = re.compile(
+        r"(?:요|네요|어요|아요|죠|구요|고요|습니다|답니다|겠어요|보여요|같아요|니다)$"
+    )
+
     @classmethod
-    def strip_emojis(cls, text: str) -> str:
+    def strip_emojis(cls, text: str, preserve_clause_boundary: bool = True) -> str:
         """
         텍스트에서 이모지만 제거하고 일반 특수 기호(℃, ㎏, ©, ™ 등)는 원형 보존.
+        - 말끝 emoji 제거: 경계자 미추가 ('맛있어 보여요 😋' -> '맛있어 보여요')
+        - 두 문장 사이 emoji 제거: 앞부분이 종결형 어미이고 뒷문장이 이어지면 '~ '로 자연스럽게 경계 보존
+          ('땡기네요 😋 월남쌈도' -> '땡기네요~ 월남쌈도')
         """
         if not text:
             return ""
 
-        def _replace_match(m: re.Match) -> str:
-            token = m.group()
-            if token in cls.NON_EMOJI_SYMBOLS:
-                return token
-            return ""
+        matches = []
+        for m in cls._EMOJI_RE.finditer(text):
+            if m.group() not in cls.NON_EMOJI_SYMBOLS:
+                matches.append((m.start(), m.end()))
 
-        cleaned = cls._EMOJI_RE.sub(_replace_match, text)
-        cleaned = re.sub(r"[ \t]+", " ", cleaned).strip()
-        return cleaned
+        if not matches:
+            return text
+
+        # 인접하거나 공백만 있는 이모지들을 하나의 클러스터로 병합
+        clusters = []
+        curr_start, curr_end = matches[0]
+        for s, e in matches[1:]:
+            between = text[curr_end:s]
+            if between == "" or between.isspace():
+                curr_end = e
+            else:
+                clusters.append((curr_start, curr_end))
+                curr_start, curr_end = s, e
+        clusters.append((curr_start, curr_end))
+
+        result = list(text)
+        for c_start, c_end in reversed(clusters):
+            # 클러스터 주변 공백 확장 탐색
+            actual_start = c_start
+            while actual_start > 0 and text[actual_start - 1] in " \t":
+                actual_start -= 1
+            actual_end = c_end
+            while actual_end < len(text) and text[actual_end] in " \t":
+                actual_end += 1
+
+            before = text[:actual_start]
+            after = text[actual_end:]
+
+            if preserve_clause_boundary and after and not after.startswith(("~", "!", "?", ".", ",")):
+                if cls._CLOSING_ENDING_RE.search(before) and not before.endswith(("~", "!", "?", ".")):
+                    replacement = "~ "
+                else:
+                    replacement = " " if before and after else ""
+            else:
+                replacement = ""
+
+            result[actual_start:actual_end] = list(replacement)
+
+        res_str = "".join(result)
+        res_str = re.sub(r"[ \t]+", " ", res_str).strip()
+        return res_str
 
     @classmethod
     def normalize_style(

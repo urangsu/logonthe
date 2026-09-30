@@ -166,11 +166,79 @@ class ReactionContextPlanner:
             if len(cand_s) >= 4:
                 score += 1.5
 
+            # 5. 복합 음식명 우선 Ranking (들깨수제비 > 수제비, 과일산도 > 산도, 김피탕 > 피탕, 잠봉뵈르 > 샌드위치/잠봉)
+            if domain == "FOOD":
+                is_subword = any(
+                    other != cand_s and cand_s in other and (other.lower() in combined)
+                    for other in candidates
+                )
+                is_composite = any(
+                    other != cand_s and other in cand_s and (other.lower() in combined)
+                    for other in candidates
+                )
+                if is_composite:
+                    score += 6.0
+                if is_subword:
+                    score -= 4.0
+
             scored.append((score, cand_s))
 
         # 점수 내림차순, 동일 점수 시 긴 단어 우선
         scored.sort(key=lambda x: (x[0], len(x[1])), reverse=True)
         return [cand for _, cand in scored]
+
+    @classmethod
+    def extract_open_vocabulary_food_candidates(cls, title: str, excerpt: str = "") -> List[str]:
+        """
+        사전에 등록되지 않은 고유 메뉴/음식명을 제목 및 본문에서 추출한다.
+        - 대괄호/소괄호/해시태그 제거
+        - '맛집', '전문점', '먹거리', '먹은' 등 핵심 패턴 주변 명사 추출
+        - 한국어 조사 정규화 및 불용어/지역명 접미사 배제
+        """
+        if not title:
+            return []
+
+        clean_t = re.sub(r"\[.*?\]|\(.*?\)|<.*?>|#\S+", " ", title)
+        stop_words = {
+            "후기", "솔직후기", "내돈내산", "추천", "방문기", "방문후기", "리뷰", "일상", "투어", "탐방",
+            "메뉴", "메뉴판", "가격", "위치", "주차", "웨이팅", "영업시간", "오픈런", "식당", "맛집", "카페",
+            "음식점", "대박", "진짜", "정말", "최고", "존맛", "먹방", "비주얼", "솔직", "내돈", "인테리어",
+            "분위기", "오늘", "어제", "주말", "평일", "점심", "저녁", "시간", "사진", "포스팅"
+        }
+        particle_re = re.compile(r"(?:와|과|이랑|랑|을|를|이|가|은|는|도|에|의)$")
+        candidates: List[str] = []
+
+        def _clean_token(tok: str) -> Optional[str]:
+            tok = tok.strip()
+            if len(tok) >= 3:
+                tok = particle_re.sub("", tok)
+            if len(tok) < 2 or len(tok) > 10:
+                return None
+            if tok in stop_words or tok in cls.GENERIC_BANNED_ANCHORS or tok in FoodCommentFocus.SECONDARY_KEYWORDS:
+                return None
+            if tok.endswith(("역", "동", "구", "점", "길", "로", "거리")):
+                return None
+            return tok
+
+        # 1. '맛집', '전문점' 등 앞의 수식 명사 패턴
+        target_patterns = [
+            r"([가-힣]{2,10})\s*(?:맛집|전문점|먹거리|집)",
+            r"([가-힣]{2,10})\s*(?:먹고\s*온|먹은|먹으러|먹방)",
+            r"([가-힣]{2,10})\s*(?:후기|리뷰)",
+        ]
+        for pat in target_patterns:
+            for m in re.finditer(pat, clean_t):
+                w = _clean_token(m.group(1))
+                if w and w not in candidates:
+                    candidates.append(w)
+
+        # 2. 제목 내 2~10글자 한글 토큰
+        for tok in re.findall(r"[가-힣]{2,10}", clean_t):
+            w = _clean_token(tok)
+            if w and w not in candidates:
+                candidates.append(w)
+
+        return candidates
 
     @classmethod
     def score_domains(
@@ -348,8 +416,16 @@ class ReactionContextPlanner:
                 if d in combined and d not in candidate_foods:
                     candidate_foods.append(d)
 
+            # 제목 기반 open-vocabulary 후보 추출 보강
+            open_vocab_foods = cls.extract_open_vocabulary_food_candidates(title_s, excerpt_s)
+            for ov in open_vocab_foods:
+                if ov not in candidate_foods:
+                    candidate_foods.append(ov)
+
             ranked_foods = cls.rank_anchors(candidate_foods, title_s, excerpt_s, domain="FOOD")
-            pri = ranked_foods[0] if ranked_foods else "메뉴"
+            # Generic anchor('메뉴', '음식', '가게') 최후 fallback으로 격하 ('anchor=메뉴' 방지)
+            valid_foods = [f for f in ranked_foods if f not in cls.GENERIC_BANNED_ANCHORS]
+            pri = valid_foods[0] if valid_foods else (ranked_foods[0] if ranked_foods else "메뉴")
 
             # 2nd food anchor: 반드시 진짜 음식/재료여야 함 (절대로 '위치', '주차' 등 메타데이터가 아님!)
             # P2: primary와 포함관계(부분문자열)인 경우도 제거 (예: 돈카츠/카츠, 크림파스타/파스타)

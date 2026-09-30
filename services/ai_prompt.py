@@ -227,6 +227,7 @@ class AIPromptBuilder:
         style_policy: Optional[CommentStylePolicy] = None,
         reaction_plan: Optional[Any] = None,
         content_focus: str = "GENERAL",
+        allow_need_more_context: bool = False,
     ) -> str:
         """
         v3.5: 분류 -> 반응계획 -> 짧은 프롬프트 -> 검증 4단 구조의 정밀하고 간결한 프롬프트.
@@ -234,6 +235,7 @@ class AIPromptBuilder:
         - 본문 6000자 대신 선별된 400~600자 맥락(selected_context)만 전달
         - 공감/경험 암시 원천 금지 지침 포함
         - 타 카테고리 불필요한 규칙 완전 배제
+        - Python에서 context가 충분(meaningful=true)하다고 판정한 경우 NEED_MORE_CONTEXT 선택지를 원천 차단
         """
         title_s = (title or "").strip()
         context_s = (selected_context or excerpt or "").strip()
@@ -267,6 +269,8 @@ class AIPromptBuilder:
         if avoid_endings:
             recent_ending_note = f"\n- 최근 사용된 어미와 겹치지 않게 자연스러운 다른 대화체 어미를 선택해"
 
+        output_rule = "- 댓글만 출력(근거 부족 시 NEED_MORE_CONTEXT)" if allow_need_more_context else "- 댓글만 출력"
+
         return f"""네이버 블로그 글에 남길 자연스러운 짧은 댓글 하나를 작성해.
 
 {rewrite_section}[작성 원칙]
@@ -275,7 +279,7 @@ class AIPromptBuilder:
 - 직접 경험한 척 말하거나 "공감돼요" 등 공유 경험 암시 금지
 - 음식에 "먹는 재미", "골라 먹는 재미" 등 섭취와 재미 연결 금지
 - 없는 맛·시설 등 사실은 만들지 마
-- 댓글만 출력(근거 부족 시 NEED_MORE_CONTEXT)
+{output_rule}
 
 이번 글의 반응 방향:
 {reaction_instruction}
@@ -477,6 +481,7 @@ class AIPromptBuilder:
         reaction_instruction: Optional[str] = None,
         selected_context: Optional[str] = None,
         version: Optional[str] = None,
+        allow_need_more_context: bool = False,
     ) -> str:
         if not version:
             version = cls.PROMPT_VERSION
@@ -492,6 +497,7 @@ class AIPromptBuilder:
                 style_policy=style_policy,
                 reaction_plan=reaction_plan,
                 content_focus=content_focus,
+                allow_need_more_context=allow_need_more_context,
             )
         if version in ("3.4", "3.4.0-youthful-mobile", "v3.4"):
             return cls.build_v3_4(

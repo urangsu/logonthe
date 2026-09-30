@@ -236,6 +236,7 @@ class GenerationContext:
         recent_comments: Optional[List[str]] = None,
         request_id: Optional[str] = None,
         previous_draft: Optional[str] = None,
+        allow_need_more_context: bool = False,
     ) -> str:
         if self.needs_more_context:
             return ""
@@ -267,6 +268,7 @@ class GenerationContext:
             reaction_instruction=rx_inst,
             selected_context=self.selected_context,
             version=self.prompt_version,
+            allow_need_more_context=allow_need_more_context,
         )
 
 
@@ -1666,9 +1668,14 @@ class PostProcessor:
                                                             matched_sec = [s for s in gen_ctx.secondary_anchors if s in gemini_answer]
                                                             if matched_sec:
                                                                 selected_anchor = f"secondary:{matched_sec[0]}"
+                                                        elif getattr(gen_ctx, "reaction_plan", None) and getattr(gen_ctx.reaction_plan, "primary_anchor", None):
+                                                            p_anc = gen_ctx.reaction_plan.primary_anchor
+                                                            if p_anc and p_anc in gemini_answer and p_anc not in ("메뉴", "음식", "가게"):
+                                                                selected_anchor = p_anc
 
                                                         # Semantic connection to food/dining context (식사 디테일 및 본문 실제 사실 연결 검증)
-                                                        if selected_anchor == "none" and gen_ctx.verified_anchors:
+                                                        semantic_signal = "none"
+                                                        if gen_ctx.verified_anchors:
                                                             dining_context_signals = (
                                                                 "웨이팅", "대기", "오픈런", "가격", "리필", "점심", "저녁", "주문",
                                                                 "반찬", "스프", "고기", "국물", "소스", "디저트", "커피"
@@ -1690,10 +1697,10 @@ class PostProcessor:
                                                                     matched_signals.append(label)
 
                                                             if matched_signals:
-                                                                selected_anchor = f"dining_context:{matched_signals[0]}"
+                                                                semantic_signal = f"context:{matched_signals[0]}"
 
                                                             # Natural subjective dining sentiments & associations (군침, 밥 한 공기, 밥도둑, 든든하, 먹음직 등)
-                                                            if selected_anchor == "none":
+                                                            if semantic_signal == "none":
                                                                 dining_sentiment_patterns = [
                                                                     ("밥한공기", r"밥\s*(?:한\s*공기|생각)"),
                                                                     ("군침", r"군침"),
@@ -1708,11 +1715,19 @@ class PostProcessor:
                                                                 ]
                                                                 for label, pat in dining_sentiment_patterns:
                                                                     if re.search(pat, gemini_answer):
-                                                                        selected_anchor = f"dining_sentiment:{label}"
+                                                                        semantic_signal = f"sentiment:{label}"
                                                                         break
 
-                                                        if content_focus != "GENERAL":
-                                                            logger.log(f"[FOOD_COMMENT] focus={content_focus} selected_anchor={selected_anchor}")
+                                                        if content_focus != "GENERAL" or (getattr(gen_ctx, "reaction_plan", None) and getattr(gen_ctx.reaction_plan, "domain", None) == "FOOD"):
+                                                            rx_plan = getattr(gen_ctx, "reaction_plan", None)
+                                                            pri_anchor = getattr(rx_plan, "primary_anchor", "") if rx_plan else selected_anchor
+                                                            sec_anchor = getattr(rx_plan, "secondary_anchor", "") if rx_plan else ""
+                                                            rx_mode = getattr(rx_plan, "reaction_mode", "observation") if rx_plan else "observation"
+                                                            logger.log(
+                                                                f"[FOOD_COMMENT] focus={content_focus} primary_anchor={pri_anchor} "
+                                                                f"secondary_anchor={sec_anchor} reaction_mode={rx_mode} "
+                                                                f"selected_anchor={selected_anchor} semantic_signal={semantic_signal}"
+                                                            )
 
                                                         # Lexical overlap is diagnostic, not semantic proof.
                                                         is_food_or_cafe = content_focus in ("FOOD_RESTAURANT", "FOOD_PRODUCT", "CAFE_DESSERT") or (getattr(gen_ctx, "reaction_plan", None) and gen_ctx.reaction_plan.domain == "FOOD")
