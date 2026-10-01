@@ -169,6 +169,9 @@ class MainWindow(ctk.CTk):
 
         ctk.CTkLabel(src_frame, text="피드 대상:", font=ctk.CTkFont(weight="bold", size=11)).grid(row=0, column=0, padx=4, pady=1, sticky="w")
         self.source_var = ctk.StringVar(value=self.config_service.get("feed_source", FeedSourceType.TARGETED_SEARCH.value))
+        self.recommendation_neighbor_count_max_var = ctk.StringVar(
+            value=str(self.config_service.get("recommendation_neighbor_count_max", 0))
+        )
 
         ctk.CTkRadioButton(
             src_frame, text="이웃 새글", font=ctk.CTkFont(size=11),
@@ -226,6 +229,29 @@ class MainWindow(ctk.CTk):
         self.direct_url_textbox.pack(fill="x", padx=6, pady=1)
         add_mac_clipboard_support(self.direct_url_textbox, self)
 
+        # 추천 피드 전용 옵션 프레임 (추천 피드 선택 시 노출)
+        self.recommendation_frame = ctk.CTkFrame(tab_feed, fg_color="#1E293B", corner_radius=6)
+        rec_opt_row = ctk.CTkFrame(self.recommendation_frame, fg_color="transparent")
+        rec_opt_row.pack(fill="x", padx=6, pady=2)
+        ctk.CTkLabel(rec_opt_row, text="추천 피드 옵션:", font=ctk.CTkFont(weight="bold", size=11), text_color="#38BDF8").pack(side="left", padx=(0, 6))
+
+        ctk.CTkLabel(rec_opt_row, text="작성자 이웃 수 상한:", font=ctk.CTkFont(size=11)).pack(side="left", padx=(0, 2))
+        self.rec_neighbor_max_entry = ctk.CTkEntry(
+            rec_opt_row, width=64, height=22, font=ctk.CTkFont(size=11),
+            textvariable=self.recommendation_neighbor_count_max_var
+        )
+        self.rec_neighbor_max_entry.pack(side="left", padx=2)
+        add_mac_clipboard_support(self.rec_neighbor_max_entry, self)
+
+        ctk.CTkLabel(rec_opt_row, text="명 (0: 제한 없음, 서로이웃 미적용)", font=ctk.CTkFont(size=11), text_color="#F472B6").pack(side="left", padx=3)
+
+        self.lbl_rec_hint = ctk.CTkLabel(
+            self.recommendation_frame,
+            text="💡 추천 피드에서 이웃 수가 상한을 초과하는 작성자의 글은 탐색/반응 대상에서 제외합니다 (서로이웃은 필터 미적용, 0은 무제한).",
+            font=ctk.CTkFont(size=10), text_color="#94A3B8"
+        )
+        self.lbl_rec_hint.pack(anchor="w", padx=8, pady=(0, 2))
+
         # 이웃 새글 전용 옵션 프레임 (항상 노출, 다른 소스에서는 비활성화 회색 상태)
         self.neighbor_options_frame = ctk.CTkFrame(tab_feed, fg_color="#1E293B", corner_radius=6)
         n_opt_row = ctk.CTkFrame(self.neighbor_options_frame, fg_color="transparent")
@@ -255,6 +281,8 @@ class MainWindow(ctk.CTk):
         # 초기 뷰 상태 적용
         if self.source_var.get() == FeedSourceType.TARGETED_SEARCH.value:
             self.discovery_frame.pack(fill="x", padx=4, pady=2)
+        elif self.source_var.get() == FeedSourceType.RECOMMENDATION.value:
+            self.recommendation_frame.pack(fill="x", padx=4, pady=2)
         elif self.source_var.get() == FeedSourceType.DIRECT.value:
             self.direct_url_frame.pack(fill="x", padx=4, pady=2)
 
@@ -445,6 +473,17 @@ class MainWindow(ctk.CTk):
         self.visitor_thresh_entry.insert(0, str(self.config_service.get("daily_visitor_skip_threshold", 10000)))
         add_mac_clipboard_support(self.visitor_thresh_entry, self)
         ctk.CTkLabel(g_head, text="명 초과 스킵)", font=ctk.CTkFont(size=11)).pack(side="left", padx=1)
+
+        g_row2 = ctk.CTkFrame(guard_frame, fg_color="transparent")
+        g_row2.pack(fill="x", padx=6, pady=(1, 1))
+        ctk.CTkLabel(g_row2, text="🛡️ 추천피드 작성자 이웃 수 상한 (기준: ", font=ctk.CTkFont(size=11, weight="bold"), text_color="#F472B6").pack(side="left", padx=2)
+        self.settings_rec_neighbor_max_entry = ctk.CTkEntry(
+            g_row2, width=54, height=20, font=ctk.CTkFont(size=11),
+            textvariable=self.recommendation_neighbor_count_max_var
+        )
+        self.settings_rec_neighbor_max_entry.pack(side="left", padx=1)
+        add_mac_clipboard_support(self.settings_rec_neighbor_max_entry, self)
+        ctk.CTkLabel(g_row2, text="명 초과 스킵 / 0: 제한 없음, 서로이웃 미적용)", font=ctk.CTkFont(size=11)).pack(side="left", padx=1)
 
         g_sub = ctk.CTkFrame(guard_frame, fg_color="transparent")
         g_sub.pack(fill="x", padx=6, pady=(0, 2))
@@ -847,8 +886,20 @@ class MainWindow(ctk.CTk):
             else:
                 self.discovery_frame.pack(fill="x", padx=4, pady=2)
             self.direct_url_frame.pack_forget()
+            if hasattr(self, "recommendation_frame"):
+                self.recommendation_frame.pack_forget()
+        elif val == FeedSourceType.RECOMMENDATION.value:
+            self.discovery_frame.pack_forget()
+            self.direct_url_frame.pack_forget()
+            if hasattr(self, "recommendation_frame"):
+                if hasattr(self, "neighbor_options_frame"):
+                    self.recommendation_frame.pack(fill="x", padx=4, pady=2, before=self.neighbor_options_frame)
+                else:
+                    self.recommendation_frame.pack(fill="x", padx=4, pady=2)
         elif val == FeedSourceType.DIRECT.value:
             self.discovery_frame.pack_forget()
+            if hasattr(self, "recommendation_frame"):
+                self.recommendation_frame.pack_forget()
             if hasattr(self, "neighbor_options_frame"):
                 self.direct_url_frame.pack(fill="x", padx=4, pady=2, before=self.neighbor_options_frame)
             else:
@@ -856,6 +907,8 @@ class MainWindow(ctk.CTk):
         else:
             self.discovery_frame.pack_forget()
             self.direct_url_frame.pack_forget()
+            if hasattr(self, "recommendation_frame"):
+                self.recommendation_frame.pack_forget()
 
     def _get_learning_stats_text(self) -> str:
         try:
@@ -1177,6 +1230,13 @@ class MainWindow(ctk.CTk):
 
             like_thresh = int(self.like_thresh_entry.get().strip())
             visitor_thresh = int(self.visitor_thresh_entry.get().strip())
+            raw_rec_neighbor_max = self.recommendation_neighbor_count_max_var.get().strip() if hasattr(self, "recommendation_neighbor_count_max_var") else "0"
+            try:
+                rec_neighbor_max = int(raw_rec_neighbor_max) if raw_rec_neighbor_max else 0
+                if rec_neighbor_max < 0:
+                    rec_neighbor_max = 0
+            except ValueError:
+                rec_neighbor_max = 0
 
             if not (1 <= max_items <= 500):
                 raise ValueError("최대 처리 글 수는 1~500 사이여야 합니다.")
@@ -1256,6 +1316,7 @@ class MainWindow(ctk.CTk):
             "daily_visitor_guard_enabled": self.visitor_guard_chk_var.get(),
             "daily_visitor_skip_threshold": visitor_thresh,
             "daily_visitor_unknown_policy": self.unknown_policy_var.get(),
+            "recommendation_neighbor_count_max": rec_neighbor_max,
 
             "ai_clipboard_enabled": True,
             "ai_context_max_chars": 700,
@@ -1265,7 +1326,7 @@ class MainWindow(ctk.CTk):
             "gemini_web_enabled": self.gemini_web_enabled_var.get()
         }
         self.config_service.update_many(cfg_data)
-        logger.log(f"[CONFIG] 공감수 제외 기준: {like_thresh}개 (source=data/config.json)")
+        logger.log(f"[CONFIG] 공감수 제외 기준: {like_thresh}개 | 추천피드 이웃수 상한: {rec_neighbor_max}명 (source=data/config.json)")
 
         # P0-10: 답글 생성 중 피드 시작 방지
         if hasattr(self, "btn_batch_generate_replies") and str(self.btn_batch_generate_replies.cget("text")) == "생성 중...":

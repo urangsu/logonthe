@@ -49,3 +49,42 @@ class StartupStateTests(unittest.TestCase):
             self.assertEqual(win.auto_comment_submit_var.get(), mode == "자동 등록")
             self.assertFalse(win.neighbor_mutual_only_var.get())
             self.assertFalse(hasattr(win, "_saved_comment_mode"))
+
+
+class RecommendationFeedUITests(unittest.TestCase):
+    def test_on_source_change_shows_recommendation_frame(self):
+        from app.models import FeedSourceType
+
+        win = SimpleNamespace(
+            source_var=Value(FeedSourceType.RECOMMENDATION.value),
+            _update_neighbor_options_state=MagicMock(),
+            neighbor_options_frame=MagicMock(),
+            discovery_frame=MagicMock(),
+            direct_url_frame=MagicMock(),
+            recommendation_frame=MagicMock(),
+        )
+
+        MainWindow._on_source_change(win)
+
+        win.recommendation_frame.pack.assert_called_once()
+        win.discovery_frame.pack_forget.assert_called_once()
+        win.direct_url_frame.pack_forget.assert_called_once()
+
+    def test_on_source_change_hides_recommendation_frame_on_other_sources(self):
+        from app.models import FeedSourceType
+
+        for other_source in (FeedSourceType.TARGETED_SEARCH, FeedSourceType.DIRECT, FeedSourceType.NEIGHBOR):
+            with self.subTest(source=other_source.value):
+                win = SimpleNamespace(
+                    source_var=Value(other_source.value),
+                    _update_neighbor_options_state=MagicMock(),
+                    neighbor_options_frame=MagicMock(),
+                    discovery_frame=MagicMock(),
+                    direct_url_frame=MagicMock(),
+                    recommendation_frame=MagicMock(),
+                )
+
+                MainWindow._on_source_change(win)
+
+                win.recommendation_frame.pack_forget.assert_called_once()
+
