@@ -229,29 +229,6 @@ class MainWindow(ctk.CTk):
         self.direct_url_textbox.pack(fill="x", padx=6, pady=1)
         add_mac_clipboard_support(self.direct_url_textbox, self)
 
-        # 추천 피드 전용 옵션 프레임 (추천 피드 선택 시 노출)
-        self.recommendation_frame = ctk.CTkFrame(tab_feed, fg_color="#1E293B", corner_radius=6)
-        rec_opt_row = ctk.CTkFrame(self.recommendation_frame, fg_color="transparent")
-        rec_opt_row.pack(fill="x", padx=6, pady=2)
-        ctk.CTkLabel(rec_opt_row, text="추천 피드 옵션:", font=ctk.CTkFont(weight="bold", size=11), text_color="#38BDF8").pack(side="left", padx=(0, 6))
-
-        ctk.CTkLabel(rec_opt_row, text="작성자 이웃 수 상한:", font=ctk.CTkFont(size=11)).pack(side="left", padx=(0, 2))
-        self.rec_neighbor_max_entry = ctk.CTkEntry(
-            rec_opt_row, width=64, height=22, font=ctk.CTkFont(size=11),
-            textvariable=self.recommendation_neighbor_count_max_var
-        )
-        self.rec_neighbor_max_entry.pack(side="left", padx=2)
-        add_mac_clipboard_support(self.rec_neighbor_max_entry, self)
-
-        ctk.CTkLabel(rec_opt_row, text="명 (0: 제한 없음, 서로이웃 미적용)", font=ctk.CTkFont(size=11), text_color="#F472B6").pack(side="left", padx=3)
-
-        self.lbl_rec_hint = ctk.CTkLabel(
-            self.recommendation_frame,
-            text="💡 추천 피드에서 이웃 수가 상한을 초과하는 작성자의 글은 탐색/반응 대상에서 제외합니다 (서로이웃은 필터 미적용, 0은 무제한).",
-            font=ctk.CTkFont(size=10), text_color="#94A3B8"
-        )
-        self.lbl_rec_hint.pack(anchor="w", padx=8, pady=(0, 2))
-
         # 이웃 새글 전용 옵션 프레임 (항상 노출, 다른 소스에서는 비활성화 회색 상태)
         self.neighbor_options_frame = ctk.CTkFrame(tab_feed, fg_color="#1E293B", corner_radius=6)
         n_opt_row = ctk.CTkFrame(self.neighbor_options_frame, fg_color="transparent")
@@ -281,8 +258,6 @@ class MainWindow(ctk.CTk):
         # 초기 뷰 상태 적용
         if self.source_var.get() == FeedSourceType.TARGETED_SEARCH.value:
             self.discovery_frame.pack(fill="x", padx=4, pady=2)
-        elif self.source_var.get() == FeedSourceType.RECOMMENDATION.value:
-            self.recommendation_frame.pack(fill="x", padx=4, pady=2)
         elif self.source_var.get() == FeedSourceType.DIRECT.value:
             self.direct_url_frame.pack(fill="x", padx=4, pady=2)
 
@@ -886,20 +861,8 @@ class MainWindow(ctk.CTk):
             else:
                 self.discovery_frame.pack(fill="x", padx=4, pady=2)
             self.direct_url_frame.pack_forget()
-            if hasattr(self, "recommendation_frame"):
-                self.recommendation_frame.pack_forget()
-        elif val == FeedSourceType.RECOMMENDATION.value:
-            self.discovery_frame.pack_forget()
-            self.direct_url_frame.pack_forget()
-            if hasattr(self, "recommendation_frame"):
-                if hasattr(self, "neighbor_options_frame"):
-                    self.recommendation_frame.pack(fill="x", padx=4, pady=2, before=self.neighbor_options_frame)
-                else:
-                    self.recommendation_frame.pack(fill="x", padx=4, pady=2)
         elif val == FeedSourceType.DIRECT.value:
             self.discovery_frame.pack_forget()
-            if hasattr(self, "recommendation_frame"):
-                self.recommendation_frame.pack_forget()
             if hasattr(self, "neighbor_options_frame"):
                 self.direct_url_frame.pack(fill="x", padx=4, pady=2, before=self.neighbor_options_frame)
             else:
@@ -907,8 +870,6 @@ class MainWindow(ctk.CTk):
         else:
             self.discovery_frame.pack_forget()
             self.direct_url_frame.pack_forget()
-            if hasattr(self, "recommendation_frame"):
-                self.recommendation_frame.pack_forget()
 
     def _get_learning_stats_text(self) -> str:
         try:

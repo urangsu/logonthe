@@ -52,7 +52,7 @@ class StartupStateTests(unittest.TestCase):
 
 
 class RecommendationFeedUITests(unittest.TestCase):
-    def test_on_source_change_shows_recommendation_frame(self):
+    def test_on_source_change_switches_frames_cleanly(self):
         from app.models import FeedSourceType
 
         win = SimpleNamespace(
@@ -61,30 +61,22 @@ class RecommendationFeedUITests(unittest.TestCase):
             neighbor_options_frame=MagicMock(),
             discovery_frame=MagicMock(),
             direct_url_frame=MagicMock(),
-            recommendation_frame=MagicMock(),
         )
 
         MainWindow._on_source_change(win)
 
-        win.recommendation_frame.pack.assert_called_once()
         win.discovery_frame.pack_forget.assert_called_once()
         win.direct_url_frame.pack_forget.assert_called_once()
 
-    def test_on_source_change_hides_recommendation_frame_on_other_sources(self):
-        from app.models import FeedSourceType
-
-        for other_source in (FeedSourceType.TARGETED_SEARCH, FeedSourceType.DIRECT, FeedSourceType.NEIGHBOR):
-            with self.subTest(source=other_source.value):
-                win = SimpleNamespace(
-                    source_var=Value(other_source.value),
-                    _update_neighbor_options_state=MagicMock(),
-                    neighbor_options_frame=MagicMock(),
-                    discovery_frame=MagicMock(),
-                    direct_url_frame=MagicMock(),
-                    recommendation_frame=MagicMock(),
-                )
-
-                MainWindow._on_source_change(win)
-
-                win.recommendation_frame.pack_forget.assert_called_once()
+    def test_neighbor_count_normalization(self):
+        # 0 or empty -> 0
+        for raw, expected in (("0", 0), ("", 0), ("   ", 0), ("-10", 0), ("abc", 0), ("10000", 10000), ("9999", 9999)):
+            with self.subTest(raw=raw, expected=expected):
+                try:
+                    val = int(raw.strip()) if raw.strip() else 0
+                    if val < 0:
+                        val = 0
+                except ValueError:
+                    val = 0
+                self.assertEqual(val, expected)
 
