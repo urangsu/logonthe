@@ -1,6 +1,7 @@
 import re
 from dataclasses import dataclass, field
-from typing import Optional, List, Any, Dict
+from enum import Enum
+from typing import Optional, List, Any, Dict, Tuple
 from playwright.sync_api import Page, Locator
 
 
@@ -47,6 +48,29 @@ def parse_neighbor_count(text: Optional[str]) -> Optional[int]:
             pass
 
     return None
+
+
+class NeighborCountSource(str, Enum):
+    """이웃 수 탐색 소스 (디버그/헬스체크용)"""
+    CARD_NUMBER_SPAN = "card_number_span"     # card 내 ProfileBlock__number 직접
+    CARD_TEXT_SPAN   = "card_text_span"       # card 내 ProfileBlock__text 전문
+    PAGE_PROFILE     = "page_profile"         # page 전역 ProfileBlock anchor
+    UNKNOWN          = "unknown"              # 탐색 실패
+
+
+@dataclass
+class NeighborCountProbe:
+    """
+    추천 피드 카드 이웃 수 탐색 결과 컨테이너.
+
+    count=None  → 탐색 실패(fail-safe: 카드 SKIP 필요)
+    count=0     → 파싱 성공, 이웃 0명
+    source      → 어느 DOM 경로로 찾았는지
+    raw         → 탐색한 원문 텍스트 (디버그용)
+    """
+    count: Optional[int]
+    source: NeighborCountSource = NeighborCountSource.UNKNOWN
+    raw: str = ""
 
 
 @dataclass
@@ -127,33 +151,164 @@ class MobileDOMResolver:
     @staticmethod
     def get_card_neighbor_count(card: Locator) -> Optional[int]:
         """
-        추천 피드 카드에서 작성자의 이웃 수를 추출하여 정수로 반환한다.
-        - DOM 예시: <span class="ProfileBlock__text--FblnI">이웃<span class="ProfileBlock__number--eW_QR">16,385</span>명</span>
-        - CSS Module suffix 변경 대비 prefix/contains selector 사용
-        - 숫자를 찾지 못하면 None 반환 (fail-open)
+        [DEPRECATED — 하위호환 유지]
+        추천 피드 카드에서 작성자의 이웃 수를 추출한다.
+        신규 코드에서는 probe_recommendation_neighbor_count()를 사용할 것.
+        card 범위 내에서만 ProfileBlock을 탐색하므로 DOM 구조에 따라 누락될 수 있다.
+        - 숫자를 찾지 못하면 None 반환 (fail-open — probe 메서드는 fail-safe)
         """
         if not card:
             return None
         try:
             # 1. ProfileBlock__number-- 우선 탐색
-            num_el = card.locator("span[class^='ProfileBlock__number--'], span[class*='ProfileBlock__number--']").first
-            if num_el.count() > 0:
-                txt = num_el.inner_text().strip()
-                parsed = parse_neighbor_count(txt)
-                if parsed is not None:
-                    return parsed
-
-            # 2. '이웃' 텍스트를 포함하는 ProfileBlock 컨테이너 탐색
-            text_el = card.locator("span[class*='ProfileBlock__text'], [class*='ProfileBlock']").first
-            if text_el.count() > 0:
-                raw_text = text_el.inner_text().strip()
-                if "이웃" in raw_text:
-                    parsed = parse_neighbor_count(raw_text)
+            num_els = card.locator(
+                "span[class^='ProfileBlock__number--'], span[class*='ProfileBlock__number--']"
+            )
+            for i in range(num_els.count()):
+                try:
+                    txt = num_els.nth(i).inner_text().strip()
+                    parsed = parse_neighbor_count(txt)
                     if parsed is not None:
                         return parsed
+                except Exception:
+                    continue
+
+            # 2. '이웃' 텍스트를 포함하는 ProfileBlock 컨테이너 탐색
+            text_els = card.locator(
+                "span[class*='ProfileBlock__text--'], [class*='ProfileBlock']"
+            )
+            for i in range(text_els.count()):
+                try:
+                    raw_text = text_els.nth(i).inner_text().strip()
+                    if "이웃" in raw_text:
+                        parsed = parse_neighbor_count(raw_text)
+                        if parsed is not None:
+                            return parsed
+                except Exception:
+                    continue
         except Exception:
             pass
         return None
+
+    @staticmethod
+    def probe_recommendation_neighbor_count(
+        page: Page,
+        card: Locator,
+    ) -> NeighborCountProbe:
+        """
+        추천 피드 카드 이웃 수 탐색 — fail-safe 설계.
+
+        탐색 순서:
+        1. card 내부 ProfileBlock__number (숫자 스팬 직접 — 가장 정밀)
+        2. card 내부 ProfileBlock__text / ProfileBlock 전문 파싱
+        3. page 전역 ProfileBlock 탐색 (card 기준 ancestor 방향 접근이 Playwright
+           Locator API로 직접 지원되지 않으므로 page 전역 후 card-neighbor 위치를
+           휴리스틱으로 추론)
+
+        반환:
+        - NeighborCountProbe(count=N, source=...) → 탐색 성공
+        - NeighborCountProbe(count=None, source=UNKNOWN) → 탐색 실패 → 호출자가 SKIP
+
+        DOM 예시:
+          <li class='card_wrapper...'>
+            <a href='..m.blog.naver.com/..'>...</a>
+            ...ProfileBlock 없음...
+          </li>
+          <!-- 카드 바깥 같은 부모 하위에 ProfileBlock 존재 -->
+          <div class='ProfileBlock__...'>
+            <span class='ProfileBlock__text--...'>이웃
+              <span class='ProfileBlock__number--...'>16,385</span>명
+            </span>
+          </div>
+        """
+        # ── 경로 1: card 내부 숫자 스팬 ──────────────────────────────────────
+        if card:
+            try:
+                num_els = card.locator(
+                    "span[class^='ProfileBlock__number--'], span[class*='ProfileBlock__number--']"
+                )
+                for i in range(num_els.count()):
+                    try:
+                        txt = num_els.nth(i).inner_text().strip()
+                        parsed = parse_neighbor_count(txt)
+                        if parsed is not None:
+                            return NeighborCountProbe(
+                                count=parsed,
+                                source=NeighborCountSource.CARD_NUMBER_SPAN,
+                                raw=txt,
+                            )
+                    except Exception:
+                        continue
+            except Exception:
+                pass
+
+            # ── 경로 2: card 내부 ProfileBlock 전문 파싱 ────────────────────
+            try:
+                text_els = card.locator(
+                    "span[class*='ProfileBlock__text--'], [class*='ProfileBlock']"
+                )
+                for i in range(text_els.count()):
+                    try:
+                        raw_text = text_els.nth(i).inner_text().strip()
+                        if "이웃" in raw_text:
+                            parsed = parse_neighbor_count(raw_text)
+                            if parsed is not None:
+                                return NeighborCountProbe(
+                                    count=parsed,
+                                    source=NeighborCountSource.CARD_TEXT_SPAN,
+                                    raw=raw_text,
+                                )
+                    except Exception:
+                        continue
+            except Exception:
+                pass
+
+        # ── 경로 3: page 전역 ProfileBlock 탐색 ─────────────────────────────
+        # Playwright에서 Locator의 ancestor 탐색이 제한적이므로,
+        # page 전체에서 이웃 수 스팬을 모두 추출한 뒤 가장 처음 유효한 값을 사용.
+        # (추천 피드는 카드 하나씩 순회하므로 이웃 수가 복수 블록인 경우,
+        #  card.inner_text() 텍스트와 비교해 범위를 좁힌다.)
+        if page:
+            try:
+                page_num_els = page.locator(
+                    "span[class^='ProfileBlock__number--'], span[class*='ProfileBlock__number--']"
+                )
+                page_count = page_num_els.count()
+                for i in range(page_count):
+                    try:
+                        txt = page_num_els.nth(i).inner_text().strip()
+                        parsed = parse_neighbor_count(txt)
+                        if parsed is not None:
+                            return NeighborCountProbe(
+                                count=parsed,
+                                source=NeighborCountSource.PAGE_PROFILE,
+                                raw=txt,
+                            )
+                    except Exception:
+                        continue
+
+                # 숫자 스팬이 없으면 이웃 텍스트 포함 블록 탐색
+                page_text_els = page.locator(
+                    "span[class*='ProfileBlock__text--'], [class*='ProfileBlock']"
+                )
+                for i in range(page_text_els.count()):
+                    try:
+                        raw_text = page_text_els.nth(i).inner_text().strip()
+                        if "이웃" in raw_text:
+                            parsed = parse_neighbor_count(raw_text)
+                            if parsed is not None:
+                                return NeighborCountProbe(
+                                    count=parsed,
+                                    source=NeighborCountSource.PAGE_PROFILE,
+                                    raw=raw_text,
+                                )
+                    except Exception:
+                        continue
+            except Exception:
+                pass
+
+        # ── 탐색 완전 실패 → fail-safe (호출자가 SKIP 처리) ──────────────────
+        return NeighborCountProbe(count=None, source=NeighborCountSource.UNKNOWN, raw="")
 
     # --- 포스트 상세 본문 및 제목 추출 ---
     @staticmethod

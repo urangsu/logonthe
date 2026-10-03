@@ -24,6 +24,7 @@ from services.history import HistoryStore
 from services.pacing import PacingService
 from services.clipboard_bridge import ClipboardCommandBridge
 from services.blog_popularity import BlogPopularityService
+from services.blog_neighbor_count import BlogNeighborCountService
 from services.like_transaction import LikeCircuitBreaker
 from services.buddy_list_collector import BuddyListCollector
 from services.relationship_resolver import RelationshipResolver, RelationshipType
@@ -321,6 +322,20 @@ class FeedController:
         from services.runtime_contract import get_runtime_versions_summary
         ver_summary = get_runtime_versions_summary(cfg_dict)
 
+        # 추천피드 이웃수 상한 (0/None = 필터 OFF). 서로이웃/검색/직접 입력에는 적용하지 않는다.
+        rec_neighbor_max = self.config.get("recommendation_neighbor_count_max")
+        try:
+            rec_neighbor_max = int(rec_neighbor_max) if rec_neighbor_max is not None else None
+            if rec_neighbor_max is not None and rec_neighbor_max < 0:
+                rec_neighbor_max = 0
+        except (ValueError, TypeError):
+            rec_neighbor_max = None
+        rec_neighbor_filter_enabled = bool(
+            source_type == FeedSourceType.RECOMMENDATION
+            and rec_neighbor_max is not None
+            and rec_neighbor_max > 0
+        )
+
         logger.log(
             f"[RUN_CONFIG]\n"
             f"python_commit={ver_summary['python_commit']}\n"
@@ -336,7 +351,12 @@ class FeedController:
             f"like_threshold={self.config.get('like_count_skip_threshold', 999)}\n"
             f"visitor_threshold={self.config.get('daily_visitor_skip_threshold', 10000)}\n"
             f"gemini_enabled={gemini_web_enabled}\n"
-            f"gemini_mode={gemini_browser_mode}"
+            f"gemini_mode={gemini_browser_mode}\n"
+            f"neighbor_count_filter={rec_neighbor_filter_enabled}\n"
+            f"neighbor_count_max={rec_neighbor_max if rec_neighbor_max is not None else 0}\n"
+            f"neighbor_count_unknown_policy=skip\n"
+            f"neighbor_count_source=profile_page\n"
+            f"python_dirty={ver_summary.get('python_dirty', 'unknown')}"
         )
 
         if comment_enabled and gemini_web_enabled and gemini_browser_mode == "extension_existing_chrome":
@@ -348,6 +368,7 @@ class FeedController:
                     return
 
         BlogPopularityService.clear_cache()
+        BlogNeighborCountService.clear_cache()
         LikeCircuitBreaker.reset()
 
         self.state_mgr.reset(total_targets=max_items)
@@ -373,11 +394,14 @@ class FeedController:
 
             feed_page = self.session.get_feed_page()
             gemini_page = self.session.get_gemini_page() if (gemini_web_enabled and gemini_browser_mode == "managed_playwright") else None
-            stats_page = self.session.get_stats_page() if (
-                like_enabled and
-                not (source_type == FeedSourceType.NEIGHBOR and neighbor_like_sweep_mode) and
-                self.config.get("daily_visitor_guard_enabled", True)
-            ) else None
+            visitor_lookup_needed = bool(
+                like_enabled
+                and not (source_type == FeedSourceType.NEIGHBOR and neighbor_like_sweep_mode)
+                and self.config.get("daily_visitor_guard_enabled", True)
+            )
+            # 추천피드 이웃수 필터는 일 방문자 가드 OFF 상태에서도 프로필 조회 페이지가 필요하다
+            stats_page_needed = visitor_lookup_needed or rec_neighbor_filter_enabled
+            stats_page = self.session.get_stats_page() if stats_page_needed else None
 
             self.state_mgr.update(new_state=FeedState.OPENING_SOURCE, message=f"피드 소스({source_type.value}) 접속 중...")
 
@@ -395,18 +419,17 @@ class FeedController:
                     posts_per_query=int(self.config.get("posts_per_query", 3))
                 )
             elif source_type == FeedSourceType.RECOMMENDATION:
-                rec_neighbor_max = self.config.get("recommendation_neighbor_count_max")
-                try:
-                    rec_neighbor_max = int(rec_neighbor_max) if rec_neighbor_max is not None else None
-                    if rec_neighbor_max is not None and rec_neighbor_max < 0:
-                        rec_neighbor_max = 0
-                except (ValueError, TypeError):
-                    rec_neighbor_max = None
+                neighbor_resolver = None
+                if rec_neighbor_filter_enabled:
+                    neighbor_resolver = lambda blog_id: BlogNeighborCountService.get_neighbor_count(
+                        stats_page, blog_id, stop_event=self.stop_event
+                    )
                 source = RecommendationFeedSource(
                     feed_page,
                     max_items=max_items,
                     stop_event=self.stop_event,
                     neighbor_count_max=rec_neighbor_max,
+                    neighbor_count_resolver=neighbor_resolver,
                 )
             else:
                 source = DirectUrlSource(direct_urls)
@@ -527,6 +550,10 @@ class FeedController:
                     self.run_control.checkpoint("before_feed_discovery")
                     self.state_mgr.update(new_state=FeedState.DISCOVERING, message="피드 목록에서 게시글 탐색 중...")
                     discovered = source.discover_posts()
+
+                    if getattr(source, "resolver_broken", False) is True:
+                        final_close_reason = "neighbor_filter_unavailable"
+                        break
 
                     new_posts = [p for p in discovered if p.key not in seen_candidate_keys]
 
@@ -900,6 +927,21 @@ class FeedController:
                 if final_close_reason in ("SWEEP_CONSECUTIVE_ALREADY_LIKED_4", "consecutive_identical_error_3"):
                     break
 
+            if (
+                source_type == FeedSourceType.RECOMMENDATION
+                and rec_neighbor_filter_enabled
+                and isinstance(source, RecommendationFeedSource)
+            ):
+                nst = source.neighbor_stats
+                logger.log(
+                    f"추천피드 이웃수 필터\n"
+                    f"- 상한: {rec_neighbor_max:,}명\n"
+                    f"- 프로필 조회: {nst['lookups']}건\n"
+                    f"- 이웃수 확인 성공: {nst['known']}건\n"
+                    f"- 상한 초과 제외: {nst['blocked']}건\n"
+                    f"- 확인 불가 제외: {nst['unknown']}건"
+                )
+
             if self.stop_event.is_set():
                 self.state_mgr.update(new_state=FeedState.STOPPED, message="사용자에 의해 작업이 중지되었습니다.")
                 logger.log("⏹ [ASSISTANT] 사용자 요청으로 작업 중지 완료.", "WARNING")
@@ -915,6 +957,12 @@ class FeedController:
                     f"  - 신규 공감: {neighbor_new_likes}개\n"
                     f"  - 기존 공감: {neighbor_already_liked}개\n"
                 )
+            elif final_close_reason == "neighbor_filter_unavailable":
+                self.state_mgr.update(
+                    new_state=FeedState.ERROR,
+                    message="추천피드 이웃수 정보를 확인할 수 없어 작업을 중단했습니다 (NEIGHBOR_FILTER_UNAVAILABLE)"
+                )
+                logger.log("❌ 추천피드 이웃수 정보를 확인할 수 없어 작업을 중단했습니다", "ERROR")
             elif final_close_reason == "consecutive_identical_error_3":
                 self.state_mgr.update(
                     new_state=FeedState.ERROR,

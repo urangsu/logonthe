@@ -1,9 +1,9 @@
-from typing import List, Optional, Set
+from typing import Any, Callable, Dict, List, Optional, Set
 import threading
 from playwright.sync_api import Page
 from app.models import FeedPost, FeedSourceType
 from app.errors import classify_playwright_failure, BrowserFailureKind, BrowserDisconnectedError
-from naver.resolver import MobileDOMResolver
+from naver.resolver import MobileDOMResolver, NeighborCountSource
 from naver.url_utils import extract_canonical_post
 from services.pacing import interruptible_wait
 from src.logger import logger
@@ -139,6 +139,7 @@ class RecommendationFeedSource(FeedSource):
         pause_event: Optional[threading.Event] = None,
         run_control = None,
         neighbor_count_max: Optional[int] = None,
+        neighbor_count_resolver: Optional[Callable[[str], Any]] = None,
     ):
         self.page = page
         self.max_items = max_items
@@ -148,9 +149,23 @@ class RecommendationFeedSource(FeedSource):
         self.preferred_category = preferred_category
         self.fallback_category = fallback_category
         self.neighbor_count_max = neighbor_count_max
+        self.neighbor_count_resolver = neighbor_count_resolver
         self.seen_keys: Set[str] = set()
         self.seen_blogs: Set[str] = set()
+        self.examined_keys: Set[str] = set()  # 같은 run 에서 재검사 금지
         self._exhausted = False
+
+        # 이웃수 필터 (프로필 조회 기반) 상태
+        self.neighbor_probe_results: Dict[str, Any] = {}  # blog_id -> NeighborCountResult (negative cache 포함)
+        self.consecutive_neighbor_unknown = 0
+        self.resolver_broken = False
+        self.neighbor_stats = {"lookups": 0, "known": 0, "allowed": 0, "blocked": 0, "unknown": 0}
+
+    NEIGHBOR_BREAKER_ATTEMPTS = 5
+
+    @property
+    def neighbor_filter_active(self) -> bool:
+        return bool(self.neighbor_count_max and self.neighbor_count_max > 0)
 
     def open(self):
         logger.log(f"[SOURCE] 탐색 추천 피드 접속: {self.URL}")
@@ -252,16 +267,23 @@ class RecommendationFeedSource(FeedSource):
 
         cards_seen = card_count
         cards_parsed = 0
+        cards_already_examined = 0
         cards_topic_blocked = 0
-        cards_neighbor_blocked = 0
-        cards_neighbor_unknown = 0
+        cards_topic_eligible = 0
         cards_same_blog = 0
         card_dom_errors = 0
+        lookups_before = self.neighbor_stats["lookups"]
+        known_before = self.neighbor_stats["known"]
+        allowed_before = self.neighbor_stats["allowed"]
+        blocked_before = self.neighbor_stats["blocked"]
+        unknown_before = self.neighbor_stats["unknown"]
 
         from naver.discovery.topic_filter import DiscoveryTopicFilter
 
         for idx in range(card_count):
             if self.stop_event and self.stop_event.is_set():
+                break
+            if self.resolver_broken:
                 break
 
             try:
@@ -276,38 +298,29 @@ class RecommendationFeedSource(FeedSource):
 
                 title = MobileDOMResolver.get_card_title(card)
                 author = MobileDOMResolver.get_card_author(card)
-                neighbor_count = MobileDOMResolver.get_card_neighbor_count(card)
-                try:
-                    snippet = card.inner_text().strip()
-                except Exception:
-                    snippet = ""
 
                 post = extract_canonical_post(raw_href, FeedSourceType.RECOMMENDATION, title=title, author=author)
                 if not post:
                     continue
 
-                post.neighbor_count = neighbor_count
+                # 이미 판정(허용/차단/UNKNOWN)한 카드는 같은 run 에서 재검사하지 않는다
+                if post.key in self.examined_keys:
+                    cards_already_examined += 1
+                    continue
+                self.examined_keys.add(post.key)
                 cards_parsed += 1
 
-                # 추천피드 작성자 이웃 수 상한 필터 (P0: 초과 시 상세 진입/좋아요/댓글 차단)
-                if neighbor_count is None:
-                    cards_neighbor_unknown += 1
-                elif self.neighbor_count_max and self.neighbor_count_max > 0:
-                    if neighbor_count > self.neighbor_count_max:
-                        cards_neighbor_blocked += 1
-                        logger.log(
-                            f"  ⏭️ [SOURCE][NEIGHBOR_COUNT_FILTER] blog={post.blog_id} "
-                            f"count={neighbor_count} max={self.neighbor_count_max} -> skip"
-                        )
-                        continue
-
-                # 동일 블로그 1세션 1글 제한
+                # 1) 동일 블로그 1세션 1글 제한 (프로필 조회 전에 최대한 거른다)
                 if post.blog_id in self.seen_blogs:
                     cards_same_blog += 1
                     logger.log(f"  ⏭️ [SOURCE] 동일 블로그 1세션 1글 제한에 따라 스킵: {post.blog_id}")
                     continue
 
-                # Positive category + Contextual negative gate
+                # 2) Topic filter (버릴 글에 프로필 조회 비용을 쓰지 않는다)
+                try:
+                    snippet = card.inner_text().strip()
+                except Exception:
+                    snippet = ""
                 decision = DiscoveryTopicFilter.evaluate(title or "", snippet, stage="card")
                 if not decision.allowed:
                     cards_topic_blocked += 1
@@ -316,6 +329,17 @@ class RecommendationFeedSource(FeedSource):
                         f"evidence={list(decision.evidence)} title=\"{title}\""
                     )
                     continue
+                cards_topic_eligible += 1
+
+                # 3) 이웃수 필터: 프로필 페이지 조회 (카드 DOM 비의존)
+                if self.neighbor_filter_active:
+                    verdict = self._check_neighbor_count(post.blog_id)
+                    if verdict == "stopped":
+                        break
+                    if verdict != "allow":
+                        if self.resolver_broken:
+                            break
+                        continue
 
                 if post.key not in self.seen_keys:
                     self.seen_keys.add(post.key)
@@ -328,14 +352,82 @@ class RecommendationFeedSource(FeedSource):
                 card_dom_errors += 1
                 continue
 
+        st = self.neighbor_stats
         logger.log(
-            f"[DISCOVERY_SUMMARY] recommendation seen={cards_seen} parsed={cards_parsed} "
-            f"allowed={len(discovered)} topicBlocked={cards_topic_blocked} "
-            f"neighborBlocked={cards_neighbor_blocked} neighborUnknown={cards_neighbor_unknown} "
-            f"sameBlog={cards_same_blog} domError={card_dom_errors}"
+            f"[DISCOVERY_SUMMARY]\nrecommendation\n"
+            f"seen={cards_seen}\nparsed={cards_parsed}\nalreadyExamined={cards_already_examined}\n"
+            f"topicEligible={cards_topic_eligible}\ntopicBlocked={cards_topic_blocked}\n"
+            f"sameBlog={cards_same_blog}\n"
+            f"neighborLookups={st['lookups'] - lookups_before}\n"
+            f"neighborKnown={st['known'] - known_before}\n"
+            f"neighborAllowed={st['allowed'] - allowed_before}\n"
+            f"neighborBlocked={st['blocked'] - blocked_before}\n"
+            f"neighborUnknown={st['unknown'] - unknown_before}\n"
+            f"allowed={len(discovered)}\ndomError={card_dom_errors}"
         )
 
         return discovered
+
+    def _check_neighbor_count(self, blog_id: str) -> str:
+        """
+        프로필 조회로 이웃수를 판정한다.
+        returns: "allow" | "block" | "unknown" | "stopped"
+        UNKNOWN 은 해당 블로그만 skip(fail-safe). 시스템 전체 UNKNOWN 이면 resolver_broken 설정.
+        """
+        if self.neighbor_count_resolver is None:
+            self._trip_breaker(reason="resolver_not_configured")
+            return "unknown"
+
+        result = self.neighbor_probe_results.get(blog_id)
+        if result is None:
+            result = self.neighbor_count_resolver(blog_id)
+            if getattr(result, "error", None) == "stopped":
+                return "stopped"
+            self.neighbor_probe_results[blog_id] = result
+            self.neighbor_stats["lookups"] += 1
+
+            if result.value is None:
+                self.neighbor_stats["unknown"] += 1
+                self.consecutive_neighbor_unknown += 1
+            else:
+                self.neighbor_stats["known"] += 1
+                self.consecutive_neighbor_unknown = 0
+
+        value = result.value
+        if value is None:
+            logger.log(
+                f"  ⏭️ [NEIGHBOR_COUNT_UNKNOWN] blog={blog_id} error={result.error} -> 개별 skip (fail-safe)"
+            )
+            st = self.neighbor_stats
+            if st["known"] == 0 and st["lookups"] >= self.NEIGHBOR_BREAKER_ATTEMPTS:
+                self._trip_breaker(reason="no_known_after_attempts")
+            return "unknown"
+
+        if value > self.neighbor_count_max:
+            self.neighbor_stats["blocked"] += 1
+            logger.log(
+                f"  ⏭️ [NEIGHBOR_COUNT_FILTER] blog={blog_id} count={value} "
+                f"max={self.neighbor_count_max} -> skip"
+            )
+            return "block"
+
+        self.neighbor_stats["allowed"] += 1
+        logger.log(
+            f"  ✅ [NEIGHBOR_COUNT_FILTER] blog={blog_id} count={value} max={self.neighbor_count_max} -> allow"
+        )
+        return "allow"
+
+    def _trip_breaker(self, reason: str) -> None:
+        if self.resolver_broken:
+            return
+        self.resolver_broken = True
+        st = self.neighbor_stats
+        logger.log(
+            f"🚨 [NEIGHBOR_PROFILE_RESOLVER_BROKEN]\n"
+            f"attempts={st['lookups']}\nknown={st['known']}\nunknown={st['unknown']}\nreason={reason}",
+            "ERROR",
+        )
+
 
     def load_more(self) -> bool:
         if self.is_exhausted():

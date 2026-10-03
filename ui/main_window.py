@@ -418,54 +418,68 @@ class MainWindow(ctk.CTk):
         ).pack(side="left", padx=1)
 
         # ==================== [탭 2: 세부 옵션] ====================
-        # 1. Like Popularity Guard
+        # 1. Guard options (공감 / 방문자 / 추천피드 이웃수) — 정렬된 그리드 카드
         guard_frame = ctk.CTkFrame(tab_settings, border_width=1, border_color="#334155")
         guard_frame.pack(fill="x", padx=4, pady=(2, 2))
 
-        g_head = ctk.CTkFrame(guard_frame, fg_color="transparent")
-        g_head.pack(fill="x", padx=6, pady=(2, 1))
+        ctk.CTkLabel(
+            guard_frame, text="제외 기준 (가드)", font=ctk.CTkFont(size=11, weight="bold"), anchor="w"
+        ).pack(fill="x", padx=10, pady=(4, 0))
 
+        g_grid = ctk.CTkFrame(guard_frame, fg_color="transparent")
+        g_grid.pack(fill="x", padx=10, pady=(2, 4))
+        g_grid.grid_columnconfigure(0, minsize=250)
+        g_grid.grid_columnconfigure(2, weight=1)
+        hint_font = ctk.CTkFont(size=11)
+        row_font = ctk.CTkFont(size=11, weight="bold")
+
+        # Row 0: 공감수
         self.like_guard_chk_var = ctk.BooleanVar(value=self.config_service.get("like_popularity_guard_enabled", True))
         ctk.CTkCheckBox(
-            g_head, text="🛡️ 공감수 높은 글 제외 (기준: ", font=ctk.CTkFont(size=11, weight="bold"),
+            g_grid, text="공감수 높은 글 제외", font=row_font,
             variable=self.like_guard_chk_var, text_color="#F472B6"
-        ).pack(side="left", padx=2)
-
-        self.like_thresh_entry = ctk.CTkEntry(g_head, width=38, height=20, font=ctk.CTkFont(size=11))
-        self.like_thresh_entry.pack(side="left", padx=1)
+        ).grid(row=0, column=0, sticky="w", pady=2)
+        self.like_thresh_entry = ctk.CTkEntry(g_grid, width=64, height=22, font=hint_font, justify="right")
+        self.like_thresh_entry.grid(row=0, column=1, padx=6, pady=2)
         self.like_thresh_entry.insert(0, str(self.config_service.get("like_count_skip_threshold", 999)))
         add_mac_clipboard_support(self.like_thresh_entry, self)
-        ctk.CTkLabel(g_head, text="개 이상 스킵)", font=ctk.CTkFont(size=11)).pack(side="left", padx=(1, 10))
+        ctk.CTkLabel(g_grid, text="개 이상이면 스킵", font=hint_font, anchor="w").grid(row=0, column=2, sticky="w")
 
+        # Row 1: 일 방문자
         self.visitor_guard_chk_var = ctk.BooleanVar(value=self.config_service.get("daily_visitor_guard_enabled", True))
         ctk.CTkCheckBox(
-            g_head, text="🛡️ 일 방문자 많은 블로그 제외 (기준: ", font=ctk.CTkFont(size=11, weight="bold"),
+            g_grid, text="일 방문자 많은 블로그 제외", font=row_font,
             variable=self.visitor_guard_chk_var, text_color="#F472B6"
-        ).pack(side="left", padx=2)
-
-        self.visitor_thresh_entry = ctk.CTkEntry(g_head, width=48, height=20, font=ctk.CTkFont(size=11))
-        self.visitor_thresh_entry.pack(side="left", padx=1)
+        ).grid(row=1, column=0, sticky="w", pady=2)
+        self.visitor_thresh_entry = ctk.CTkEntry(g_grid, width=64, height=22, font=hint_font, justify="right")
+        self.visitor_thresh_entry.grid(row=1, column=1, padx=6, pady=2)
         self.visitor_thresh_entry.insert(0, str(self.config_service.get("daily_visitor_skip_threshold", 10000)))
         add_mac_clipboard_support(self.visitor_thresh_entry, self)
-        ctk.CTkLabel(g_head, text="명 초과 스킵)", font=ctk.CTkFont(size=11)).pack(side="left", padx=1)
+        ctk.CTkLabel(g_grid, text="명 초과 시 스킵", font=hint_font, anchor="w").grid(row=1, column=2, sticky="w")
 
-        g_row2 = ctk.CTkFrame(guard_frame, fg_color="transparent")
-        g_row2.pack(fill="x", padx=6, pady=(1, 1))
-        ctk.CTkLabel(g_row2, text="🛡️ 추천피드 작성자 이웃 수 상한 (기준: ", font=ctk.CTkFont(size=11, weight="bold"), text_color="#F472B6").pack(side="left", padx=2)
+        # Row 2: 추천피드 작성자 이웃수 (추천피드 전용 / 0 = 제한 없음)
+        ctk.CTkLabel(
+            g_grid, text="추천피드 작성자 이웃 수 상한", font=row_font, text_color="#F472B6", anchor="w"
+        ).grid(row=2, column=0, sticky="w", pady=2, padx=(26, 0))
         self.settings_rec_neighbor_max_entry = ctk.CTkEntry(
-            g_row2, width=54, height=20, font=ctk.CTkFont(size=11),
+            g_grid, width=64, height=22, font=hint_font, justify="right",
             textvariable=self.recommendation_neighbor_count_max_var
         )
-        self.settings_rec_neighbor_max_entry.pack(side="left", padx=1)
+        self.settings_rec_neighbor_max_entry.grid(row=2, column=1, padx=6, pady=2)
         add_mac_clipboard_support(self.settings_rec_neighbor_max_entry, self)
-        ctk.CTkLabel(g_row2, text="명 초과 스킵 / 0: 제한 없음, 서로이웃 미적용)", font=ctk.CTkFont(size=11)).pack(side="left", padx=1)
+        ctk.CTkLabel(
+            g_grid, text="명 초과 시 스킵  (0 = 제한 없음 · 추천피드에만 적용)", font=hint_font, anchor="w"
+        ).grid(row=2, column=2, sticky="w")
 
-        g_sub = ctk.CTkFrame(guard_frame, fg_color="transparent")
-        g_sub.pack(fill="x", padx=6, pady=(0, 2))
-        ctk.CTkLabel(g_sub, text="방문자 확인 불가 시:", font=ctk.CTkFont(size=10)).pack(side="left", padx=2)
+        # Row 3: 방문자 확인 불가 정책
+        ctk.CTkLabel(
+            g_grid, text="방문자 확인 불가 시", font=ctk.CTkFont(size=11), anchor="w"
+        ).grid(row=3, column=0, sticky="w", pady=(4, 0), padx=(26, 0))
+        g_sub = ctk.CTkFrame(g_grid, fg_color="transparent")
+        g_sub.grid(row=3, column=1, columnspan=2, sticky="w", padx=6, pady=(4, 0))
         self.unknown_policy_var = ctk.StringVar(value=self.config_service.get("daily_visitor_unknown_policy", "skip_like"))
-        ctk.CTkRadioButton(g_sub, text="공감 안 함 (권장)", variable=self.unknown_policy_var, value="skip_like", font=ctk.CTkFont(size=10)).pack(side="left", padx=3)
-        ctk.CTkRadioButton(g_sub, text="공감 진행", variable=self.unknown_policy_var, value="continue", font=ctk.CTkFont(size=10)).pack(side="left", padx=3)
+        ctk.CTkRadioButton(g_sub, text="공감 안 함 (권장)", variable=self.unknown_policy_var, value="skip_like", font=ctk.CTkFont(size=10)).pack(side="left", padx=(0, 10))
+        ctk.CTkRadioButton(g_sub, text="공감 진행", variable=self.unknown_policy_var, value="continue", font=ctk.CTkFont(size=10)).pack(side="left")
 
         # 2. Template & Suffixes
         tmpl_frame = ctk.CTkFrame(tab_settings)

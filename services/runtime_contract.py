@@ -110,8 +110,35 @@ def get_runtime_versions_summary(config: Optional[dict] = None) -> dict[str, str
     except Exception:
         build = "unknown"
     cfg_ver = str(config.get("schema_version", "13.3") if isinstance(config, dict) else "13.3")
+    dirty, dirty_files = get_python_git_dirty()
     return {
         "python_commit": commit,
+        "python_dirty": dirty,
+        "dirty_files": dirty_files,
         "extension_build": build,
         "config_version": cfg_ver,
     }
+
+
+def get_python_git_dirty() -> tuple[str, str]:
+    """git 작업트리 dirty 여부와 변경 파일 목록(최대 12개). 확인 불가 시 ("unknown", "")."""
+    import subprocess
+
+    try:
+        root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+        git_bin = "git"
+        for candidate in ("/opt/homebrew/bin/git", "/usr/local/bin/git"):
+            if os.path.exists(candidate):
+                git_bin = candidate
+                break
+        out = subprocess.run(
+            [git_bin, "-C", root, "status", "--porcelain"],
+            capture_output=True, text=True, timeout=3,
+        )
+        if out.returncode != 0:
+            return "unknown", ""
+        files = [ln[3:].strip() for ln in out.stdout.splitlines() if ln.strip()]
+        shown = ",".join(files[:12]) + ("..." if len(files) > 12 else "")
+        return ("true" if files else "false"), shown
+    except Exception:
+        return "unknown", ""
