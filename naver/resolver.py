@@ -421,21 +421,38 @@ class MobileDOMResolver:
         if not page:
             return None
         selectors = [
+            "a.u_likeit_button .u_likeit_text._count.num, button.u_likeit_button .u_likeit_text._count.num",
             "a.u_likeit_button ._count",
             "button.u_likeit_button ._count",
-            "a.u_likeit_button .u_likeit_text",
-            "a.u_likeit_list_button[data-type='like'] ._count",
-            ".u_likeit_text._count"
+            ".u_likeit_text._count.num",
+            ".u_likeit_text._count",
+            "a.u_likeit_button .u_likeit_text"
         ]
+        from naver.count_parser import parse_compact_count
+        frames = MobileDOMResolver._safe_get_frames(page)
         for sel in selectors:
-            try:
-                el = page.locator(sel).first
-                if el.count() > 0:
-                    txt = el.inner_text().strip()
-                    if txt:
-                        return txt
-            except Exception:
-                pass
+            values = {}
+            for frame in frames:
+                try:
+                    elements = frame.locator(sel)
+                    for index in range(elements.count()):
+                        el = elements.nth(index)
+                        if not el.is_visible():
+                            continue
+                        if el.evaluate("e => !!e.closest('.u_cbox_comment, .u_likeit_layer, .u_likeit_list, .u_likeit_list_button, .u_likeit_list_btn')"):
+                            continue
+                        txt = el.inner_text().strip()
+                        if not re.fullmatch(r"[0-9][0-9,\s]*(?:\.[0-9]+)?\s*[천만kKmM+]?", txt):
+                            continue
+                        value = parse_compact_count(re.sub(r"\s+", "", txt))
+                        if value is not None:
+                            values[value] = txt
+                except Exception:
+                    continue
+            if len(values) > 1:
+                return None
+            if values:
+                return next(iter(values.values()))
         return None
 
     # 하위 호환성 메서드 (기존 LikeButton 호출 대체)

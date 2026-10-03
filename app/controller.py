@@ -355,7 +355,9 @@ class FeedController:
             f"neighbor_count_filter={rec_neighbor_filter_enabled}\n"
             f"neighbor_count_max={rec_neighbor_max if rec_neighbor_max is not None else 0}\n"
             f"neighbor_count_unknown_policy=skip\n"
-            f"neighbor_count_source=profile_page\n"
+            f"neighbor_count_source=detail_then_profile\n"
+            f"eligibility_stage=detail\n"
+            f"eligibility_scope=whole_post\n"
             f"python_dirty={ver_summary.get('python_dirty', 'unknown')}"
         )
 
@@ -388,14 +390,14 @@ class FeedController:
                 return
 
             unconf = self.history.get_unconfirmed_posts() if hasattr(self.history, "get_unconfirmed_posts") else None
-            if comment_enabled and isinstance(unconf, dict) and unconf:
+            if source_type != FeedSourceType.RECOMMENDATION and comment_enabled and isinstance(unconf, dict) and unconf:
                 self.state_mgr.update(message="미확정 댓글 서버 상태 복구 확인 중...")
                 self.recover_unconfirmed_submissions()
 
             feed_page = self.session.get_feed_page()
             gemini_page = self.session.get_gemini_page() if (gemini_web_enabled and gemini_browser_mode == "managed_playwright") else None
             visitor_lookup_needed = bool(
-                like_enabled
+                (like_enabled or source_type == FeedSourceType.RECOMMENDATION)
                 and not (source_type == FeedSourceType.NEIGHBOR and neighbor_like_sweep_mode)
                 and self.config.get("daily_visitor_guard_enabled", True)
             )
@@ -419,17 +421,12 @@ class FeedController:
                     posts_per_query=int(self.config.get("posts_per_query", 3))
                 )
             elif source_type == FeedSourceType.RECOMMENDATION:
-                neighbor_resolver = None
-                if rec_neighbor_filter_enabled:
-                    neighbor_resolver = lambda blog_id: BlogNeighborCountService.get_neighbor_count(
-                        stats_page, blog_id, stop_event=self.stop_event
-                    )
                 source = RecommendationFeedSource(
                     feed_page,
-                    max_items=max_items,
+                    max_items=max_items * 5,
                     stop_event=self.stop_event,
-                    neighbor_count_max=rec_neighbor_max,
-                    neighbor_count_resolver=neighbor_resolver,
+                    pause_event=self.pause_event,
+                    run_control=self.run_control,
                 )
             else:
                 source = DirectUrlSource(direct_urls)
@@ -551,10 +548,6 @@ class FeedController:
                     self.state_mgr.update(new_state=FeedState.DISCOVERING, message="피드 목록에서 게시글 탐색 중...")
                     discovered = source.discover_posts()
 
-                    if getattr(source, "resolver_broken", False) is True:
-                        final_close_reason = "neighbor_filter_unavailable"
-                        break
-
                     new_posts = [p for p in discovered if p.key not in seen_candidate_keys]
 
                     if not new_posts:
@@ -615,7 +608,7 @@ class FeedController:
                     is_local_unconfirmed = (self.history.is_comment_unconfirmed(post.key) is True) if hasattr(self.history, "is_comment_unconfirmed") else False
 
                     # 등록 결과 불명(SUBMISSION_UNKNOWN) 상태인 포스트의 재확인 및 복구 절차
-                    if is_local_unconfirmed and comment_enabled:
+                    if source_type != FeedSourceType.RECOMMENDATION and is_local_unconfirmed and comment_enabled:
                         logger.log(f"  🔍 [RECOVERY] 이전 실행 미확정(SUBMISSION_UNKNOWN) 포스트 감지: {post.key}. 본인 댓글 존재 여부를 서버에서 재확인합니다...")
                         try:
                             check_page = self.session.get_detail_page()
@@ -655,7 +648,8 @@ class FeedController:
                         continue
 
                     # 실제 처리 진입 대상 카운트 등록
-                    attempted_post_keys.add(post.key)
+                    if source_type != FeedSourceType.RECOMMENDATION:
+                        attempted_post_keys.add(post.key)
 
                     sample_selected = None
                     sample_roll = None
@@ -726,6 +720,8 @@ class FeedController:
                     result: Optional[PostProcessResult] = None
                     try:
                         result = processor.process(detail_page, post, action_plan=action_plan)
+                        if source_type == FeedSourceType.RECOMMENDATION and result.eligibility and result.eligibility.allowed:
+                            attempted_post_keys.add(post.key)
                         consecutive_identical_error_count = 0
                         last_unexpected_error = ""
                         self.history.record_result(result)
@@ -769,6 +765,8 @@ class FeedController:
                             try:
                                 detail_page = self.session.get_detail_page()
                                 result = processor.process(detail_page, post, action_plan=action_plan)
+                                if source_type == FeedSourceType.RECOMMENDATION and result.eligibility and result.eligibility.allowed:
+                                    attempted_post_keys.add(post.key)
                                 consecutive_identical_error_count = 0
                                 last_unexpected_error = ""
                                 self.history.record_result(result)
@@ -801,6 +799,7 @@ class FeedController:
                                 failed_res = PostProcessResult(
                                     post=post,
                                     like_result=preserved_like,
+                                    eligibility=getattr(curr_res, "eligibility", None),
                                     comment_result=CommentProcessResult(status=CommentSubmitState.FAILED, error=str(rpe2))
                                 )
                                 self.history.record_result(failed_res)
@@ -820,6 +819,7 @@ class FeedController:
                             failed_res = PostProcessResult(
                                 post=post,
                                 like_result=preserved_like,
+                                eligibility=getattr(curr_res, "eligibility", None),
                                 comment_result=CommentProcessResult(status=CommentSubmitState.FAILED, error=str(rpe))
                             )
                             self.history.record_result(failed_res)
@@ -861,6 +861,7 @@ class FeedController:
                         failed_res = PostProcessResult(
                             post=post,
                             like_result=preserved_like,
+                            eligibility=getattr(curr_res, "eligibility", None),
                             comment_result=CommentProcessResult(status=CommentSubmitState.FAILED, error=str(pe))
                         )
                         self.history.record_result(failed_res)
@@ -881,6 +882,12 @@ class FeedController:
                             )
                             final_close_reason = "consecutive_identical_error_3"
                             break
+                    finally:
+                        if source_type == FeedSourceType.RECOMMENDATION:
+                            current_result = getattr(processor, "current_result", None)
+                            eligibility = getattr(current_result, "eligibility", None)
+                            if current_result and current_result.post.key == post.key and eligibility and eligibility.allowed:
+                                attempted_post_keys.add(post.key)
 
                     if self.stop_event.is_set():
                         final_close_reason = "user_stop"
@@ -929,17 +936,15 @@ class FeedController:
 
             if (
                 source_type == FeedSourceType.RECOMMENDATION
-                and rec_neighbor_filter_enabled
                 and isinstance(source, RecommendationFeedSource)
             ):
-                nst = source.neighbor_stats
+                guard_service = processor.post_eligibility_service
+                decisions = list(guard_service.decisions.values())
                 logger.log(
-                    f"추천피드 이웃수 필터\n"
-                    f"- 상한: {rec_neighbor_max:,}명\n"
-                    f"- 프로필 조회: {nst['lookups']}건\n"
-                    f"- 이웃수 확인 성공: {nst['known']}건\n"
-                    f"- 상한 초과 제외: {nst['blocked']}건\n"
-                    f"- 확인 불가 제외: {nst['unknown']}건"
+                    f"[RECOMMENDATION_GUARD_SUMMARY] blogsQueried={len(guard_service.reader.lookup_blogs)} "
+                    f"profileNavigations={guard_service.reader.navigation_count} "
+                    f"allowed={sum(d.allowed for d in decisions)} excluded={sum(not d.allowed for d in decisions)} "
+                    f"candidateScan={len(source.examined_keys)}/{max_candidate_scan}"
                 )
 
             if self.stop_event.is_set():
@@ -957,12 +962,6 @@ class FeedController:
                     f"  - 신규 공감: {neighbor_new_likes}개\n"
                     f"  - 기존 공감: {neighbor_already_liked}개\n"
                 )
-            elif final_close_reason == "neighbor_filter_unavailable":
-                self.state_mgr.update(
-                    new_state=FeedState.ERROR,
-                    message="추천피드 이웃수 정보를 확인할 수 없어 작업을 중단했습니다 (NEIGHBOR_FILTER_UNAVAILABLE)"
-                )
-                logger.log("❌ 추천피드 이웃수 정보를 확인할 수 없어 작업을 중단했습니다", "ERROR")
             elif final_close_reason == "consecutive_identical_error_3":
                 self.state_mgr.update(
                     new_state=FeedState.ERROR,
@@ -975,10 +974,17 @@ class FeedController:
                 sampled_out = st.sampled_out_count if st else 0
                 gen_success = st.generated_success_count if st else 0
                 sub_unknown = st.submission_unknown_count if st else 0
-                self.state_mgr.update(new_state=FeedState.COMPLETED, message=f"작업 완료! (총 {len(attempted_post_keys)}개 처리)")
+                completion_reason = (
+                    "target_reached" if len(attempted_post_keys) >= max_items else
+                    "scan_limit" if len(seen_candidate_keys) >= max_candidate_scan or (
+                        isinstance(source, RecommendationFeedSource) and len(source.examined_keys) >= max_candidate_scan
+                    ) else "candidates_exhausted"
+                )
+                self.state_mgr.update(new_state=FeedState.COMPLETED, message=f"작업 완료! ({completion_reason}, 총 {len(attempted_post_keys)}개 처리)")
                 logger.log(
                     f"✅ [ASSISTANT] 전체 피드 작업 완료!\n"
                     f"  - 처리 포스트: {len(attempted_post_keys)}개\n"
+                    f"  - 종료 사유: {completion_reason}\n"
                     f"  - 공감 성공: {self.like_success_count}개\n"
                     f"  - 랜덤 댓글 표본: 선정 {sampled_in}개 / 제외 {sampled_out}개\n"
                     f"  - Gemini 생성 성공: {gen_success}개\n"

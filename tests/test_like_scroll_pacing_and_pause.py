@@ -19,6 +19,40 @@ class TestLikeScrollPacingAndPause(unittest.TestCase):
         LikeCircuitBreaker.reset()
         self.mock_page = MagicMock()
 
+    def test_pause_after_summary_blocks_option_click(self):
+        from app.run_control import RunControl
+        control = RunControl()
+        summary_clicked = threading.Event()
+        option = MagicMock()
+        option.count.return_value = 1
+        option.is_visible.return_value = False
+        summary = MagicMock()
+        summary.count.return_value = 1
+        def pause_after_summary(**kwargs):
+            control.request_pause("test")
+            summary_clicked.set()
+        summary.click.side_effect = pause_after_summary
+        before = ReactionStateResult(False, ReactionType.NONE, LikeConfidence.HIGH)
+        after = ReactionStateResult(True, ReactionType.LIKE, LikeConfidence.HIGH)
+        results = []
+        with patch.object(LikeTransactionService, "resolve_reaction_state", side_effect=[before, before, after]), \
+             patch("services.like_transaction.MobileDOMResolver.get_reaction_like_option", return_value=option), \
+             patch("services.like_transaction.MobileDOMResolver.get_reaction_summary_button", return_value=summary):
+            worker = threading.Thread(target=lambda: results.append(LikeTransactionService.execute_like_transaction(
+                self.mock_page, not_before_monotonic=time.monotonic(), run_control=control)))
+            worker.start()
+            try:
+                self.assertTrue(summary_clicked.wait(2))
+                time.sleep(0.1)
+                option.click.assert_not_called()
+                self.assertTrue(worker.is_alive())
+            finally:
+                control.request_resume()
+                worker.join(3)
+            self.assertFalse(worker.is_alive())
+            option.click.assert_called_once()
+            self.assertEqual(results[0].state_after, LikeState.LIKED)
+
     def test_pre_like_click_never_faster_than_target_deadline(self):
         """1. 스크롤 유무와 관계없이 공감 클릭은 설정한 목표시각보다 빠르지 않아야 함"""
         target_delay = 0.35

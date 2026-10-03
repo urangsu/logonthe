@@ -387,6 +387,9 @@ class LikeTransactionService:
             # --- [Path A]: 실제 공감 옵션이 이미 화면에 보이는 경우 ---
             if is_opt_visible:
                 logger.log("  🤍 [LIKE] 공감 옵션이 노출되어 있어 직접 클릭합니다 (Path A).")
+                interruption = _check_and_wait(0, "before_like_option_click")
+                if interruption:
+                    return interruption
                 try:
                     click_dispatched = True
                     like_opt.click(timeout=2000)
@@ -407,6 +410,9 @@ class LikeTransactionService:
                     logger.log("  ⚠️ [LIKE] 공감 요약 버튼을 찾지 못했습니다.", "WARNING")
                     return LikeProcessResult(state_before=LikeState.NOT_LIKED, action_taken=False, state_after=LikeState.UNKNOWN, error="summary_button_not_found")
 
+                interruption = _check_and_wait(0, "before_like_summary_click")
+                if interruption:
+                    return interruption
                 try:
                     click_dispatched = True
                     summary_btn.click(timeout=2000)
@@ -419,7 +425,9 @@ class LikeTransactionService:
                         return LikeProcessResult(state_before=LikeState.NOT_LIKED, action_taken=True, state_after=LikeState.LIKED)
                     raise
 
-                interruptible_wait(stop_event, 0.4)
+                interruption = _check_and_wait(0.4, "after_like_summary_click")
+                if interruption:
+                    return interruption
 
                 # 3-1. Summary 클릭 자체가 이미 공감을 활성화했는지 즉시 재검증 (Summary Direct Activation)
                 after_summary = cls.resolve_reaction_state(page)
@@ -431,6 +439,9 @@ class LikeTransactionService:
                 like_opt = MobileDOMResolver.get_reaction_like_option(page)
                 try:
                     like_opt.wait_for(state="visible", timeout=3000)
+                    interruption = _check_and_wait(0, "before_like_option_click")
+                    if interruption:
+                        return interruption
                     logger.log("  🤍 [LIKE] 리액션 레이어 오픈 확인 -> 공감(data-type='like') 옵션 클릭.")
                     click_dispatched = True
                     like_opt.click(timeout=1500)

@@ -27,6 +27,7 @@ from naver.content_extractor import ContentContextExtractor
 from services.draft import DraftService, normalize_naver_comment_text, normalize_comment_punctuation
 from services.contextual_draft import ContextualDraftEngine
 from services.like_eligibility import LikeEligibilityService, LikeEligibility
+from services.post_eligibility import PostEligibilityService
 from services.like_transaction import LikeTransactionService, LikeConfidence, LikeCircuitBreaker
 from services.food_comment_focus import FoodCommentFocus
 from services.ai_prompt import AIPromptBuilder
@@ -342,6 +343,8 @@ class PostProcessor:
             self.pause_event = self.run_control.pause_event
             self.skip_event = self.run_control.skip_event
 
+        self.post_eligibility_service = PostEligibilityService(self.config, self.run_control)
+
         if self.pacing and hasattr(self.pacing, "run_control") and not getattr(self.pacing, "run_control", None):
             self.pacing.run_control = self.run_control
 
@@ -568,13 +571,19 @@ class PostProcessor:
         if self.ai_clipboard_enabled or self.gemini_web_enabled:
             ai_prompt = gen_ctx.build_prompt(request_id=req_id)
             stats = gen_ctx.corpus_stats or {}
+            is_v35 = gen_ctx.prompt_version in ("3.5", "v3.5", "3.5.0-reaction-planned")
+            referenced = (
+                len(AIPromptBuilder.select_v3_5_style_examples(gen_ctx.corpus_examples)) if is_v35
+                else stats.get("referenced", len(gen_ctx.corpus_examples))
+            )
             logger.log(
                 f"  📝 [PROMPT] version={gen_ctx.prompt_version} "
                 f"raw_corpus_count={stats.get('total_raw', 0)} "
                 f"cleaned_corpus_count={stats.get('cleaned', 0)} "
                 f"user_edit_count={stats.get('user_edits', 0)} "
-                f"referenced_examples={stats.get('referenced', len(gen_ctx.corpus_examples))} "
-                f"recent_history_count={len(gen_ctx.recent_comments)}"
+                f"referenced_examples={referenced} "
+                f"recent_history_count={len(gen_ctx.recent_comments)} "
+                f"prompt_chars={len(ai_prompt)} revision={AIPromptBuilder.V3_5_REVISION if is_v35 else gen_ctx.prompt_version}"
             )
 
         if self.state_mgr:
@@ -754,6 +763,8 @@ class PostProcessor:
         # TargetPostGuard: 대상 글 일치 여부 확인 (Fail-Open 원천 차단)
         self.current_stage = "target_guard"
         TargetPostGuard.verify(detail_page, post)
+        if self.state_mgr:
+            self.state_mgr.update(inc_visited=True)
 
         # "본문→공감" 페이싱 초기 목표시각 설정
         pre_like_anchor_monotonic = time.monotonic()
@@ -803,6 +814,23 @@ class PostProcessor:
                 result.comment_result.status = CommentSubmitState.SKIPPED
                 result.comment_result.error = f"topic_blocked:{topic_reason}"
                 return result
+
+        if post.source == FeedSourceType.RECOMMENDATION:
+            if detail_context is None:
+                detail_context = ContentContextExtractor.extract(detail_page, post, max_chars=self.ai_context_max_chars)
+            post.title = detail_context.title or post.title
+            if detail_context.excerpt:
+                post.excerpt = detail_context.excerpt
+            self.current_stage = "post_eligibility"
+            result.eligibility = self.post_eligibility_service.evaluate(detail_page, self.stats_page, post)
+            if not result.eligibility.allowed:
+                result.comment_result = CommentProcessResult(status=CommentSubmitState.SKIPPED, error=f"post_guard:{result.eligibility.reason}")
+                result.like_result.eligibility_reason = result.eligibility.reason
+                if self.state_mgr:
+                    self.state_mgr.update(inc_guard_excluded=True, message=f"제한 제외: {result.eligibility.reason}")
+                return result
+            if self.state_mgr:
+                self.state_mgr.update(inc_guard_allowed=True)
 
         # [사전 전송 준비] 좋아요 누르기 전에 댓글 생성부터 제미나이에 사전 전송하여 지체 시간 최소화
         early_gemini_command: Optional[GeminiCommand] = None
@@ -910,10 +938,11 @@ class PostProcessor:
                     result.like_result = LikeProcessResult(state_before=like_state_res.state, action_taken=False, state_after=like_state_res.state, error="low_confidence_skip")
                 else:
                     # 2-2. NOT_LIKED + HIGH인 경우에만 Popularity Guard 평가 (공감 훑기 모드에서는 가드 면제)
-                    if is_sweep_mode:
+                    if is_sweep_mode or post.source == FeedSourceType.RECOMMENDATION:
                         elig_ok = True
-                        elig_like_cnt = None
-                        elig_daily_vis = None
+                        guard_metrics = result.eligibility.metrics if result.eligibility else {}
+                        elig_like_cnt = guard_metrics.get("likes", {}).get("value")
+                        elig_daily_vis = guard_metrics.get("visitors", {}).get("value")
                     else:
                         elig = LikeEligibilityService.evaluate(
                             detail_page=detail_page,

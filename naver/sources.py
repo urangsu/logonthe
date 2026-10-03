@@ -7,6 +7,7 @@ from naver.resolver import MobileDOMResolver, NeighborCountSource
 from naver.url_utils import extract_canonical_post
 from services.pacing import interruptible_wait
 from src.logger import logger
+from app.run_control import StopRequestedException
 
 
 class FeedSource:
@@ -148,30 +149,22 @@ class RecommendationFeedSource(FeedSource):
         self.pause_event = pause_event or getattr(run_control, "pause_event", None)
         self.preferred_category = preferred_category
         self.fallback_category = fallback_category
-        self.neighbor_count_max = neighbor_count_max
-        self.neighbor_count_resolver = neighbor_count_resolver
+        # Legacy constructor arguments remain accepted; guards now belong to PostProcessor.
         self.seen_keys: Set[str] = set()
         self.seen_blogs: Set[str] = set()
         self.examined_keys: Set[str] = set()  # 같은 run 에서 재검사 금지
         self._exhausted = False
 
-        # 이웃수 필터 (프로필 조회 기반) 상태
-        self.neighbor_probe_results: Dict[str, Any] = {}  # blog_id -> NeighborCountResult (negative cache 포함)
-        self.consecutive_neighbor_unknown = 0
-        self.resolver_broken = False
-        self.neighbor_stats = {"lookups": 0, "known": 0, "allowed": 0, "blocked": 0, "unknown": 0}
-
-    NEIGHBOR_BREAKER_ATTEMPTS = 5
-
-    @property
-    def neighbor_filter_active(self) -> bool:
-        return bool(self.neighbor_count_max and self.neighbor_count_max > 0)
-
     def open(self):
         logger.log(f"[SOURCE] 탐색 추천 피드 접속: {self.URL}")
         try:
+            if self.run_control:
+                self.run_control.checkpoint("before_recommendation_open")
             self.page.goto(self.URL, wait_until="domcontentloaded", timeout=20000)
-            interruptible_wait(self.stop_event, 1.5)
+            if self.run_control:
+                self.run_control.interruptible_wait(1.5, stage="after_recommendation_open")
+            else:
+                interruptible_wait(self.stop_event, 1.5, pause_event=self.pause_event)
 
             # 1. 클릭 전 카드 지문 채취
             before_cards = self.page.evaluate(
@@ -183,6 +176,8 @@ class RecommendationFeedSource(FeedSource):
             for cat_target, is_fallback in [(self.preferred_category, False), (self.fallback_category, True)]:
                 if self.stop_event and self.stop_event.is_set():
                     break
+                if self.run_control:
+                    self.run_control.checkpoint("before_recommendation_category")
 
                 click_result = self.page.evaluate("""(targetCategory) => {
                     const shown = el => !!el && !!el.getClientRects().length && getComputedStyle(el).visibility !== 'hidden';
@@ -207,7 +202,10 @@ class RecommendationFeedSource(FeedSource):
                 }""", cat_target)
 
                 if click_result and click_result.get("status") == "clicked":
-                    interruptible_wait(self.stop_event, 1.2)
+                    if self.run_control:
+                        self.run_control.interruptible_wait(1.2, stage="after_recommendation_category")
+                    else:
+                        interruptible_wait(self.stop_event, 1.2, pause_event=self.pause_event)
                     # 3. 클릭 후 실제 active/aria-selected 상태 또는 카드 목록 변화 검증
                     verification = self.page.evaluate("""(args) => {
                         const { targetCategory, beforeCards } = args;
@@ -246,6 +244,8 @@ class RecommendationFeedSource(FeedSource):
                     "WARNING",
                 )
                 self._exhausted = True
+        except StopRequestedException:
+            raise
         except Exception as e:
             kind = classify_playwright_failure(e, page=self.page, context=getattr(self.page, "context", None))
             if kind in (BrowserFailureKind.CONTEXT_CLOSED, BrowserFailureKind.BROWSER_DISCONNECTED):
@@ -272,18 +272,15 @@ class RecommendationFeedSource(FeedSource):
         cards_topic_eligible = 0
         cards_same_blog = 0
         card_dom_errors = 0
-        lookups_before = self.neighbor_stats["lookups"]
-        known_before = self.neighbor_stats["known"]
-        allowed_before = self.neighbor_stats["allowed"]
-        blocked_before = self.neighbor_stats["blocked"]
-        unknown_before = self.neighbor_stats["unknown"]
 
         from naver.discovery.topic_filter import DiscoveryTopicFilter
 
         for idx in range(card_count):
             if self.stop_event and self.stop_event.is_set():
                 break
-            if self.resolver_broken:
+            if self.run_control:
+                self.run_control.checkpoint("recommendation_card")
+            if len(self.examined_keys) >= self.max_items:
                 break
 
             try:
@@ -331,20 +328,11 @@ class RecommendationFeedSource(FeedSource):
                     continue
                 cards_topic_eligible += 1
 
-                # 3) 이웃수 필터: 프로필 페이지 조회 (카드 DOM 비의존)
-                if self.neighbor_filter_active:
-                    verdict = self._check_neighbor_count(post.blog_id)
-                    if verdict == "stopped":
-                        break
-                    if verdict != "allow":
-                        if self.resolver_broken:
-                            break
-                        continue
-
                 if post.key not in self.seen_keys:
                     self.seen_keys.add(post.key)
                     self.seen_blogs.add(post.blog_id)
                     discovered.append(post)
+                    break
             except Exception as e:
                 kind = classify_playwright_failure(e, page=self.page, context=getattr(self.page, "context", None))
                 if kind in (BrowserFailureKind.CONTEXT_CLOSED, BrowserFailureKind.BROWSER_DISCONNECTED):
@@ -352,82 +340,16 @@ class RecommendationFeedSource(FeedSource):
                 card_dom_errors += 1
                 continue
 
-        st = self.neighbor_stats
         logger.log(
             f"[DISCOVERY_SUMMARY]\nrecommendation\n"
             f"seen={cards_seen}\nparsed={cards_parsed}\nalreadyExamined={cards_already_examined}\n"
             f"topicEligible={cards_topic_eligible}\ntopicBlocked={cards_topic_blocked}\n"
             f"sameBlog={cards_same_blog}\n"
-            f"neighborLookups={st['lookups'] - lookups_before}\n"
-            f"neighborKnown={st['known'] - known_before}\n"
-            f"neighborAllowed={st['allowed'] - allowed_before}\n"
-            f"neighborBlocked={st['blocked'] - blocked_before}\n"
-            f"neighborUnknown={st['unknown'] - unknown_before}\n"
+            f"eligibilityStage=detail\n"
             f"allowed={len(discovered)}\ndomError={card_dom_errors}"
         )
 
         return discovered
-
-    def _check_neighbor_count(self, blog_id: str) -> str:
-        """
-        프로필 조회로 이웃수를 판정한다.
-        returns: "allow" | "block" | "unknown" | "stopped"
-        UNKNOWN 은 해당 블로그만 skip(fail-safe). 시스템 전체 UNKNOWN 이면 resolver_broken 설정.
-        """
-        if self.neighbor_count_resolver is None:
-            self._trip_breaker(reason="resolver_not_configured")
-            return "unknown"
-
-        result = self.neighbor_probe_results.get(blog_id)
-        if result is None:
-            result = self.neighbor_count_resolver(blog_id)
-            if getattr(result, "error", None) == "stopped":
-                return "stopped"
-            self.neighbor_probe_results[blog_id] = result
-            self.neighbor_stats["lookups"] += 1
-
-            if result.value is None:
-                self.neighbor_stats["unknown"] += 1
-                self.consecutive_neighbor_unknown += 1
-            else:
-                self.neighbor_stats["known"] += 1
-                self.consecutive_neighbor_unknown = 0
-
-        value = result.value
-        if value is None:
-            logger.log(
-                f"  ⏭️ [NEIGHBOR_COUNT_UNKNOWN] blog={blog_id} error={result.error} -> 개별 skip (fail-safe)"
-            )
-            st = self.neighbor_stats
-            if st["known"] == 0 and st["lookups"] >= self.NEIGHBOR_BREAKER_ATTEMPTS:
-                self._trip_breaker(reason="no_known_after_attempts")
-            return "unknown"
-
-        if value > self.neighbor_count_max:
-            self.neighbor_stats["blocked"] += 1
-            logger.log(
-                f"  ⏭️ [NEIGHBOR_COUNT_FILTER] blog={blog_id} count={value} "
-                f"max={self.neighbor_count_max} -> skip"
-            )
-            return "block"
-
-        self.neighbor_stats["allowed"] += 1
-        logger.log(
-            f"  ✅ [NEIGHBOR_COUNT_FILTER] blog={blog_id} count={value} max={self.neighbor_count_max} -> allow"
-        )
-        return "allow"
-
-    def _trip_breaker(self, reason: str) -> None:
-        if self.resolver_broken:
-            return
-        self.resolver_broken = True
-        st = self.neighbor_stats
-        logger.log(
-            f"🚨 [NEIGHBOR_PROFILE_RESOLVER_BROKEN]\n"
-            f"attempts={st['lookups']}\nknown={st['known']}\nunknown={st['unknown']}\nreason={reason}",
-            "ERROR",
-        )
-
 
     def load_more(self) -> bool:
         if self.is_exhausted():
@@ -443,6 +365,8 @@ class RecommendationFeedSource(FeedSource):
             else:
                 interruptible_wait(self.stop_event, 1.0, pause_event=self.pause_event)
             return True
+        except StopRequestedException:
+            raise
         except Exception as e:
             kind = classify_playwright_failure(e, page=self.page, context=getattr(self.page, "context", None))
             if kind in (BrowserFailureKind.CONTEXT_CLOSED, BrowserFailureKind.BROWSER_DISCONNECTED):
@@ -451,7 +375,7 @@ class RecommendationFeedSource(FeedSource):
 
 
     def is_exhausted(self) -> bool:
-        return self._exhausted or len(self.seen_keys) >= self.max_items
+        return self._exhausted or len(self.examined_keys) >= self.max_items
 
 
 class DirectUrlSource(FeedSource):

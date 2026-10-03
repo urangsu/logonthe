@@ -161,9 +161,17 @@ class CommentProcessResult:
 
 
 @dataclass
+class PostEligibilityResult:
+    allowed: bool
+    reason: str
+    metrics: dict = field(default_factory=dict)
+
+
+@dataclass
 class PostProcessResult:
     post: FeedPost
     like_result: LikeProcessResult = field(default_factory=LikeProcessResult)
     comment_result: CommentProcessResult = field(default_factory=CommentProcessResult)
     success: bool = True
     failure_reason: Optional[FailureReason] = None
+    eligibility: Optional[PostEligibilityResult] = None

@@ -2,6 +2,7 @@ import os
 import json
 import tempfile
 from datetime import datetime
+from dataclasses import asdict
 from typing import Dict, Any, Optional
 from app.models import (
     FeedPost, PostProcessResult, LikeProcessResult, CommentProcessResult,
@@ -295,6 +296,10 @@ class HistoryStore:
             "comment": comment_record
         }
 
+        if result.eligibility is not None:
+            record["eligibility"] = asdict(result.eligibility)
+        elif "eligibility" in existing:
+            record["eligibility"] = existing["eligibility"]
         self.posts[post.key] = record
         self.save()
 

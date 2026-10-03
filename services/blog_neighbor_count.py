@@ -6,7 +6,7 @@ from typing import Dict, Iterable, List, Optional, Tuple
 
 from playwright.sync_api import Page
 
-from naver.resolver import parse_neighbor_count
+from naver.count_parser import parse_compact_count
 from services.pacing import interruptible_wait
 from src.logger import logger
 
@@ -31,6 +31,7 @@ ERR_PROFILE_BLOCK_NOT_FOUND = "profile_block_not_found"
 ERR_LABEL_NOT_FOUND = "neighbor_label_not_found"
 ERR_PARSE_FAILED = "neighbor_number_parse_failed"
 ERR_NOT_PUBLIC = "not_public"
+ERR_CONFLICT = "conflicting_neighbor_counts"
 
 # 일시적 오류만 1회 재시도 대상 (구조적 오류는 재시도해도 동일)
 _TRANSIENT_ERRORS = frozenset({ERR_NAVIGATION_FAILED, ERR_TIMEOUT})
@@ -38,7 +39,7 @@ _TRANSIENT_ERRORS = frozenset({ERR_NAVIGATION_FAILED, ERR_TIMEOUT})
 # 형식 A: '이웃 613명' (ProfileBlock 계열)  /  형식 B: '1,186명의 이웃' (블로그 홈 buddy 영역)
 # '서로이웃 N명'은 이웃수가 아니므로 negative lookbehind 로 제외한다.
 # 반드시 '이웃' label + 숫자 + '명'이 같은 semantic group 안에 있어야 한다.
-_NUM = r"([0-9][0-9,]*(?:\.[0-9]+)?\s*(?:만|천)?)"
+_NUM = r"([0-9](?:[0-9,]|\s+(?=[0-9]))*(?:\.[0-9]+)?\s*(?:만|천|[kKmM])?)"
 _NEIGHBOR_RES = (
     re.compile(r"(?<!서로)이웃\s*" + _NUM + r"\s*명"),
     re.compile(_NUM + r"\s*명\s*의\s*(?<!서로)이웃(?!\s*(?:추가|목록))"),
@@ -57,6 +58,7 @@ _EXTRACT_JS = r"""
     const out = [];
     const seen = new Set();
     const push = (el, kind) => {
+        if (!el.getClientRects().length || getComputedStyle(el).visibility === 'hidden') return;
         const text = (el.innerText || el.textContent || '').replace(/\s+/g, ' ').trim();
         if (!text || text.length > 40 || !text.includes('이웃')) return;
         const key = kind + '|' + text;
@@ -69,11 +71,15 @@ _EXTRACT_JS = r"""
     // 2순위: 일반 작은 텍스트 노드 (class 변경 대비)
     document.querySelectorAll('span, div, p, em, strong, a, li').forEach(el => push(el, 'generic'));
     const bodyText = (document.body && document.body.innerText) || '';
+    const profileText = Array.from(document.querySelectorAll("[class*='ProfileBlock'], [class*='profile'], [class*='buddy__']"))
+        .filter(el => el.getClientRects().length).map(el => el.innerText || '').join('\n');
     return {
         candidates: out,
         profileBlockCount: document.querySelectorAll("[class*='ProfileBlock']").length,
         title: document.title || '',
         notPublic: /이웃[^\n]{0,20}비공개|비공개[^\n]{0,20}이웃/.test(bodyText),
+        profileNotPublic: /이웃[^\n]{0,20}비공개|비공개[^\n]{0,20}이웃/.test(profileText),
+        ownerUrl: document.querySelector('link[rel="canonical"]')?.href || document.querySelector('meta[property="og:url"]')?.content || '',
     };
 }
 """
@@ -88,22 +94,28 @@ def extract_neighbor_count(
 
     - profile_block 후보를 generic 후보보다 우선한다.
     - '이웃' label 이 없는 숫자(방문자/공감/댓글/게시글 등)는 절대 사용하지 않는다.
-    - 서로 다른 값이 같은 우선순위에서 충돌하면 오탐 위험이므로 가장 먼저 발견된 값을 쓰되
-      profile_block 이 있으면 항상 그쪽이 이긴다.
+    - 같은 우선순위의 수치가 충돌하면 UNKNOWN으로 판정한다.
     """
     cands: List[Dict] = list(candidates or [])
     if not cands:
         return None, None, ERR_LABEL_NOT_FOUND
     ordered = sorted(cands, key=lambda c: 0 if c.get("kind") == "profile_block" else 1)
-    for cand in ordered:
-        text = re.sub(r"\s+", " ", str(cand.get("text", ""))).strip()
-        for rx in _NEIGHBOR_RES:
-            m = rx.search(text)
-            if not m:
+    for kind in ("profile_block", "generic"):
+        values = {}
+        for cand in ordered:
+            if cand.get("visible") is False or (cand.get("kind") == "profile_block") != (kind == "profile_block"):
                 continue
-            parsed = parse_neighbor_count(m.group(1))
-            if parsed is not None:
-                return parsed, text, None
+            text = re.sub(r"\s+", " ", str(cand.get("text", ""))).strip()
+            for rx in _NEIGHBOR_RES:
+                for m in rx.finditer(text):
+                    parsed = parse_compact_count(re.sub(r"\s+", "", m.group(1)))
+                    if parsed is not None:
+                        values[parsed] = text
+        if len(values) > 1:
+            return None, None, ERR_CONFLICT
+        if values:
+            value, text = next(iter(values.items()))
+            return value, text, None
     return None, None, ERR_PARSE_FAILED
 
 
@@ -112,7 +124,7 @@ class BlogNeighborCountService:
     블로그 프로필(모바일 블로그 홈)에서 '이웃 N명'을 조회하고 세션 캐싱한다.
     추천피드 카드 DOM에는 의존하지 않는다. (BlogPopularityService 와 동일한 stats_page 패턴)
 
-    - 세션 메모리 캐시만 사용 (프로그램 재시작 시 초기화). UNKNOWN 도 negative cache.
+    - 세션 메모리 캐시만 사용 (정상 수치와 명시적 비공개만 캐시).
     - 일시적 오류(navigation/timeout)는 1회 재시도, 구조적 오류는 즉시 확정.
     - 단일 controller thread 에서 순차 사용을 전제하되, 캐시는 lock 으로 보호한다.
     """
@@ -170,8 +182,9 @@ class BlogNeighborCountService:
         if res.error == ERR_STOPPED:
             return res
 
-        with cls._lock:
-            cls._cache[blog_id] = res
+        if res.value is not None or res.error == ERR_NOT_PUBLIC:
+            with cls._lock:
+                cls._cache[blog_id] = res
         return res
 
     @classmethod

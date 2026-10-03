@@ -1,0 +1,77 @@
+{
+  "source": "https://theqoo.net/cook?filter_mode=hot",
+  "method": "six_posts_max_latest_public_comment_page_only",
+  "raw_comments_retained": false,
+  "member_identifiers_retained": false,
+  "sources": [
+    {
+      "url": "https://theqoo.net/cook/4345504837",
+      "comments_analyzed": 19,
+      "median_characters": 16,
+      "short_at_most_40": 14,
+      "laughter_or_tears": 2,
+      "reaction_opening": 6,
+      "questions": 4,
+      "terminal_period": 2
+    },
+    {
+      "url": "https://theqoo.net/cook/4291993701",
+      "comments_analyzed": 20,
+      "median_characters": 53.0,
+      "short_at_most_40": 5,
+      "laughter_or_tears": 3,
+      "reaction_opening": 0,
+      "questions": 3,
+      "terminal_period": 4
+    },
+    {
+      "url": "https://theqoo.net/cook/4283357798",
+      "comments_analyzed": 17,
+      "median_characters": 22,
+      "short_at_most_40": 14,
+      "laughter_or_tears": 4,
+      "reaction_opening": 6,
+      "questions": 1,
+      "terminal_period": 1
+    },
+    {
+      "url": "https://theqoo.net/cook/4266185098",
+      "comments_analyzed": 18,
+      "median_characters": 34.0,
+      "short_at_most_40": 13,
+      "laughter_or_tears": 3,
+      "reaction_opening": 4,
+      "questions": 2,
+      "terminal_period": 0
+    },
+    {
+      "url": "https://theqoo.net/cook/4244957225",
+      "comments_analyzed": 10,
+      "median_characters": 46.0,
+      "short_at_most_40": 5,
+      "laughter_or_tears": 2,
+      "reaction_opening": 0,
+      "questions": 2,
+      "terminal_period": 0
+    },
+    {
+      "url": "https://theqoo.net/cook/4243627178",
+      "comments_analyzed": 27,
+      "median_characters": 10,
+      "short_at_most_40": 26,
+      "laughter_or_tears": 2,
+      "reaction_opening": 13,
+      "questions": 6,
+      "terminal_period": 3
+    }
+  ],
+  "aggregate": {
+    "comments_analyzed": 111,
+    "median_characters": 22,
+    "short_at_most_40": 77,
+    "laughter_or_tears": 16,
+    "reaction_opening": 29,
+    "questions": 18,
+    "terminal_period": 10
+  }
+}

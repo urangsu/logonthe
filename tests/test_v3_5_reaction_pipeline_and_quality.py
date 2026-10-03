@@ -68,8 +68,8 @@ class TestV35ReactionPipelineAndQuality(unittest.TestCase):
         self.assertEqual(plan.domain, "FOOD")
         self.assertEqual(plan.reaction_mode, "combination_curiosity")
         self.assertIn("블루치즈", plan.primary_anchor)
-        self.assertIn("관찰자 입장에서 반응해", plan.reaction_instruction)
-        self.assertIn("공감하지 말고", plan.reaction_instruction)
+        self.assertIn("짧고 솔직하게 반응해", plan.reaction_instruction)
+        self.assertNotIn("관찰자 입장", plan.reaction_instruction)
 
     def test_06_reaction_planner_domains(self):
         """6. PRODUCT, SERVICE, PLACE, PERSONAL, GENERAL 도메인별 계획 수립 및 맞춤 지침 확인"""
@@ -137,6 +137,37 @@ class TestV35ReactionPipelineAndQuality(unittest.TestCase):
         self.assertNotIn("[음식 글 우선 규칙]", prompt)
         # 전체 길이가 매우 간결함 (500자 이하)
         self.assertLess(len(prompt), 500)
+
+    def test_v35_style_policy_and_one_reviewed_example_reach_active_prompt(self):
+        from services.comments.policy import CommentStylePolicy
+        policy = CommentStylePolicy.from_context(config={"allow_soft_emoji": True})
+        prompt = AIPromptBuilder.build(
+            title="만두 후기", excerpt="만두피가 얇고 속이 꽉 찼어요",
+            corpus_examples=["만두피 얇은 거 좋네요 ㅎㅎ", "두 번째 예시는 주입하지 않음"],
+            style_policy=policy, version=PROMPT_VERSION_V3_5,
+        )
+        self.assertIn(policy.style_instruction, prompt)
+        self.assertIn("만두피 얇은 거 좋네요 ㅎㅎ", prompt)
+        self.assertNotIn("두 번째 예시는 주입하지 않음", prompt)
+        self.assertIn("소재나 문장을 복사하지 마", prompt)
+        self.assertIn("칭찬·방문 약속을 덧붙이지 마", prompt)
+        self.assertEqual(AIPromptBuilder.select_v3_5_style_examples(["x" * 101, "짧은 예시"]), ["짧은 예시"])
+
+    def test_cooking_cadence_is_food_only_and_keeps_factual_boundary(self):
+        food = AIPromptBuilder.build_v3_5(
+            title="김밥 후기", selected_context="김밥에 달걀이 많이 들어 있어요",
+            reaction_instruction="달걀 구성에 반응해", content_focus="FOOD_RESTAURANT",
+        )
+        ordinary = AIPromptBuilder.build_v3_5(
+            title="비 오는 추석", selected_context="귀경길 비 예보가 있어요",
+            reaction_instruction="비 소식에 아쉬움을 표현해", content_focus="GENERAL",
+        )
+        self.assertIn("짧은 감탄이나 솔직한 끌림", food)
+        self.assertIn("감탄 없이 시작해도 돼", food)
+        self.assertNotIn("짧은 감탄이나 솔직한 끌림", ordinary)
+        self.assertIn("없는 맛·시설 등 사실은 만들지 마", food)
+        self.assertNotIn("더쿠", food)
+        self.assertNotIn("관찰자 입장", food)
 
     def test_08_food_focus_miss_code_category_and_feedback(self):
         """8. food_focus_miss 코드가 fact_violation으로 분류되고 전용 재작성 피드백이 생성되는지 확인"""

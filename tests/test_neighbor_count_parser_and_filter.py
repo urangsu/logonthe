@@ -121,13 +121,13 @@ class TestService(unittest.TestCase):
         self.assertEqual((r1.value, r2.value), (873, 873))
         self.assertEqual(page.goto_calls, 1)
 
-    def test_unknown_is_negative_cached(self):
+    def test_missing_label_is_not_negative_cached(self):
         page = _StubPage()
         r1 = BlogNeighborCountService.get_neighbor_count(page, "b")
         BlogNeighborCountService.get_neighbor_count(page, "b")
         self.assertIsNone(r1.value)
         self.assertEqual(r1.error, bnc.ERR_PROFILE_BLOCK_NOT_FOUND)
-        self.assertEqual(page.goto_calls, 1)
+        self.assertEqual(page.goto_calls, 2)
 
     def test_navigation_failure_retried_once(self):
         page = _StubPage(goto_error=RuntimeError("boom"))
@@ -196,33 +196,33 @@ def _discover(source, patches):
 
 
 class TestRecommendationIntegration(unittest.TestCase):
-    def test_allow_block_unknown(self):
+    def test_discovery_returns_one_post_without_profile_lookups(self):
         source, patches, calls = _build_source(
             {"blog1": 250, "blog2": 1000, "blog3": 1001, "blog4": 16385, "blog5": None}
         )
         ids = [p.blog_id for p in _discover(source, patches)]
-        self.assertEqual(ids, ["blog1", "blog2"])
-        st = source.neighbor_stats
-        self.assertEqual((st["lookups"], st["known"], st["allowed"], st["blocked"], st["unknown"]), (5, 4, 2, 2, 1))
-        self.assertFalse(source.resolver_broken)
+        self.assertEqual(ids, ["blog1"])
+        self.assertEqual(calls, [])
 
-    def test_circuit_breaker_after_five_unknown(self):
+    def test_unknown_profiles_do_not_stop_discovery(self):
         source, patches, calls = _build_source({f"b{i}": None for i in range(9)})
-        self.assertEqual(_discover(source, patches), [])
-        self.assertTrue(source.resolver_broken)
-        self.assertEqual(len(calls), 5)  # 5회 이후 더 조회하지 않는다
+        ids = [p.blog_id for _ in range(9) for p in _discover(source, patches)]
+        self.assertEqual(ids, [f"b{i}" for i in range(9)])
+        self.assertEqual(calls, [])
 
-    def test_no_breaker_when_some_known(self):
+    def test_sequential_order_preserved(self):
         counts = {"a": None, "b": None, "c": None, "d": None, "e": 10, "f": None}
         source, patches, _ = _build_source(counts)
-        _discover(source, patches)
-        self.assertFalse(source.resolver_broken)
+        ids = [p.blog_id for _ in range(6) for p in _discover(source, patches)]
+        self.assertEqual(ids, list(counts))
 
     def test_examined_cards_not_rechecked(self):
         source, patches, calls = _build_source({"x": 5000, "y": 10})
         _discover(source, patches)
         _discover(source, patches)
-        self.assertEqual(calls, ["x", "y"])
+        self.assertEqual(calls, [])
+        self.assertEqual(len(source.examined_keys), 2)
+        self.assertEqual(_discover(source, patches), [])
 
     def test_filter_off_never_calls_resolver(self):
         source, patches, calls = _build_source({"x": 5000}, max_n=0)

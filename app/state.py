@@ -58,6 +58,9 @@ class BotRuntimeState:
     generated_success_count: int = 0
     generated_fail_count: int = 0
     submission_unknown_count: int = 0
+    visited_count: int = 0
+    guard_allowed_count: int = 0
+    guard_excluded_count: int = 0
 
     # AI Context & Prompt state
     current_post_title: str = ""
@@ -129,6 +132,9 @@ class StateManager:
         inc_gen_success: bool = False,
         inc_gen_fail: bool = False,
         inc_submission_unknown: bool = False,
+        inc_visited: bool = False,
+        inc_guard_allowed: bool = False,
+        inc_guard_excluded: bool = False,
         total_targets: Optional[int] = None,
         current_post_title: Optional[str] = None,
         current_post_excerpt: Optional[str] = None,
@@ -173,6 +179,12 @@ class StateManager:
                 self.state.generated_fail_count += 1
             if inc_submission_unknown:
                 self.state.submission_unknown_count += 1
+            if inc_visited:
+                self.state.visited_count += 1
+            if inc_guard_allowed:
+                self.state.guard_allowed_count += 1
+            if inc_guard_excluded:
+                self.state.guard_excluded_count += 1
             if total_targets is not None:
                 self.state.total_target_count = total_targets
             if current_post_title is not None:

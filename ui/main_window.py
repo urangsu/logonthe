@@ -954,8 +954,14 @@ class MainWindow(ctk.CTk):
 
         unknown_text = f" | ⚠️ 미확정: {state.submission_unknown_count}" if state.submission_unknown_count > 0 else ""
         sampled_text = f"선정 {state.sampled_in_count}·등록 {state.comments_count}" if state.sampled_in_count > 0 else f"{state.comments_count}"
+        progress_text = (
+            f"방문 {state.visited_count} | 제한 통과 {state.guard_allowed_count}/{state.total_target_count} | 제한 제외 {state.guard_excluded_count}"
+            if state.guard_allowed_count or state.guard_excluded_count
+            else f"처리: {state.processed_count}/{state.total_target_count}"
+        )
+        progress_separator = "\n" if state.guard_allowed_count or state.guard_excluded_count else " | "
         self.badge_lbl.configure(
-            text=f"처리: {state.processed_count}/{state.total_target_count} | ❤️ 공감: {state.likes_count} | 💬 댓글: {sampled_text} | ⏭️ 건너뜀: {state.skipped_count}{unknown_text}"
+            text=f"{progress_text}{progress_separator}❤️ 공감: {state.likes_count} | 💬 댓글: {sampled_text} | ⏭️ 건너뜀: {state.skipped_count}{unknown_text}"
         )
         if state.current_post_title:
             self.ai_post_title_lbl.configure(text=f"현재 글: {state.current_post_title[:45]}")

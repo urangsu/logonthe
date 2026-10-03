@@ -492,8 +492,8 @@ class ReactionContextPlanner:
                         break
                 sec_desc = f"와 {sec}" if sec and sec != pri else ""
                 instruction = (
-                    f"{pri}{sec_desc} 재료와 조합에 관찰자 입장에서 반응해. "
-                    "먹어본 사람처럼 공감하지 말고 맛에 대한 궁금함이나 조합의 독특함을 표현해."
+                    f"{pri}{sec_desc} 조합에서 끌리는 부분에 짧고 솔직하게 반응해. "
+                    "맛에 대한 궁금함이나 의외인 느낌을 편하게 표현해."
                 )
                 evidence = f"조합/특수재료 근거({pri}{sec_desc})"
             elif visual_salience >= 4.0 and visual_salience > taste_salience:
@@ -505,8 +505,8 @@ class ReactionContextPlanner:
             elif taste_salience >= 2.5:
                 mode = "taste_reaction"
                 instruction = (
-                    f"본문에 언급된 {pri}의 맛이나 식감 디테일에 관찰자 입장에서 반응해. "
-                    "본문에 없는 맛이나 식감은 지어내지 마."
+                    f"본문의 {pri} 맛이나 식감 중 끌리는 부분에 네 느낌을 짧게 붙여줘. "
+                    "맛 설명을 다시 읊을 필요는 없어."
                 )
                 evidence = f"본문 맛/식감 언급({pri})"
             elif visual_salience >= 2.5:
@@ -524,8 +524,8 @@ class ReactionContextPlanner:
                     else:
                         mode = "detail_observation"
                         instruction = (
-                            f"{pri} 메뉴 관련 본문 디테일에 관찰자 시선으로 반응해. "
-                            "먹어본 척하지 말고, '먹어보고 싶다'는 말도 반복하지 마."
+                            f"{pri}에서 눈에 들어온 부분에 짧고 편하게 반응해. "
+                            "이번에는 방문 계획 대신 지금 든 느낌으로 끝내줘."
                         )
                         evidence = f"메뉴 디테일 관찰({pri})"
                 else:
