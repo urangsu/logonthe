@@ -7,7 +7,7 @@ from playwright.sync_api import Page
 from app.models import (
     FeedPost, PostProcessResult, LikeProcessResult, CommentProcessResult,
     UserAction, CommentSubmitState, LikeState, PostActionPlan,
-    SubmitOrigin, CommentSubmitOutcome
+    SubmitOrigin, CommentSubmitOutcome, PostEligibilityResult
 )
 from naver.interaction import CommentInteractionService
 from naver.comment_guard import CommentPresenceResult, CommentPresenceState
@@ -192,6 +192,10 @@ class TestEnterManualSubmitRegression(unittest.TestCase):
             gemini_web_enabled=False,
             auto_comment_submit_enabled=False,
         )
+
+        # This regression exercises Enter retries, not real profile/like-count DOM.
+        processor.post_eligibility_service.evaluate = MagicMock(
+            return_value=PostEligibilityResult(True, "enter_test_fixture"))
 
         attempts = {"count": 0}
         def mock_wait_action(*args, **kwargs):

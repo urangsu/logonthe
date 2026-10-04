@@ -188,6 +188,16 @@ class ReactionContextPlanner:
         return [cand for _, cand in scored]
 
     @classmethod
+    def _is_food_candidate(cls, candidate: str) -> bool:
+        roots = tuple(FoodCommentFocus.RESTAURANT_DISHES + FoodCommentFocus.CAFE_DISHES) + tuple(
+            ingredient for ingredient in cls.SPECIAL_COMBINATION_INGREDIENTS if ingredient != "솥뚜껑"
+        ) + (
+            "만두", "김밥", "순대", "꼬들살", "연어", "닭", "치즈", "유자", "바질",
+            "도삭면", "토스트", "빵", "탕", "국", "면", "밥", "떡",
+        )
+        return candidate not in cls.GENERIC_BANNED_ANCHORS + ("한국", "전국", "중국", "천국") and candidate.endswith(roots)
+
+    @classmethod
     def extract_open_vocabulary_food_candidates(cls, title: str, excerpt: str = "") -> List[str]:
         """
         사전에 등록되지 않은 고유 메뉴/음식명을 제목 및 본문에서 추출한다.
@@ -217,6 +227,8 @@ class ReactionContextPlanner:
             if tok in stop_words or tok in cls.GENERIC_BANNED_ANCHORS or tok in FoodCommentFocus.SECONDARY_KEYWORDS:
                 return None
             if tok.endswith(("역", "동", "구", "점", "길", "로", "거리")):
+                return None
+            if not cls._is_food_candidate(tok):
                 return None
             return tok
 
@@ -422,6 +434,7 @@ class ReactionContextPlanner:
                 if ov not in candidate_foods:
                     candidate_foods.append(ov)
 
+            candidate_foods = [f for f in candidate_foods if cls._is_food_candidate(f)]
             ranked_foods = cls.rank_anchors(candidate_foods, title_s, excerpt_s, domain="FOOD")
             # Generic anchor('메뉴', '음식', '가게') 최후 fallback으로 격하 ('anchor=메뉴' 방지)
             valid_foods = [f for f in ranked_foods if f not in cls.GENERIC_BANNED_ANCHORS]
@@ -562,7 +575,7 @@ class ReactionContextPlanner:
 
             mode = "place_observation"
             instruction = (
-                f"{pri} 관련 풍경이나 코스, 공간 디테일에 관찰자 입장에서 반응해. 직접 가본 척하지 마."
+                f"{pri} 관련 풍경이나 코스, 공간 중 눈에 들어온 부분에 솔직한 느낌을 붙여줘. 직접 가본 척하지 마."
             )
             evidence = f"장소/여행 신호({pri})"
             return ReactionPlan(
@@ -590,7 +603,7 @@ class ReactionContextPlanner:
                     sec = rpr
                     break
             instruction = (
-                f"제품의 {pri} 기능이나 디자인, 사용 디테일에 관찰자 입장에서 가볍게 반응해. 직접 써본 척하지 마."
+                f"제품의 {pri} 기능이나 디자인 중 관심 가는 부분에 짧고 편하게 반응해. 직접 써본 척하지 마."
             )
             return ReactionPlan(
                 domain="PRODUCT",
@@ -626,7 +639,7 @@ class ReactionContextPlanner:
                     sec = rsv
                     break
             instruction = (
-                f"{pri} 서비스의 구성이나 진행 방식 디테일에 관찰자 입장에서 반응해."
+                f"{pri} 서비스의 구성이나 진행 방식 중 눈에 들어온 부분에 솔직한 느낌을 붙여줘."
             )
             return ReactionPlan(
                 domain="SERVICE",

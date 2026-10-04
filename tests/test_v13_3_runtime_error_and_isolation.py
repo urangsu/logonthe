@@ -14,6 +14,12 @@ from services.pacing import PacingResult
 
 
 class TestV133RuntimeErrorAndIsolation(unittest.TestCase):
+    def setUp(self):
+        sampling = patch("app.controller.SamplingHistoryManager")
+        manager = sampling.start().return_value
+        manager.get_or_create_sample.return_value = (True, 0.0)
+        self.addCleanup(sampling.stop)
+
     def test_post_processor_state_isolation_between_posts(self):
         """Post 1 처리 중 발생한 상태/오류가 Post 2로 누수되지 않고 격리되는지 검증"""
         processor = PostProcessor(
@@ -56,16 +62,14 @@ class TestV133RuntimeErrorAndIsolation(unittest.TestCase):
 
     def test_like_state_preserved_when_comment_fails(self):
         """공감은 성공(LIKED)했으나 댓글 처리 중 예외 발생 시 공감 결과가 UNKNOWN으로 유실되지 않고 보존되는지 검증"""
-        config_mock = MagicMock()
-        config_mock.get.side_effect = lambda k, default=None: {
-            "source": "neighbor",
-            "max_items": 1,
+        config_mock = {
+            "feed_source": "recommendation",
+            "max_feed_items": 1,
             "like_enabled": True,
             "comment_enabled": True,
             "neighbor_mutual_only": False,
             "neighbor_like_sweep_mode": False,
-        }.get(k, default)
-        config_mock.load.return_value = config_mock
+        }
 
         history_mock = MagicMock()
         history_mock.is_liked.return_value = False
@@ -125,16 +129,14 @@ class TestV133RuntimeErrorAndIsolation(unittest.TestCase):
 
     def test_consecutive_identical_error_circuit_breaker(self):
         """동일 예외가 3회 연속 발생 시 회로 차단기가 발동하여 루프를 즉시 중단하는지 검증"""
-        config_mock = MagicMock()
-        config_mock.get.side_effect = lambda k, default=None: {
-            "source": "recommend",
-            "max_items": 10,
+        config_mock = {
+            "feed_source": "recommendation",
+            "max_feed_items": 10,
             "like_enabled": True,
             "comment_enabled": True,
             "neighbor_mutual_only": False,
             "neighbor_like_sweep_mode": False,
-        }.get(k, default)
-        config_mock.load.return_value = config_mock
+        }
 
         history_mock = MagicMock()
         history_mock.is_liked.return_value = False
@@ -188,16 +190,14 @@ class TestV133RuntimeErrorAndIsolation(unittest.TestCase):
 
     def test_circuit_breaker_resets_on_intervening_success(self):
         """중간에 성공한 글이 있으면 연속 동일 예외 카운터가 리셋되는지 검증"""
-        config_mock = MagicMock()
-        config_mock.get.side_effect = lambda k, default=None: {
-            "source": "recommend",
-            "max_items": 4,
+        config_mock = {
+            "feed_source": "recommendation",
+            "max_feed_items": 4,
             "like_enabled": True,
             "comment_enabled": True,
             "neighbor_mutual_only": False,
             "neighbor_like_sweep_mode": False,
-        }.get(k, default)
-        config_mock.load.return_value = config_mock
+        }
 
         history_mock = MagicMock()
         history_mock.is_liked.return_value = False

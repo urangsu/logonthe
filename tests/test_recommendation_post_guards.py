@@ -4,7 +4,10 @@ import unittest
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 
-from app.models import FeedPost, FeedSourceType, PostEligibilityResult, PostProcessResult, CommentSubmitState
+from app.models import (
+    CommentProcessResult, FeedPost, FeedSourceType, LikeProcessResult, LikeState,
+    PostEligibilityResult, PostProcessResult, CommentSubmitState,
+)
 from app.processor import PostProcessor
 from app.controller import FeedController
 from app.run_control import RunControl, StopRequestedException
@@ -215,7 +218,7 @@ class TestRecommendationPostGuards(unittest.TestCase):
             self.assertFalse(reopened.is_comment_submitted(post().key))
             self.assertFalse(reopened.posts[post().key]["eligibility"]["allowed"])
 
-    def run_controller(self, target, allowed_after):
+    def run_controller(self, target, allowed_after, batch=False, crash_after_like=False):
         config = cfg(feed_source="recommendation", max_feed_items=target, campaign_id="test",
                      like_enabled=False, comment_enabled=True, gemini_web_enabled=False,
                      auto_comment_submit_enabled=False)
@@ -229,6 +232,12 @@ class TestRecommendationPostGuards(unittest.TestCase):
         source_ref = []
         def discover(source):
             source_ref[:] = [source]
+            if batch:
+                if source.examined_keys:
+                    return []
+                candidates = [post(f"blog{i}", i) for i in range(1, source.max_items + 1)]
+                source.examined_keys.update(p.key for p in candidates)
+                return candidates
             n = len(source.examined_keys) + 1
             if n > source.max_items:
                 return []
@@ -252,8 +261,15 @@ class TestRecommendationPostGuards(unittest.TestCase):
                 n = int(candidate.log_no)
                 order.append(("process", n))
                 result = PostProcessResult(candidate, eligibility=PostEligibilityResult(n > allowed_after, "test"))
+                if n > allowed_after:
+                    # 허용된 글만 실제 댓글 등록이 일어난 것으로 모의 (max_items 목표 카운트 대상)
+                    result.comment_result = CommentProcessResult(status=CommentSubmitState.SUBMITTED)
                 processor.current_result = result
                 processor.post_eligibility_service.decisions[candidate.key] = result.eligibility
+                if crash_after_like:
+                    result.like_result = LikeProcessResult(action_taken=True, state_after=LikeState.LIKED)
+                    result.comment_result = CommentProcessResult(status=CommentSubmitState.FAILED)
+                    raise RuntimeError("comment failed after verified like")
                 return result
             processor.process.side_effect = process
             controller.run()
@@ -265,7 +281,60 @@ class TestRecommendationPostGuards(unittest.TestCase):
         self.assertEqual(order, [event for n in range(1, 6) for event in (("candidate", n), ("process", n))])
         self.assertEqual(controller.pacing.wait_next_post.call_count, 5)
         self.assertIn("target_reached", controller.state_mgr.get_state().message)
-        self.assertEqual(source.max_items, 10)
+        self.assertEqual(source.max_items, 50)  # max(target*5, 50): 목표는 실제 댓글/공감 성공 수
+
+    def test_effective_action_counts_only_submitted_comment_or_new_like(self):
+        keys = set()
+        reg = FeedController._register_effective_action
+        def res(comment=CommentSubmitState.SKIPPED, like_taken=False):
+            return PostProcessResult(
+                post(),
+                like_result=LikeProcessResult(action_taken=like_taken, state_after=LikeState.LIKED if like_taken else LikeState.UNKNOWN),
+                comment_result=CommentProcessResult(status=comment),
+            )
+        # 스킵/실패/결과불명/기존 공감(action 없음)은 목표를 소모하지 않는다
+        for status in (CommentSubmitState.SKIPPED, CommentSubmitState.FAILED, CommentSubmitState.SUBMISSION_UNKNOWN):
+            self.assertFalse(reg(res(status), post(), keys, 5))
+        self.assertEqual(keys, set())
+        # 댓글 등록 또는 공감 신규 성공은 카운트
+        self.assertTrue(reg(res(CommentSubmitState.SUBMITTED), post("a", 1), keys, 5))
+        self.assertTrue(reg(res(like_taken=True), post("b", 2), keys, 5))
+        self.assertEqual(len(keys), 2)
+
+    def test_failed_or_unknown_like_click_does_not_consume_target(self):
+        for state in (LikeState.NOT_LIKED, LikeState.UNKNOWN):
+            result = PostProcessResult(post(), like_result=LikeProcessResult(
+                action_taken=True, state_after=state, error="postcondition_failed"))
+            self.assertFalse(FeedController._register_effective_action(result, post(), set(), 5))
+
+    def test_like_statistic_counts_only_new_verified_likes(self):
+        with patch("app.controller.SamplingHistoryManager"):
+            controller = FeedController(cfg(campaign_id="test"), MagicMock(), StateManager())
+        for state, taken in ((LikeState.UNKNOWN, True), (LikeState.NOT_LIKED, True), (LikeState.LIKED, False)):
+            controller._handle_post_result(PostProcessResult(post(), like_result=LikeProcessResult(
+                action_taken=taken, state_after=state)))
+        self.assertEqual(controller.like_success_count, 0)
+        controller._handle_post_result(PostProcessResult(post(), like_result=LikeProcessResult(
+            action_taken=True, state_after=LikeState.LIKED)))
+        self.assertEqual(controller.like_success_count, 1)
+
+    def test_effective_action_deduplicates_same_post(self):
+        keys = set()
+        result = PostProcessResult(post(), comment_result=CommentProcessResult(status=CommentSubmitState.SUBMITTED))
+        self.assertTrue(FeedController._register_effective_action(result, post(), keys, 5))
+        self.assertFalse(FeedController._register_effective_action(result, post(), keys, 5))
+
+    def test_scan_limit_drains_collected_batch(self):
+        controller, order, source = self.run_controller(target=2, allowed_after=48, batch=True)
+        self.assertEqual(len(source.examined_keys), 50)
+        self.assertEqual(order, [("process", i) for i in range(1, 51)])
+        self.assertIn("target_reached", controller.state_mgr.get_state().message)
+
+    def test_verified_like_survives_comment_exception_in_target(self):
+        controller, order, _ = self.run_controller(target=1, allowed_after=0, crash_after_like=True)
+        self.assertEqual(order, [("candidate", 1), ("process", 1)])
+        self.assertEqual(controller.like_success_count, 1)
+        self.assertIn("target_reached", controller.state_mgr.get_state().message)
 
     def test_controller_stops_at_200_candidates_when_all_excluded(self):
         controller, order, source = self.run_controller(target=40, allowed_after=200)

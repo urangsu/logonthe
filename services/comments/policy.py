@@ -27,6 +27,8 @@ class CommentStylePolicy:
         config: Optional[Dict[str, Any]] = None,
         style_profile: Optional[Any] = None,
         action_plan: Optional[Any] = None,
+        title: str = "",
+        excerpt: str = "",
     ) -> "CommentStylePolicy":
         cfg = config or {}
         p_str = (preset or cfg.get("comment_style_preset", "community")).lower()
@@ -55,8 +57,10 @@ class CommentStylePolicy:
             and getattr(style_profile, "emoji_ratio", 0.0) >= 0.03
         )
 
-        allow_laughter = bool(cfg_allow_laughter or learned_laughter)
-        allow_emoji = bool(cfg_allow_emoji or learned_emoji)
+        allow_laughter = bool(cfg_allow_laughter) if "allow_soft_laughter" in cfg else bool(cfg_allow_laughter or learned_laughter)
+        allow_emoji = bool(cfg_allow_emoji) if "allow_soft_emoji" in cfg else learned_emoji
+        from services.comments.tone import needs_restrained_tone
+        restrained = needs_restrained_tone(title, excerpt)
         max_decorations = 1 if (allow_laughter or allow_emoji) else 0
 
         if allow_laughter and allow_emoji:
@@ -70,6 +74,8 @@ class CommentStylePolicy:
 
         punctuation_instruction = "마침표 없이 ~·!·대화체 어미를 자연스럽게 선택" if not is_thoughtful else "문장부호는 문맥에 맞게 사용"
         style_instruction = f"보통 1문장, 필요하면 2문장 ({target_desc} 내외). {decor_instruction}. {punctuation_instruction}"
+        if restrained:
+            style_instruction = f"편한 존댓말로 짧고 담백하게 ({target_desc} 내외). 장난·들뜬 감탄을 피하고 웃음·이모지는 분위기에 맞을 때만. 문장부호는 문맥에 맞게"
 
         return cls(
             preset="thoughtful" if is_thoughtful else "community",
@@ -77,7 +83,7 @@ class CommentStylePolicy:
             max_sentences=2,
             min_length=min_len,
             max_length=max_len,
-            allow_period=is_thoughtful,
+            allow_period=is_thoughtful or restrained,
             allow_soft_laughter=allow_laughter,
             allow_soft_emoji=allow_emoji,
             max_combined_decorations=max_decorations,

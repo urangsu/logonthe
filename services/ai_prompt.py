@@ -24,7 +24,7 @@ class AIPromptBuilder:
     """
 
     PROMPT_VERSION = PROMPT_VERSION_V3_5
-    V3_5_REVISION = "casual-food-reaction-v3"
+    V3_5_REVISION = "user-voice-context-v5"
     PROMPT_VERSION_V3_0 = PROMPT_VERSION_V3_0
     PROMPT_VERSION_V3_1 = PROMPT_VERSION_V3_1
     PROMPT_VERSION_V3_2 = PROMPT_VERSION_V3_2
@@ -241,6 +241,9 @@ class AIPromptBuilder:
         """
         title_s = (title or "").strip()
         context_s = (selected_context or excerpt or "").strip()
+        from services.comments.tone import needs_restrained_tone
+        tone_context = f"{excerpt or ''}\n{context_s}"
+        restrained = needs_restrained_tone(title_s, tone_context)
         reaction_domain = getattr(reaction_plan, "domain", "")
 
         # 반응 지침 결정 (reaction_plan이 있으면 우선 사용, 없으면 ReactionContextPlanner로 즉시 수립)
@@ -252,6 +255,8 @@ class AIPromptBuilder:
                 plan = ReactionContextPlanner.plan(title=title_s, excerpt=context_s)
                 reaction_instruction = plan.reaction_instruction
                 reaction_domain = plan.domain
+        if restrained:
+            reaction_instruction = "구체적인 장면과 작성자의 마음에 담백하게 호응해. 억지 위로나 교훈을 덧붙이지 마"
 
         rewrite_section = ""
         if rewrite_feedback:
@@ -270,12 +275,19 @@ class AIPromptBuilder:
             clean = clean.splitlines()[0].rstrip(".!?~ ")
             if clean:
                 avoid_endings.append(clean[-6:])
-        if avoid_endings:
-            recent_ending_note = "\n- 최근 끝맺음과 같은 패턴이 반복되지 않게 해: " + json.dumps(avoid_endings[-2:], ensure_ascii=False)
+        if len(avoid_endings) == 3 and len(set(avoid_endings)) == 1:
+            recent_ending_note = "\n- 최근 끝맺음 " + json.dumps(avoid_endings[-1:], ensure_ascii=False) + " 은 참고만 하고 문맥에 맞는 어미를 골라줘"
+        recent_texts = [c for c in (recent_comments or [])[-5:] if isinstance(c, str)]
+        repeated_phrases = [p for p in ("조합이라니", "군침", "비주얼", "궁금", "든든", "사진만 봐도")
+                            if sum(p in c for c in recent_texts) >= 3]
+        if repeated_phrases:
+            recent_ending_note += "\n- 최근 반복 표현 " + json.dumps(repeated_phrases[:2], ensure_ascii=False) + " 은 참고만 해. 표현 차이보다 이번 글에 맞는 반응이 우선"
 
         output_rule = "- 댓글만 출력(근거 부족 시 NEED_MORE_CONTEXT)" if allow_need_more_context else "- 댓글만 출력"
-        style_instruction = style_policy.style_instruction if style_policy and style_policy.style_instruction else "편한 존댓말, 마침표 없이 자연스러운 대화체"
-        examples = cls.select_v3_5_style_examples(corpus_examples)
+        style_instruction = style_policy.style_instruction if style_policy and style_policy.style_instruction else "편한 존댓말, 보통 1문장, 필요할 때만 2문장. 마침표 없이 자연스러운 대화체"
+        if restrained:
+            style_instruction = "짧고 담백한 존댓말. 장난·들뜬 감탄을 피하고 웃음·이모지는 분위기에 맞을 때만. 문장부호는 문맥에 맞게"
+        examples = cls.select_v3_5_style_examples(corpus_examples, title_s, tone_context)
         example_section = (
             "\n말투 참고만 하고 소재나 문장을 복사하지 마:\n" + json.dumps(examples, ensure_ascii=False) + "\n"
             if examples else ""
@@ -283,18 +295,18 @@ class AIPromptBuilder:
         # Public cooking comments inform cadence, never the current post's facts.
         food_style = (
             "\n- 음식 글은 짧은 감탄이나 솔직한 끌림으로 툭 반응해. 감탄 없이 시작해도 돼. 반말·유행어를 억지로 섞지 마"
-            if reaction_domain == "FOOD" or content_focus in ("FOOD_RESTAURANT", "CAFE_DESSERT", "FOOD_PRODUCT")
+            if not restrained and (reaction_domain == "FOOD" or content_focus in ("FOOD_RESTAURANT", "CAFE_DESSERT", "FOOD_PRODUCT"))
             else ""
         )
 
         return f"""네이버 블로그 글에 남길 자연스러운 짧은 댓글 하나를 작성해.
 
 {rewrite_section}[작성 원칙]
-- 말투: {style_instruction}{recent_ending_note}
-- 모바일에서 말하듯, 보통 한 문장. 필요할 때만 두 문장{food_style}
-- 눈에 들어온 내용 하나에 네 느낌을 바로 붙여줘
-- 본문 표현을 바꾸거나 감상·기대·가벼운 연상을 섞어도 돼. 반응이 끝나면 칭찬·방문 약속을 덧붙이지 마
-- 직접 겪지 않은 경험이나 없는 맛·시설 등 사실은 만들지 마
+- 말투: {style_instruction}{recent_ending_note}{food_style}
+- 구체적인 장면 하나에 짧은 혼잣말처럼 느낌을 붙여줘
+- 표현은 자유롭게 바꿔도 돼. 과장·본문 요약·상투적 인사로 채우지 마. 반응이 끝나면 칭찬·방문 약속을 덧붙이지 마
+- 진지하거나 슬픈 글은 장난 없이 담백하게
+- 제공되지 않은 방문·시식 경험이나 없는 맛·시설 등 사실은 만들지 마
 {output_rule}
 {example_section}
 
@@ -307,7 +319,10 @@ class AIPromptBuilder:
 {context_s if context_s else '(본문 없음)'}"""
 
     @staticmethod
-    def select_v3_5_style_examples(examples: Optional[List[str]]) -> List[str]:
+    def select_v3_5_style_examples(examples: Optional[List[str]], title: str = "", excerpt: str = "") -> List[str]:
+        from services.comments.tone import needs_restrained_tone
+        if needs_restrained_tone(title, excerpt):
+            return []
         for example in examples or []:
             clean = (example or "").strip()
             if clean and len(clean) <= 100:

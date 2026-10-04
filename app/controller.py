@@ -121,6 +121,32 @@ class FeedController:
         self.consecutive_gemini_failures = 0
         self.gemini_consecutive_failure_limit = int(self.config.get("gemini_consecutive_failure_limit", 3))
 
+    @staticmethod
+    def _register_effective_action(
+        result: PostProcessResult,
+        post: FeedPost,
+        completed_post_keys: Set[str],
+        max_items: int,
+    ) -> bool:
+        """
+        댓글이 실제 등록(SUBMITTED)됐거나 공감을 새로 누른(action_taken) 글만 max_items 목표로 카운트한다.
+        스킵/가드 제외/기존 공감/실패/결과불명은 카운트하지 않는다.
+        """
+        comment_done = getattr(getattr(result, "comment_result", None), "status", None) == CommentSubmitState.SUBMITTED
+        like_done = FeedController._is_verified_new_like(getattr(result, "like_result", None))
+        if post.key in completed_post_keys or not (comment_done or like_done):
+            return False
+        completed_post_keys.add(post.key)
+        logger.log(
+            f"  🎯 [PROGRESS] 유효 처리 {len(completed_post_keys)}/{max_items} "
+            f"(댓글={'O' if comment_done else 'X'}, 공감={'O' if like_done else 'X'}) {post.key}"
+        )
+        return True
+
+    @staticmethod
+    def _is_verified_new_like(result: Optional[LikeProcessResult]) -> bool:
+        return bool(result and result.action_taken and result.state_after == LikeState.LIKED)
+
     def _handle_post_result(self, result: PostProcessResult) -> None:
         """포스트 처리 결과에 따라 통계 및 Gemini 연속 실패 회로차단기를 갱신합니다."""
         raw_err = getattr(result.comment_result, "error", "")
@@ -134,7 +160,7 @@ class FeedController:
                 "failed", "timeout", "publish_rejected", "response_timeout", "extension_not_ready", "dom_unsupported", "runtime_busy"
             )
 
-        if result.like_result.action_taken or result.like_result.state_after == LikeState.LIKED:
+        if self._is_verified_new_like(result.like_result):
             self.like_success_count += 1
 
         gemini_generation_success = bool(
@@ -407,14 +433,21 @@ class FeedController:
 
             self.state_mgr.update(new_state=FeedState.OPENING_SOURCE, message=f"피드 소스({source_type.value}) 접속 중...")
 
+            # max_items = 실제 댓글 등록/공감 성공 목표 수. 스킵/가드 제외/실패 글은 목표를 소모하지 않으므로
+            # 후보 탐색 한도(max_candidate_scan)를 넉넉히 잡고, 소스도 같은 한도까지 탐색하게 한다.
+            max_candidate_scan = (
+                max(max_items * 15, 100)
+                if (source_type == FeedSourceType.NEIGHBOR and neighbor_mutual_only)
+                else max(max_items * 5, 50)
+            )
+
             source: FeedSource
             if source_type == FeedSourceType.NEIGHBOR:
-                scan_cap = max(max_items * 15, 100) if neighbor_mutual_only else max_items
-                source = NeighborFeedSource(feed_page, max_items=scan_cap, stop_event=self.stop_event)
+                source = NeighborFeedSource(feed_page, max_items=max_candidate_scan, stop_event=self.stop_event)
             elif source_type == FeedSourceType.TARGETED_SEARCH:
                 source = TargetedSearchFeedSource(
                     feed_page,
-                    max_items=max_items,
+                    max_items=max_candidate_scan,
                     stop_event=self.stop_event,
                     enabled_categories=discovery_cats,
                     custom_queries=self.config.get("custom_discovery_queries", []),
@@ -423,7 +456,7 @@ class FeedController:
             elif source_type == FeedSourceType.RECOMMENDATION:
                 source = RecommendationFeedSource(
                     feed_page,
-                    max_items=max_items * 5,
+                    max_items=max_candidate_scan,
                     stop_event=self.stop_event,
                     pause_event=self.pause_event,
                     run_control=self.run_control,
@@ -514,13 +547,13 @@ class FeedController:
 
             seen_candidate_keys: Set[str] = set()
             attempted_post_keys: Set[str] = set()
+            completed_post_keys: Set[str] = set()  # 댓글 등록 또는 공감 성공한 글 (max_items 목표 카운트)
             self.like_success_count = 0
             self.comment_submitted_count = 0
             self.skipped_count = 0
             self.failed_count = 0
             self.consecutive_gemini_failures = 0
             scroll_attempts = 0
-            max_candidate_scan = max(max_items * 15, 100) if (source_type == FeedSourceType.NEIGHBOR and neighbor_mutual_only) else max_items * 5
 
             neighbor_cards_scanned = 0
             neighbor_non_mutual_skipped = 0
@@ -535,12 +568,12 @@ class FeedController:
             last_unexpected_error = ""
 
             logger.log("==================================================")
-            logger.log(f"🤖 [ASSISTANT] 피드 작업 시작 (목표: 최대 {max_items}개)")
+            logger.log(f"🤖 [ASSISTANT] 피드 작업 시작 (목표: 댓글 등록 또는 공감 성공 {max_items}개 / 후보 탐색 한도 {max_candidate_scan}개)")
 
             # 3. 디스커버리 및 순차 큐 처리 루프
             while (
-                len(attempted_post_keys) < max_items
-                and len(seen_candidate_keys) < max_candidate_scan
+                len(completed_post_keys) < max_items
+                and (not feed_queue.is_empty() or len(seen_candidate_keys) < max_candidate_scan)
                 and not self.stop_event.is_set()
             ):
                 if feed_queue.is_empty():
@@ -549,6 +582,7 @@ class FeedController:
                     discovered = source.discover_posts()
 
                     new_posts = [p for p in discovered if p.key not in seen_candidate_keys]
+                    new_posts = new_posts[:max_candidate_scan - len(seen_candidate_keys)]
 
                     if not new_posts:
                         if source.is_exhausted() or scroll_attempts > 6:
@@ -579,7 +613,7 @@ class FeedController:
 
                 feed_queue.set_active(post.key)
                 try:
-                    if len(attempted_post_keys) >= max_items or self.stop_event.is_set():
+                    if len(completed_post_keys) >= max_items or self.stop_event.is_set():
                         break
 
                     self.run_control.checkpoint("before_post_candidate")
@@ -792,7 +826,7 @@ class FeedController:
                                 logger.log(f"  ⚠️ [POST_RECOVERABLE] 재시도 후 글 처리 오류 격리 stage={stage} post_key={post_key} request_id={rid}: {rpe2}", "WARNING")
                                 preserved_like = LikeProcessResult(state_before=LikeState.UNKNOWN, action_taken=False, state_after=LikeState.UNKNOWN, error=str(rpe2))
                                 curr_res = getattr(processor, "current_result", None)
-                                if curr_res and getattr(curr_res, "like_result", None):
+                                if curr_res and curr_res.post.key == post.key and getattr(curr_res, "like_result", None):
                                     cand_like = curr_res.like_result
                                     if cand_like.state_before != LikeState.UNKNOWN or cand_like.action_taken or cand_like.state_after != LikeState.UNKNOWN:
                                         preserved_like = cand_like
@@ -812,7 +846,7 @@ class FeedController:
                             logger.log(f"  ⚠️ [POST_RECOVERABLE] 글 처리 오류 격리 stage={stage} post_key={post_key} request_id={rid}: {rpe}", "WARNING")
                             preserved_like = LikeProcessResult(state_before=LikeState.UNKNOWN, action_taken=False, state_after=LikeState.UNKNOWN, error=str(rpe))
                             curr_res = getattr(processor, "current_result", None)
-                            if curr_res and getattr(curr_res, "like_result", None):
+                            if curr_res and curr_res.post.key == post.key and getattr(curr_res, "like_result", None):
                                 cand_like = curr_res.like_result
                                 if cand_like.state_before != LikeState.UNKNOWN or cand_like.action_taken or cand_like.state_after != LikeState.UNKNOWN:
                                     preserved_like = cand_like
@@ -854,7 +888,7 @@ class FeedController:
                         )
                         preserved_like = LikeProcessResult(state_before=LikeState.UNKNOWN, action_taken=False, state_after=LikeState.UNKNOWN, error=str(pe))
                         curr_res = getattr(processor, "current_result", None)
-                        if curr_res and getattr(curr_res, "like_result", None):
+                        if curr_res and curr_res.post.key == post.key and getattr(curr_res, "like_result", None):
                             cand_like = curr_res.like_result
                             if cand_like.state_before != LikeState.UNKNOWN or cand_like.action_taken or cand_like.state_after != LikeState.UNKNOWN:
                                 preserved_like = cand_like
@@ -883,6 +917,9 @@ class FeedController:
                             final_close_reason = "consecutive_identical_error_3"
                             break
                     finally:
+                        completed_result = result or getattr(processor, "current_result", None)
+                        if completed_result and completed_result.post.key == post.key:
+                            self._register_effective_action(completed_result, post, completed_post_keys, max_items)
                         if source_type == FeedSourceType.RECOMMENDATION:
                             current_result = getattr(processor, "current_result", None)
                             eligibility = getattr(current_result, "eligibility", None)
@@ -936,7 +973,7 @@ class FeedController:
 
             if (
                 source_type == FeedSourceType.RECOMMENDATION
-                and isinstance(source, RecommendationFeedSource)
+                and hasattr(source, "examined_keys")
             ):
                 guard_service = processor.post_eligibility_service
                 decisions = list(guard_service.decisions.values())
@@ -975,12 +1012,12 @@ class FeedController:
                 gen_success = st.generated_success_count if st else 0
                 sub_unknown = st.submission_unknown_count if st else 0
                 completion_reason = (
-                    "target_reached" if len(attempted_post_keys) >= max_items else
+                    "target_reached" if len(completed_post_keys) >= max_items else
                     "scan_limit" if len(seen_candidate_keys) >= max_candidate_scan or (
-                        isinstance(source, RecommendationFeedSource) and len(source.examined_keys) >= max_candidate_scan
+                        hasattr(source, "examined_keys") and len(source.examined_keys) >= max_candidate_scan
                     ) else "candidates_exhausted"
                 )
-                self.state_mgr.update(new_state=FeedState.COMPLETED, message=f"작업 완료! ({completion_reason}, 총 {len(attempted_post_keys)}개 처리)")
+                self.state_mgr.update(new_state=FeedState.COMPLETED, message=f"작업 완료! ({completion_reason}, 댓글/공감 {len(completed_post_keys)}/{max_items}개 완료, 총 {len(attempted_post_keys)}개 처리)")
                 logger.log(
                     f"✅ [ASSISTANT] 전체 피드 작업 완료!\n"
                     f"  - 처리 포스트: {len(attempted_post_keys)}개\n"

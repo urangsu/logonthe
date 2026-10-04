@@ -384,6 +384,7 @@ class UserLearningService:
         anchors: Optional[List[str]] = None,
         limit: int = 3,
         raw_entries: Optional[List[dict]] = None,
+        recent_comments: Optional[List[str]] = None,
     ) -> Tuple[List[str], Dict[str, Any]]:
         """
         현재 글의 맥락(카테고리, 앵커)에 맞는 예시 2~3개를 동적으로 선별.
@@ -405,6 +406,7 @@ class UserLearningService:
 
         cat_upper = (category or "GENERAL").upper()
         anchors_set = set(a.lower() for a in (anchors or []) if a)
+        recent_norms = {re.sub(r"\s+", "", c) for c in (recent_comments or [])[-5:] if isinstance(c, str)}
 
         scored = []
         for idx, item in enumerate(cleaned):
@@ -416,6 +418,12 @@ class UserLearningService:
                 score += 1.0
 
             item_cat = (item.get("category") or "UNKNOWN").upper()
+            if cat_upper.startswith("FOOD") or cat_upper == "CAFE_DESSERT":
+                compatible = "FOOD" in item_cat or item_cat == "CAFE_DESSERT"
+            else:
+                compatible = item_cat == cat_upper
+            if not compatible and item_cat not in ("UNKNOWN", "COMMON"):
+                continue
             if item_cat != "UNKNOWN" and item_cat != "COMMON":
                 if item_cat == cat_upper or (cat_upper.startswith("FOOD") and "FOOD" in item_cat):
                     score += 2.0
@@ -423,6 +431,13 @@ class UserLearningService:
             item_anchor = (item.get("anchor") or "").lower()
             if item_anchor and item_anchor in anchors_set:
                 score += 2.0
+
+            text = item.get("final_submitted", "")
+            if re.sub(r"\s+", "", text) in recent_norms:
+                score -= 20.0
+            for phrase in ("조합이라니", "군침", "비주얼", "궁금", "든든"):
+                if phrase in text and sum(phrase in c for c in (recent_comments or [])[-5:]) >= 3:
+                    score -= 1.0
 
             score += idx * 0.001  # slight tiebreaker
             scored.append((score, item))
@@ -444,9 +459,12 @@ class UserLearningService:
                 break
 
         is_fallback = False
-        if len(selected_texts) < 2:
+        if not selected_texts:
             from services.ai_prompt import AIPromptBuilder
-            selected_texts = [ex.strip().lstrip("- ").strip('"') for ex in AIPromptBuilder.REPRESENTATIVE_EXAMPLES[:limit]]
+            selected_texts = (
+                [ex.strip().lstrip("- ").strip('"') for ex in AIPromptBuilder.REPRESENTATIVE_EXAMPLES[:limit]]
+                if cat_upper.startswith("FOOD") or cat_upper == "CAFE_DESSERT" else []
+            )
             is_fallback = True
 
         stats = {
@@ -464,10 +482,12 @@ class UserLearningService:
         category: str = "GENERAL",
         anchors: Optional[List[str]] = None,
         limit: int = 3,
+        recent_comments: Optional[List[str]] = None,
     ) -> Tuple[List[str], Dict[str, Any], PersonalizedStyleProfile]:
         raw_entries = cls.load_corpus()
         examples, stats = cls.select_dynamic_examples(
-            category=category, anchors=anchors, limit=limit, raw_entries=raw_entries
+            category=category, anchors=anchors, limit=limit, raw_entries=raw_entries,
+            recent_comments=recent_comments,
         )
         cleaned = cls.get_cleaned_corpus(raw_entries)
         profile = cls.compute_style_profile(cleaned)

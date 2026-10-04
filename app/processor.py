@@ -228,6 +228,8 @@ class GenerationContext:
             config=self.style_config,
             style_profile=self.style_profile,
             action_plan=None,
+            title=self.title or "",
+            excerpt=self.excerpt or "",
         )
 
     def build_prompt(
@@ -530,6 +532,7 @@ class PostProcessor:
             category=content_focus,
             anchors=food_anchors,
             limit=2,
+            recent_comments=recent_submits,
         )
 
         from services.comments.policy import CommentStylePolicy
@@ -538,6 +541,8 @@ class PostProcessor:
             config=self.config,
             style_profile=style_profile,
             action_plan=action_plan,
+            title=post.title or "",
+            excerpt=post.excerpt or "",
         )
 
         cfg_dict = self.config if isinstance(self.config, dict) else (self.config.data if hasattr(self.config, "data") else {})
@@ -573,7 +578,9 @@ class PostProcessor:
             stats = gen_ctx.corpus_stats or {}
             is_v35 = gen_ctx.prompt_version in ("3.5", "v3.5", "3.5.0-reaction-planned")
             referenced = (
-                len(AIPromptBuilder.select_v3_5_style_examples(gen_ctx.corpus_examples)) if is_v35
+                len(AIPromptBuilder.select_v3_5_style_examples(
+                    gen_ctx.corpus_examples, gen_ctx.title,
+                    f"{gen_ctx.excerpt or ''}\n{gen_ctx.selected_context or ''}")) if is_v35
                 else stats.get("referenced", len(gen_ctx.corpus_examples))
             )
             logger.log(
