@@ -86,6 +86,21 @@ class TestTargetedDiscoveryV9(unittest.TestCase):
         self.assertEqual(decision.stage, "detail")
         self.assertIn("ETF", decision.evidence)
 
+    def test_incidental_portfolio_does_not_block_restaurant_review(self):
+        decision = DiscoveryTopicFilter.evaluate(
+            "서울 가성비 호텔 뷔페 더링크 프레임 평일 런치 가격 시간 예약 주차",
+            "호텔 브랜드 포트폴리오를 소개합니다. 런치 뷔페 메뉴와 예약 후기를 남겨요",
+            stage="detail",
+        )
+        self.assertTrue(decision.allowed)
+        financial = DiscoveryTopicFilter.evaluate(
+            "호텔에서 점심 먹고 투자 기록",
+            "주식 포트폴리오와 ETF 배당주를 정리했어요",
+            stage="detail",
+        )
+        self.assertFalse(financial.allowed)
+        self.assertEqual(financial.blocked_category, "finance")
+
     def test_ambiguous_substrings_do_not_false_positive(self):
         allowed_titles = [
             "바디워시 향 좋은 제품으로 욕실 정리",

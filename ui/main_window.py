@@ -317,11 +317,22 @@ class MainWindow(ctk.CTk):
             variable=self.skip_on_comment_failure_var, text_color="#38BDF8"
         ).pack(side="left", padx=4)
 
-        ctk.CTkLabel(opt_frame, text="최대 글 수:", font=ctk.CTkFont(size=11)).pack(side="left", padx=(6, 2))
-        self.max_items_entry = ctk.CTkEntry(opt_frame, width=40, height=22, font=ctk.CTkFont(size=11))
+        limits_row = ctk.CTkFrame(tab_feed, fg_color="transparent")
+        limits_row.pack(fill="x", padx=4, pady=(2, 3))
+        self.target_count_label = ctk.CTkLabel(limits_row, text="목표 댓글 수:" if self.comment_enabled_var.get() else "목표 공감 수:", font=ctk.CTkFont(size=11))
+        self.target_count_label.pack(side="left", padx=(4, 2))
+        self.comment_enabled_var.trace_add("write", lambda *_: self.target_count_label.configure(text="목표 댓글 수:" if self.comment_enabled_var.get() else "목표 공감 수:"))
+        self.max_items_entry = ctk.CTkEntry(limits_row, width=48, height=24, font=ctk.CTkFont(size=11))
         self.max_items_entry.pack(side="left", padx=1)
         self.max_items_entry.insert(0, str(self.config_service.get("max_feed_items", 20)))
         add_mac_clipboard_support(self.max_items_entry, self)
+
+        ctk.CTkLabel(limits_row, text="한 실행 · 블로그당 댓글 한도:", font=ctk.CTkFont(size=11)).pack(side="left", padx=(16, 3))
+        self.comment_blog_limit_entry = ctk.CTkEntry(limits_row, width=48, height=24, font=ctk.CTkFont(size=11))
+        self.comment_blog_limit_entry.pack(side="left", padx=1)
+        self.comment_blog_limit_entry.insert(0, str(self.config_service.get("comment_blog_limit", 2)))
+        add_mac_clipboard_support(self.comment_blog_limit_entry, self)
+        ctk.CTkLabel(limits_row, text="개", font=ctk.CTkFont(size=11)).pack(side="left", padx=2)
 
         # Gemini & Composer Card
         ai_card = ctk.CTkFrame(tab_feed, border_width=1, border_color="#334155")
@@ -1192,6 +1203,7 @@ class MainWindow(ctk.CTk):
         # 1. 숫자 입력 검증
         try:
             max_items = int(self.max_items_entry.get().strip())
+            comment_blog_limit = int(self.comment_blog_limit_entry.get().strip())
             act_min = float(self.action_min_entry.get().strip())
             act_max = float(self.action_max_entry.get().strip())
             nxt_min = float(self.next_min_entry.get().strip())
@@ -1220,7 +1232,9 @@ class MainWindow(ctk.CTk):
                 rec_neighbor_max = 0
 
             if not (1 <= max_items <= 500):
-                raise ValueError("최대 처리 글 수는 1~500 사이여야 합니다.")
+                raise ValueError("목표 댓글/공감 수는 1~500 사이여야 합니다.")
+            if not (1 <= comment_blog_limit <= 100):
+                raise ValueError("블로그당 댓글 한도는 1~100 사이여야 합니다.")
             if not (0 <= act_min <= act_max <= 300) or not (0 <= nxt_min <= nxt_max <= 300):
                 raise ValueError("동작 간격 및 다음 글 대기 시간 범위가 올바르지 않습니다.")
             if not (0 <= p_chance <= 1.0) or not (0 <= p_min <= p_max <= 3600):
@@ -1260,6 +1274,7 @@ class MainWindow(ctk.CTk):
             "discovery_categories": enabled_discovery_cats,
             "custom_discovery_queries": custom_queries_list,
             "max_feed_items": max_items,
+            "comment_blog_limit": comment_blog_limit,
             "like_enabled": self.like_enabled_var.get(),
             "comment_enabled": comment_val,
             "auto_comment_submit_enabled": auto_submit_val,

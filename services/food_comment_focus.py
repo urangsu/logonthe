@@ -63,8 +63,11 @@ class FoodCommentFocus:
         "네일", "네일아트", "미용실", "헤어샵", "왁싱", "필라테스", "피티", "헬스장", "숙소", "호텔", "펜션", "모텔", "게스트하우스"
     ]
 
+    ORAL_CARE_PRODUCTS = ("치약", "칫솔", "가글", "구강청결제", "치실")
+
     # Non-food product review signals (appliances, home, living)
     NON_FOOD_PRODUCT_SIGNALS = [
+        *ORAL_CARE_PRODUCTS,
         "탄소매트", "온열매트", "전기매트", "온수매트", "매트", "토퍼", "매트리스",
         "청소기", "건조기", "세탁기", "공기청정기", "가습기", "제습기", "로봇청소기",
         "의자", "침대", "베개", "소파", "책상", "가구", "인테리어",

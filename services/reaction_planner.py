@@ -90,6 +90,7 @@ class ReactionContextPlanner:
 
     # 제품 신호
     PRODUCT_SIGNALS = (
+        *FoodCommentFocus.ORAL_CARE_PRODUCTS,
         "사용기", "언박싱", "내돈내산", "구매", "스펙", "배터리", "충전", "가성비", "내구성",
         "디자인", "장단점", "패키징", "키보드", "마우스", "모니터", "이어폰", "청소기", "가전",
         "화장품", "크림", "세럼", "거치대", "케이스", "워치", "태블릿", "노트북"
@@ -299,6 +300,9 @@ class ReactionContextPlanner:
         scores["PRODUCT"] += min(len(non_food_prod) * 3.0, 6.0)
         prod_hits = sum(1 for kw in cls.PRODUCT_SIGNALS if kw in combined)
         scores["PRODUCT"] += min(prod_hits * 2.0, 6.0)
+        # Flavor words in oral-care reviews describe a product, not a meal.
+        if any(kw in title for kw in FoodCommentFocus.ORAL_CARE_PRODUCTS):
+            scores["PRODUCT"] += 3.0
 
         # 4. SERVICE 점수
         non_dining_svc = [sig for sig in FoodCommentFocus.NON_DINING_SERVICES if sig in combined]

@@ -2736,6 +2736,17 @@ test('SEND-HARDEN-002: userTurnMatchesExpected handles multi-paragraph user quer
   assert.strictEqual(runtime.userTurnMatchesExpected(queryNode, truncatedStrict), false);
 });
 
+test('SEND-CORRELATION: rendered line wrapping preserves full prompt identity', () => {
+  const { runtime } = loadRealContentJs();
+  const query = text => ({ querySelector: () => null, querySelectorAll: () => [], innerText: text });
+  const expected = '댓글만 출력해\n가격 7,900원\n직접 먹었다고 하지 마';
+  assert.strictEqual(runtime.userTurnMatchesExpected(query('댓글만 출력해 가격 7,900원 직접 먹었다고 하지 마'), expected), true);
+  assert.strictEqual(runtime.userTurnMatchesExpected(query('댓글만 출력해 가격 9,900원 직접 먹었다고 하지 마'), expected), false);
+  assert.strictEqual(runtime.userTurnMatchesExpected(query('댓글만 출력해 가격 7,900원 직접 먹었다고 해'), expected), false);
+  assert.strictEqual(runtime.userTurnMatchesExpected(query('댓글만 출력해 가격 7,900원'), expected), false);
+  assert.strictEqual(runtime.isExactPromptMatch('댓글만 출력해 가격 7,900원 직접 먹었다고 하지 마', expected), false);
+});
+
 test('SEND-HARDEN-003: freshConversationState returns false if composer has text', () => {
   const { runtime, context } = loadRealContentJs();
   const dirtyEditor = {
@@ -2842,7 +2853,7 @@ test('SEND-HARDEN-006: Pre-click send button re-resolution fails with send_not_r
 });
 
 test('SEND-HARDEN-007: Send commit requires user turn persistence for >= 650ms; turns vanishing at 300ms fail with send_commit_unknown', async () => {
-  const { runtime, context } = loadRealContentJs();
+  const { runtime, context, sentMessages } = loadRealContentJs();
   let composer;
   const editorEl = {
     tagName: 'DIV', isConnected: true, isContentEditable: true,
@@ -2900,6 +2911,12 @@ test('SEND-HARDEN-007: Send commit requires user turn persistence for >= 650ms; 
 
   assert.strictEqual(res.status, 'failed');
   assert.strictEqual(res.error, 'send_commit_unknown');
+  const diagnostic = sentMessages.find(m => m.event?.type === 'SEND_COMMIT_UNKNOWN')?.event;
+  assert.ok(diagnostic);
+  assert.strictEqual(diagnostic.composerContainsPrompt, true);
+  assert.strictEqual(diagnostic.userCorrelated, false);
+  assert.strictEqual(diagnostic.generationStarted, false);
+  assert.ok(diagnostic.elapsedMs >= 0);
 });
 
 test('SEND-HARDEN-008: Send commit succeeds when user turn persists >= 650ms and composer is cleared', async () => {

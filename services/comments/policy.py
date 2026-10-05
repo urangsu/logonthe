@@ -64,7 +64,7 @@ class CommentStylePolicy:
         max_decorations = 1 if (allow_laughter or allow_emoji) else 0
 
         if allow_laughter and allow_emoji:
-            decor_instruction = "말하듯 편한 존댓말로 쓰고, 어울릴 때만 ㅎㅎ·ㅠㅠ·ㅜㅜ 또는 이모지를 합계 최대 1개 사용"
+            decor_instruction = "말하듯 편한 존댓말. 표지는 없어도 되고, 웃음·미소(ㅋㅋ·^^·😊), 음식에 끌리면 😋, 아쉬움엔 ㅠㅠ처럼 감정에 맞게 합계 최대 1개만 선택"
         elif allow_laughter:
             decor_instruction = "말하듯 편한 존댓말로 쓰고, 어울릴 때만 ㅎㅎ·ㅠㅠ·ㅜㅜ 중 하나를 최대 1회 사용"
         elif allow_emoji:

@@ -16,6 +16,7 @@ from app.processor import PostProcessor, StopRequestedException
 from app.run_control import RunControl, RunControlState
 from app.policy import resolve_run_policy, RunMode
 from app.feed_queue import FeedQueue
+from app.feed_comment_policy import FeedCommentPolicy
 from browser.session import BrowserSession, interruptible_wait
 from naver.sources import NeighborFeedSource, RecommendationFeedSource, DirectUrlSource, TargetedSearchFeedSource, FeedSource
 from naver.auth_guard import NaverAuthGuard
@@ -127,18 +128,19 @@ class FeedController:
         post: FeedPost,
         completed_post_keys: Set[str],
         max_items: int,
+        comments_only: bool = False,
     ) -> bool:
         """
-        댓글이 실제 등록(SUBMITTED)됐거나 공감을 새로 누른(action_taken) 글만 max_items 목표로 카운트한다.
-        스킵/가드 제외/기존 공감/실패/결과불명은 카운트하지 않는다.
+        댓글 모드에서는 이번 실행의 신규 등록만, 공감 전용 모드에서는 확인된 신규 공감만 센다.
         """
-        comment_done = getattr(getattr(result, "comment_result", None), "status", None) == CommentSubmitState.SUBMITTED
+        comment = getattr(result, "comment_result", None)
+        comment_done = bool(comment and comment.status == CommentSubmitState.SUBMITTED and not comment.already_present)
         like_done = FeedController._is_verified_new_like(getattr(result, "like_result", None))
-        if post.key in completed_post_keys or not (comment_done or like_done):
+        if post.key in completed_post_keys or not (comment_done or (like_done and not comments_only)):
             return False
         completed_post_keys.add(post.key)
         logger.log(
-            f"  🎯 [PROGRESS] 유효 처리 {len(completed_post_keys)}/{max_items} "
+            f"  🎯 [PROGRESS] {'댓글 등록' if comments_only else '유효 처리'} {len(completed_post_keys)}/{max_items} "
             f"(댓글={'O' if comment_done else 'X'}, 공감={'O' if like_done else 'X'}) {post.key}"
         )
         return True
@@ -146,6 +148,14 @@ class FeedController:
     @staticmethod
     def _is_verified_new_like(result: Optional[LikeProcessResult]) -> bool:
         return bool(result and result.action_taken and result.state_after == LikeState.LIKED)
+
+    @staticmethod
+    def _preserve_comment_result(current_result, post: FeedPost, error: Exception) -> CommentProcessResult:
+        if current_result and current_result.post.key == post.key:
+            comment = current_result.comment_result
+            if comment.status in (CommentSubmitState.SUBMITTED, CommentSubmitState.SUBMISSION_UNKNOWN):
+                return comment
+        return CommentProcessResult(status=CommentSubmitState.FAILED, error=str(error))
 
     def _handle_post_result(self, result: PostProcessResult) -> None:
         """포스트 처리 결과에 따라 통계 및 Gemini 연속 실패 회로차단기를 갱신합니다."""
@@ -164,13 +174,14 @@ class FeedController:
             self.like_success_count += 1
 
         gemini_generation_success = bool(
-            result.comment_result.status == CommentSubmitState.SUBMITTED
+            (result.comment_result.status == CommentSubmitState.SUBMITTED and not result.comment_result.already_present)
             or (result.comment_result.draft_text and not is_gemini_failure and cmt_err != "context_insufficient")
         )
 
         if result.comment_result.status == CommentSubmitState.SUBMITTED:
-            self.comment_submitted_count += 1
-            self.consecutive_gemini_failures = 0
+            if not result.comment_result.already_present:
+                self.comment_submitted_count += 1
+                self.consecutive_gemini_failures = 0
         elif result.comment_result.status == CommentSubmitState.SUBMISSION_UNKNOWN:
             self.state_mgr.update(inc_submission_unknown=True)
         elif result.comment_result.status == CommentSubmitState.SKIPPED:
@@ -179,7 +190,12 @@ class FeedController:
             if gemini_generation_success:
                 self.consecutive_gemini_failures = 0
 
-        if result.like_result.error or result.comment_result.status == CommentSubmitState.FAILED:
+        like_error = result.like_result.error
+        non_failure_like_reasons = {
+            "user_skipped", "user_skipped_pre_like", "stopped_pre_like",
+            "low_confidence_skip", "low_confidence_precondition",
+        }
+        if (like_error and like_error not in non_failure_like_reasons) or result.comment_result.status == CommentSubmitState.FAILED:
             self.failed_count += 1
 
         if is_gemini_failure:
@@ -443,7 +459,10 @@ class FeedController:
 
             source: FeedSource
             if source_type == FeedSourceType.NEIGHBOR:
-                source = NeighborFeedSource(feed_page, max_items=max_candidate_scan, stop_event=self.stop_event)
+                source = NeighborFeedSource(
+                    feed_page, max_items=max_candidate_scan, stop_event=self.stop_event,
+                    pause_event=self.pause_event, run_control=self.run_control,
+                )
             elif source_type == FeedSourceType.TARGETED_SEARCH:
                 source = TargetedSearchFeedSource(
                     feed_page,
@@ -547,7 +566,10 @@ class FeedController:
 
             seen_candidate_keys: Set[str] = set()
             attempted_post_keys: Set[str] = set()
-            completed_post_keys: Set[str] = set()  # 댓글 등록 또는 공감 성공한 글 (max_items 목표 카운트)
+            completed_post_keys: Set[str] = set()
+            comment_policy = FeedCommentPolicy(self.config.get("comment_blog_limit", 2))
+            completion_reason = None
+            target_label = "댓글 등록" if comment_enabled else "신규 공감"
             self.like_success_count = 0
             self.comment_submitted_count = 0
             self.skipped_count = 0
@@ -568,7 +590,8 @@ class FeedController:
             last_unexpected_error = ""
 
             logger.log("==================================================")
-            logger.log(f"🤖 [ASSISTANT] 피드 작업 시작 (목표: 댓글 등록 또는 공감 성공 {max_items}개 / 후보 탐색 한도 {max_candidate_scan}개)")
+            logger.log(f"🤖 [ASSISTANT] 피드 작업 시작 (목표: {target_label} {max_items}개 / 후보 탐색 한도 {max_candidate_scan}개)")
+            logger.log(f"[COMMENT_POLICY] perBlogLimit={comment_policy.blog_limit} previousCommentBoundary=disabled previousComments=statistics_only target={'comments' if comment_enabled else 'likes'}")
 
             # 3. 디스커버리 및 순차 큐 처리 루프
             while (
@@ -585,8 +608,12 @@ class FeedController:
                     new_posts = new_posts[:max_candidate_scan - len(seen_candidate_keys)]
 
                     if not new_posts:
-                        if source.is_exhausted() or scroll_attempts > 6:
-                            logger.log("[ASSISTANT] 더 이상 로드할 새 게시글이 없습니다.")
+                        if source.is_exhausted():
+                            logger.log("[FEED] 소스 탐색 한도 또는 후보 목록 끝에 도달했습니다.")
+                            break
+                        if scroll_attempts > 6:
+                            completion_reason = "feed_loading_stalled"
+                            logger.log(f"[FEED][LOADING_STALLED] 추가 로딩 {scroll_attempts}회 후에도 미탐색 후보 없음. 이전 댓글 {len(comment_policy.previous_comment_keys)}개는 집계만 합니다; 새글 부재로 단정하지 않습니다.", "WARNING")
                             break
 
                         if feed_queue.can_scroll():
@@ -596,6 +623,8 @@ class FeedController:
                             self.run_control.checkpoint("after_scroll")
                             scroll_attempts += 1
                             if not loaded:
+                                completion_reason = "feed_load_failed"
+                                logger.log("[FEED][LOAD_FAILED] 추가 피드 로딩에 실패했습니다. 새글 부재로 단정하지 않습니다.", "WARNING")
                                 break
                             continue
                         else:
@@ -646,12 +675,16 @@ class FeedController:
                         logger.log(f"  🔍 [RECOVERY] 이전 실행 미확정(SUBMISSION_UNKNOWN) 포스트 감지: {post.key}. 본인 댓글 존재 여부를 서버에서 재확인합니다...")
                         try:
                             check_page = self.session.get_detail_page()
+                            self.run_control.checkpoint("before_comment_recovery_goto")
                             check_page.goto(post.url, wait_until="domcontentloaded", timeout=15000)
+                            self.run_control.checkpoint("before_comment_recovery_open")
                             open_ok, open_reason = CommentInteractionService.open_comment_layer(check_page, self.stop_event)
+                            self.run_control.checkpoint("after_comment_recovery_open")
                             if open_ok:
                                 editor_context = MobileDOMResolver.get_comment_editor_context(check_page)
                                 presence_frame = editor_context["frame"] if editor_context else check_page
                                 pres = ServerCommentDuplicateGuard.scan_page_for_my_comment(presence_frame, stop_event=self.stop_event)
+                                self.run_control.checkpoint("after_comment_recovery_scan")
                                 if pres.state == CommentPresenceState.PRESENT:
                                     logger.log(f"  ✅ [RECOVERY] 서버 목록에서 본인 댓글이 확인되었습니다 -> SUBMITTED로 상태 확정: {post.key}")
                                     self.history.resolve_unconfirmed_post(post.key, CommentSubmitState.SUBMITTED)
@@ -665,20 +698,29 @@ class FeedController:
                                     logger.log(f"  ⚠️ [RECOVERY] 댓글 상태 판정 불가(UNKNOWN) -> 중복 방지를 위해 미확정 격리를 유지합니다: {post.key}")
                             else:
                                 logger.log(f"  ⚠️ [RECOVERY] 댓글 레이어 준비 실패({open_reason}) -> 미확정 격리 유지: {post.key}")
+                        except StopRequestedException:
+                            raise
                         except Exception as rec_err:
                             logger.log(f"  ⚠️ [RECOVERY] 미확정 상태 재확인 중 예외: {rec_err}", "WARNING")
+
+                    if comment_enabled and is_local_commented:
+                        comment_policy.observe_previous(post)
+                        logger.log(f"[FEED][PREVIOUS_COMMENT] post={post.key} distinct={len(comment_policy.previous_comment_keys)} action=skip_comment_only")
 
                     if source_type == FeedSourceType.NEIGHBOR and neighbor_like_sweep_mode:
                         should_like = True
                     else:
                         should_like = like_enabled and not is_local_liked
                     should_comment = comment_enabled and not is_local_commented and not is_local_unconfirmed
+                    if should_comment and not comment_policy.can_comment(post):
+                        should_comment = False
+                        logger.log(f"[COMMENT][BLOG_RUN_LIMIT] blog={comment_policy.blog_id(post)} post={post.key} limit={comment_policy.blog_limit}; 댓글만 제외, 공감은 별도 처리")
 
                     if not should_like and not should_comment:
                         if is_local_unconfirmed:
                             logger.log(f"  🛑 [IDEMPOTENT] 등록 결과 불명(SUBMISSION_UNKNOWN) 상태의 글이므로 중복 등록 방지를 위해 댓글 작성을 건너뜁니다: {post.key}")
                         else:
-                            logger.log(f"  ⏭️ [IDEMPOTENT] 로컬 기록 상 이미 공감 및 댓글 완료된 글입니다: {post.key}")
+                            logger.log(f"  ⏭️ [IDEMPOTENT] 필요한 작업 없음: {post.key} liked={is_local_liked} commented={is_local_commented} blog_comment_limit={not comment_policy.can_comment(post)}")
                         continue
 
                     # 실제 처리 진입 대상 카운트 등록
@@ -752,6 +794,7 @@ class FeedController:
 
                     # 개별 포스트 오류 격리 (Per-Post Error Boundary) & 단일 페이지 복구 재시도
                     result: Optional[PostProcessResult] = None
+                    result_handled = False
                     try:
                         result = processor.process(detail_page, post, action_plan=action_plan)
                         if source_type == FeedSourceType.RECOMMENDATION and result.eligibility and result.eligibility.allowed:
@@ -760,6 +803,7 @@ class FeedController:
                         last_unexpected_error = ""
                         self.history.record_result(result)
                         self._handle_post_result(result)
+                        result_handled = True
 
                         if source_type == FeedSourceType.NEIGHBOR and neighbor_mutual_only:
                             if hasattr(result, "like_result") and result.like_result:
@@ -805,6 +849,7 @@ class FeedController:
                                 last_unexpected_error = ""
                                 self.history.record_result(result)
                                 self._handle_post_result(result)
+                                result_handled = True
                                 if neighbor_like_sweep_mode:
                                     state_before = getattr(result.like_result, "state_before", None) if hasattr(result, "like_result") and result.like_result else None
                                     if state_before == LikeState.LIKED:
@@ -834,10 +879,11 @@ class FeedController:
                                     post=post,
                                     like_result=preserved_like,
                                     eligibility=getattr(curr_res, "eligibility", None),
-                                    comment_result=CommentProcessResult(status=CommentSubmitState.FAILED, error=str(rpe2))
+                                    comment_result=self._preserve_comment_result(curr_res, post, rpe2)
                                 )
                                 self.history.record_result(failed_res)
                                 self._handle_post_result(failed_res)
+                                result_handled = True
                                 result = failed_res
                         else:
                             stage = getattr(processor, "current_stage", "unknown")
@@ -854,10 +900,11 @@ class FeedController:
                                 post=post,
                                 like_result=preserved_like,
                                 eligibility=getattr(curr_res, "eligibility", None),
-                                comment_result=CommentProcessResult(status=CommentSubmitState.FAILED, error=str(rpe))
+                                comment_result=self._preserve_comment_result(curr_res, post, rpe)
                             )
                             self.history.record_result(failed_res)
                             self._handle_post_result(failed_res)
+                            result_handled = True
                             result = failed_res
 
                             # RecoverablePostError 서킷 브레이커:
@@ -896,10 +943,11 @@ class FeedController:
                             post=post,
                             like_result=preserved_like,
                             eligibility=getattr(curr_res, "eligibility", None),
-                            comment_result=CommentProcessResult(status=CommentSubmitState.FAILED, error=str(pe))
+                            comment_result=self._preserve_comment_result(curr_res, post, pe)
                         )
                         self.history.record_result(failed_res)
                         self._handle_post_result(failed_res)
+                        result_handled = True
                         result = failed_res
 
                         err_signature = f"{type(pe).__name__}:{stage}:{str(pe).splitlines()[0] if str(pe) else ''}"
@@ -918,8 +966,21 @@ class FeedController:
                             break
                     finally:
                         completed_result = result or getattr(processor, "current_result", None)
+                        current_result = getattr(processor, "current_result", None)
+                        if current_result and current_result.post.key == post.key and current_result.comment_result.status == CommentSubmitState.SUBMISSION_UNKNOWN:
+                            comment_policy.record_result(current_result)
                         if completed_result and completed_result.post.key == post.key:
-                            self._register_effective_action(completed_result, post, completed_post_keys, max_items)
+                            if not result_handled and (
+                                self._is_verified_new_like(completed_result.like_result)
+                                or completed_result.comment_result.status in (CommentSubmitState.SUBMITTED, CommentSubmitState.SUBMISSION_UNKNOWN)
+                            ):
+                                try:
+                                    self.history.record_result(completed_result)
+                                except Exception as history_error:
+                                    logger.log(f"[HISTORY] 중단 직전 확정 결과 기록 실패: {history_error}", "WARNING")
+                                self._handle_post_result(completed_result)
+                            comment_policy.record_result(completed_result)
+                            self._register_effective_action(completed_result, post, completed_post_keys, max_items, comments_only=comment_enabled)
                         if source_type == FeedSourceType.RECOMMENDATION:
                             current_result = getattr(processor, "current_result", None)
                             eligibility = getattr(current_result, "eligibility", None)
@@ -1015,17 +1076,21 @@ class FeedController:
                     "target_reached" if len(completed_post_keys) >= max_items else
                     "scan_limit" if len(seen_candidate_keys) >= max_candidate_scan or (
                         hasattr(source, "examined_keys") and len(source.examined_keys) >= max_candidate_scan
-                    ) else "candidates_exhausted"
+                    ) else completion_reason or "candidates_exhausted"
                 )
-                self.state_mgr.update(new_state=FeedState.COMPLETED, message=f"작업 완료! ({completion_reason}, 댓글/공감 {len(completed_post_keys)}/{max_items}개 완료, 총 {len(attempted_post_keys)}개 처리)")
+                loading_error = completion_reason in ("feed_loading_stalled", "feed_load_failed")
+                target_status = "목표 달성" if len(completed_post_keys) >= max_items else "목표 미달"
+                self.state_mgr.update(new_state=FeedState.ERROR if loading_error else FeedState.COMPLETED, message=f"{'추가 로딩 중단' if loading_error else '작업 종료'} ({completion_reason}, {target_status}: {target_label} {len(completed_post_keys)}/{max_items}개, 총 {len(attempted_post_keys)}개 처리)")
                 logger.log(
-                    f"✅ [ASSISTANT] 전체 피드 작업 완료!\n"
+                    ("✅ [ASSISTANT] 전체 피드 작업 완료!\n" if completion_reason == "target_reached" else "[ASSISTANT] 피드 작업 종료\n") +
                     f"  - 처리 포스트: {len(attempted_post_keys)}개\n"
                     f"  - 종료 사유: {completion_reason}\n"
+                    f"  - 목표 결과: {target_status} ({target_label} {len(completed_post_keys)}/{max_items})\n"
                     f"  - 공감 성공: {self.like_success_count}개\n"
                     f"  - 랜덤 댓글 표본: 선정 {sampled_in}개 / 제외 {sampled_out}개\n"
                     f"  - Gemini 생성 성공: {gen_success}개\n"
                     f"  - 댓글 등록 완료: {self.comment_submitted_count}개\n"
+                    f"  - 이전 댓글 감지: {len(comment_policy.previous_comment_keys)}개 (한 실행 블로그당 댓글 최대 {comment_policy.blog_limit}개)\n"
                     f"  - 건너뜀(스킵): {self.skipped_count}개 (결과불명 격리: {sub_unknown}개)\n"
                     f"  - 실패: {self.failed_count}개"
                 )
@@ -1036,7 +1101,7 @@ class FeedController:
                         f"alreadyReacted={neighbor_already_liked} newLikes={neighbor_new_likes} "
                         f"unknownState={neighbor_unknown_state}"
                     )
-                final_close_reason = "completed"
+                final_close_reason = completion_reason if loading_error else "completed"
 
         except StopRequestedException:
             self.state_mgr.update(new_state=FeedState.STOPPED, message="사용자에 의해 작업이 중지되었습니다.")

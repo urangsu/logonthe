@@ -24,7 +24,7 @@ class AIPromptBuilder:
     """
 
     PROMPT_VERSION = PROMPT_VERSION_V3_5
-    V3_5_REVISION = "user-voice-context-v5"
+    V3_5_REVISION = "user-voice-context-v6-decoration-variety"
     PROMPT_VERSION_V3_0 = PROMPT_VERSION_V3_0
     PROMPT_VERSION_V3_1 = PROMPT_VERSION_V3_1
     PROMPT_VERSION_V3_2 = PROMPT_VERSION_V3_2
@@ -278,6 +278,16 @@ class AIPromptBuilder:
         if len(avoid_endings) == 3 and len(set(avoid_endings)) == 1:
             recent_ending_note = "\n- 최근 끝맺음 " + json.dumps(avoid_endings[-1:], ensure_ascii=False) + " 은 참고만 하고 문맥에 맞는 어미를 골라줘"
         recent_texts = [c for c in (recent_comments or [])[-5:] if isinstance(c, str)]
+        frequent = []
+        if not restrained and style_policy and (style_policy.allow_soft_laughter or style_policy.allow_soft_emoji):
+            from services.comments.community_rhythm import FinalQualityGate
+            repeated_markers = []
+            for comment in recent_texts[-3:]:
+                markers = FinalQualityGate._LAUGHTER_RE.findall(comment) + FinalQualityGate._extract_emojis(comment)
+                repeated_markers.extend(markers)
+            frequent = list(dict.fromkeys(m for m in repeated_markers if repeated_markers.count(m) >= 2))
+            if frequent:
+                recent_ending_note += "\n- 최근 " + json.dumps(frequent[:2], ensure_ascii=False) + " 표지는 이번엔 쉬어가자. 표지 없이 쓰거나 다른 표지를 감정에 맞을 때만 골라"
         repeated_phrases = [p for p in ("조합이라니", "군침", "비주얼", "궁금", "든든", "사진만 봐도")
                             if sum(p in c for c in recent_texts) >= 3]
         if repeated_phrases:
@@ -287,7 +297,8 @@ class AIPromptBuilder:
         style_instruction = style_policy.style_instruction if style_policy and style_policy.style_instruction else "편한 존댓말, 보통 1문장, 필요할 때만 2문장. 마침표 없이 자연스러운 대화체"
         if restrained:
             style_instruction = "짧고 담백한 존댓말. 장난·들뜬 감탄을 피하고 웃음·이모지는 분위기에 맞을 때만. 문장부호는 문맥에 맞게"
-        examples = cls.select_v3_5_style_examples(corpus_examples, title_s, tone_context)
+        varied_examples = [e for e in (corpus_examples or []) if isinstance(e, str) and not any(m in e for m in frequent)]
+        examples = cls.select_v3_5_style_examples(varied_examples, title_s, tone_context)
         example_section = (
             "\n말투 참고만 하고 소재나 문장을 복사하지 마:\n" + json.dumps(examples, ensure_ascii=False) + "\n"
             if examples else ""

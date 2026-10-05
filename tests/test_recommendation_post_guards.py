@@ -218,13 +218,17 @@ class TestRecommendationPostGuards(unittest.TestCase):
             self.assertFalse(reopened.is_comment_submitted(post().key))
             self.assertFalse(reopened.posts[post().key]["eligibility"]["allowed"])
 
-    def run_controller(self, target, allowed_after, batch=False, crash_after_like=False):
+    def run_controller(self, target, allowed_after, batch=False, crash_after_like=False,
+                       candidates=None, previous=(), liked=(), statuses=None, new_likes=False,
+                       server_previous=(), load_stalled=False, blog_limit=2):
         config = cfg(feed_source="recommendation", max_feed_items=target, campaign_id="test",
-                     like_enabled=False, comment_enabled=True, gemini_web_enabled=False,
-                     auto_comment_submit_enabled=False)
+                     like_enabled=new_likes, comment_enabled=True, gemini_web_enabled=False,
+                     auto_comment_submit_enabled=False, comment_blog_limit=blog_limit)
         history = MagicMock()
         history.is_liked.return_value = False
         history.is_comment_submitted.return_value = False
+        history.is_liked.side_effect = lambda key: key in liked
+        history.is_comment_submitted.side_effect = lambda key: key in previous
         history.is_comment_unconfirmed.return_value = False
         history.get_unconfirmed_posts.return_value = {}
         history.get_recent_submitted_comments.return_value = []
@@ -232,12 +236,19 @@ class TestRecommendationPostGuards(unittest.TestCase):
         source_ref = []
         def discover(source):
             source_ref[:] = [source]
+            if candidates is not None:
+                unseen = [p for p in candidates if p.key not in source.examined_keys]
+                if not unseen:
+                    return []
+                source.examined_keys.add(unseen[0].key)
+                order.append(("candidate", int(unseen[0].log_no)))
+                return unseen[:1]
             if batch:
                 if source.examined_keys:
                     return []
-                candidates = [post(f"blog{i}", i) for i in range(1, source.max_items + 1)]
-                source.examined_keys.update(p.key for p in candidates)
-                return candidates
+                batch_candidates = [post(f"blog{i}", i) for i in range(1, source.max_items + 1)]
+                source.examined_keys.update(p.key for p in batch_candidates)
+                return batch_candidates
             n = len(source.examined_keys) + 1
             if n > source.max_items:
                 return []
@@ -250,6 +261,7 @@ class TestRecommendationPostGuards(unittest.TestCase):
              patch("app.controller.NaverAuthGuard.check_login_cookies", return_value=(True, [])), \
              patch("app.controller.PostProcessor") as processor_cls, \
              patch.object(RecommendationFeedSource, "open"), \
+             patch.object(RecommendationFeedSource, "load_more", return_value=load_stalled), \
              patch.object(RecommendationFeedSource, "discover_posts", discover):
             controller = FeedController(config, history, StateManager())
             controller.pacing.wait_next_post = MagicMock(return_value=MagicMock(stopped=False, skipped=False))
@@ -264,6 +276,15 @@ class TestRecommendationPostGuards(unittest.TestCase):
                 if n > allowed_after:
                     # 허용된 글만 실제 댓글 등록이 일어난 것으로 모의 (max_items 목표 카운트 대상)
                     result.comment_result = CommentProcessResult(status=CommentSubmitState.SUBMITTED)
+                plan = kwargs["action_plan"]
+                if statuses is not None:
+                    result.comment_result = CommentProcessResult(status=statuses.get(n, CommentSubmitState.SUBMITTED))
+                if not plan.process_comment:
+                    result.comment_result = CommentProcessResult(status=CommentSubmitState.SKIPPED)
+                if n in server_previous:
+                    result.comment_result = CommentProcessResult(status=CommentSubmitState.SUBMITTED, already_present=True)
+                if new_likes and plan.process_like:
+                    result.like_result = LikeProcessResult(action_taken=True, state_after=LikeState.LIKED)
                 processor.current_result = result
                 processor.post_eligibility_service.decisions[candidate.key] = result.eligibility
                 if crash_after_like:
@@ -332,9 +353,77 @@ class TestRecommendationPostGuards(unittest.TestCase):
 
     def test_verified_like_survives_comment_exception_in_target(self):
         controller, order, _ = self.run_controller(target=1, allowed_after=0, crash_after_like=True)
-        self.assertEqual(order, [("candidate", 1), ("process", 1)])
-        self.assertEqual(controller.like_success_count, 1)
+        self.assertEqual(order, [event for n in range(1, 4) for event in (("candidate", n), ("process", n))])
+        self.assertEqual(controller.like_success_count, 3)
+        self.assertEqual(controller.comment_submitted_count, 0)
+        self.assertNotIn("target_reached", controller.state_mgr.get_state().message)
+
+    def test_comment_goal_ignores_likes_and_failures(self):
+        controller, order, _ = self.run_controller(
+            target=2, allowed_after=0, new_likes=True,
+            statuses={1: CommentSubmitState.FAILED, 2: CommentSubmitState.SKIPPED})
+        self.assertEqual(order[-1], ("process", 4))
+        self.assertEqual(controller.comment_submitted_count, 2)
+        self.assertEqual(controller.like_success_count, 4)
         self.assertIn("target_reached", controller.state_mgr.get_state().message)
+
+    def test_blog_quota_limits_comments_not_likes(self):
+        candidates = [post("same", i) for i in range(1, 5)] + [post("other", 5)]
+        controller, order, _ = self.run_controller(3, 0, candidates=candidates, new_likes=True)
+        self.assertEqual(controller.comment_submitted_count, 3)
+        self.assertEqual(controller.like_success_count, 5)
+        self.assertEqual(order[-1], ("process", 5))
+        self.assertIn("target_reached", controller.state_mgr.get_state().message)
+
+    def test_controller_uses_saved_blog_limit(self):
+        candidates = [post("same", 1), post("same", 2), post("other", 3)]
+        controller, order, _ = self.run_controller(2, 0, candidates=candidates, new_likes=True, blog_limit=1)
+        self.assertEqual(controller.comment_submitted_count, 2)
+        self.assertEqual(controller.like_success_count, 3)
+        self.assertEqual(order[-1], ("process", 3))
+
+    def test_liked_only_and_previously_viewed_posts_still_get_comments(self):
+        candidates = [post("a", 1), post("b", 2)]
+        controller, order, _ = self.run_controller(2, 0, candidates=candidates, liked={candidates[0].key})
+        self.assertEqual(controller.comment_submitted_count, 2)
+        self.assertIn(("process", 1), order)
+        self.assertIn(("process", 2), order)
+
+    def test_five_previous_comments_do_not_stop_before_uncommented_posts(self):
+        candidates = [post(f"a{i}", i) for i in range(1, 9)]
+        previous = {candidates[i].key for i in (0, 2, 3, 5, 6)}
+        controller, order, _ = self.run_controller(3, 0, candidates=candidates, previous=previous)
+        self.assertEqual(controller.comment_submitted_count, 3)
+        self.assertEqual(order[-1], ("process", 8))
+        self.assertIn("target_reached", controller.state_mgr.get_state().message)
+
+    def test_server_existing_comments_do_not_consume_goal_or_blog_quota(self):
+        candidates = [post("same", i) for i in range(1, 4)]
+        controller, order, _ = self.run_controller(2, 0, candidates=candidates, server_previous={1})
+        self.assertEqual(controller.comment_submitted_count, 2)
+        self.assertEqual(order[-1], ("process", 3))
+        self.assertIn("target_reached", controller.state_mgr.get_state().message)
+
+    def test_five_server_existing_comments_do_not_stop_discovery(self):
+        candidates = [post(f"a{i}", i) for i in range(1, 7)]
+        controller, order, _ = self.run_controller(1, 0, candidates=candidates, server_previous=set(range(1, 6)))
+        self.assertEqual(controller.comment_submitted_count, 1)
+        self.assertEqual(order[-1], ("process", 6))
+        self.assertIn("target_reached", controller.state_mgr.get_state().message)
+
+    def test_manual_skip_is_not_counted_as_failure(self):
+        with patch("app.controller.SamplingHistoryManager"):
+            controller = FeedController(cfg(campaign_id="test"), MagicMock(), StateManager())
+        controller._handle_post_result(PostProcessResult(post(),
+            like_result=LikeProcessResult(error="user_skipped"),
+            comment_result=CommentProcessResult(status=CommentSubmitState.SKIPPED, error="user_skipped")))
+        self.assertEqual(controller.skipped_count, 1)
+        self.assertEqual(controller.failed_count, 0)
+
+    def test_stalled_feed_is_not_reported_as_no_new_posts(self):
+        controller, _, _ = self.run_controller(52, 0, candidates=[post()], load_stalled=True)
+        self.assertEqual(controller.comment_submitted_count, 1)
+        self.assertIn("feed_loading_stalled", controller.state_mgr.get_state().message)
 
     def test_controller_stops_at_200_candidates_when_all_excluded(self):
         controller, order, source = self.run_controller(target=40, allowed_after=200)

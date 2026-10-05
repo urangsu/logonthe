@@ -342,6 +342,9 @@ class LikeTransactionService:
                 return abort_res
 
         # 대기 끝으로 공감 버튼 선이동을 배치
+        abort_res = _check_and_wait(0.0, "before_summary_scroll")
+        if abort_res:
+            return abort_res
         summary_btn = MobileDOMResolver.get_reaction_summary_button(page)
         if summary_btn and summary_btn.count() > 0:
             try:

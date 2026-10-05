@@ -1,6 +1,6 @@
 {
-  "extensionVersion": "13.2.5",
-  "runtimeBuild": "13.2.5-route-grace-v1",
+  "extensionVersion": "13.2.6",
+  "runtimeBuild": "13.2.6-turn-correlation-v2",
   "protocolVersion": 3,
   "bridgeSchemaVersion": 2
 }

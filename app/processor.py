@@ -985,6 +985,7 @@ class PostProcessor:
                             pause_event=self.pause_event,
                             run_control=getattr(self, "run_control", None),
                         )
+                        result.like_result = tx_res
                         if hasattr(self, "run_control") and self.run_control:
                             self.run_control.checkpoint("after_like_click")
                         tx_res.like_count = elig_like_cnt
@@ -1092,7 +1093,8 @@ class PostProcessor:
                         logger.log("  🛑 [COMMENT] 서버 댓글 목록에 이미 내 댓글이 존재합니다! (AI 호출/입력 0, 동기화 완료)")
                         result.comment_result = CommentProcessResult(
                             status=CommentSubmitState.SUBMITTED,
-                            submitted_text=presence.comment_text or "서버 감지 기존 등록 댓글"
+                            submitted_text=presence.comment_text or "서버 감지 기존 등록 댓글",
+                            already_present=True,
                         )
                         if self.on_comment_committed:
                             try:
@@ -2091,6 +2093,7 @@ class PostProcessor:
                                 status=CommentSubmitState.DRAFTED,
                                 draft_text=draft_text,
                             )
+                            result.comment_result = cmt_res
 
                             auto_submit_timeout = None
                             if self.auto_comment_submit_enabled:
@@ -2261,10 +2264,10 @@ class PostProcessor:
                                         style_policy=getattr(gen_ctx, "style_policy", None),
                                         excerpt=gen_ctx.excerpt,
                                     )
-                                    if hasattr(self, "run_control") and self.run_control:
-                                        self.run_control.checkpoint("after_comment_submit")
                                     status = outcome.state if hasattr(outcome, "state") else outcome
                                     cmt_res.status = status
+                                    if hasattr(self, "run_control") and self.run_control:
+                                        self.run_control.checkpoint("after_comment_submit")
 
                                     if status == CommentSubmitState.SUBMITTED:
                                         if (

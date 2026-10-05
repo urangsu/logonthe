@@ -29,7 +29,7 @@
     '[data-test-id="model-response"]', '.response-container-content', 'message-content', '.model-response-text'
   ].join(', ');
   let runtimeContract = {
-    extensionVersion: '13.2.5', runtimeBuild: '13.2.5-route-grace-v1', protocolVersion: 3, bridgeSchemaVersion: 2
+    extensionVersion: '13.2.6', runtimeBuild: '13.2.6-turn-correlation-v2', protocolVersion: 3, bridgeSchemaVersion: 2
   };
   const ROUTE_ALLOCATION_GRACE_MS = 11000;
 
@@ -671,10 +671,12 @@
       }
     } catch (_) {}
 
-    // 모든 후보에 동일한 normalizeForReadbackComparison 기준 적용
-    const expNorm = normalizeForReadbackComparison(expectedStrict);
+    // Submitted turns may replace paragraph boundaries with spaces. Keep every
+    // word, number and punctuation; editor readback remains stricter.
+    const normalizeRenderedTurn = text => normalizeForReadbackComparison(text).replace(/\s+/gu, ' ');
+    const expNorm = normalizeRenderedTurn(expectedStrict);
     for (const text of candidates) {
-      if (normalizeForReadbackComparison(text) === expNorm) return true;
+      if (normalizeRenderedTurn(text) === expNorm) return true;
     }
     return false;
   }
@@ -1102,7 +1104,22 @@
       await new Promise(r=>setTimeout(r,150));
     }
     logSendDiag({button:finalBtn,totalCandidates:finalSendCtrl?.totalCandidates||0,confirmed,boundNode:Boolean(targetResponseNode)});
-    if(!confirmed){emitEvent('SEND_COMMIT_UNKNOWN');return{status:'failed',text:'',error:'send_commit_unknown'};}
+    if(!confirmed){
+      const userInv = getUserInventory();
+      const currentEditor = editor();
+      emitEvent('SEND_COMMIT_UNKNOWN', {
+        composerContainsPrompt: getEditorSurfaces(currentEditor).some(s => isExactPromptMatch(s.text, command.prompt)),
+        composerCleared: composerEmpty(currentEditor),
+        userUniqueTurns: userInv.userUniqueTurns,
+        userCorrelated: Boolean(findNewUserQuery()),
+        responseUniqueTurns: getCandidateInventory().responseUniqueTurns,
+        generationStarted: Boolean(findActiveStopButton()),
+        route: location.pathname,
+        elapsedMs: Date.now() - clickAttemptedAtMs,
+        runtimeBuild: runtimeContract.runtimeBuild,
+      });
+      return{status:'failed',text:'',error:'send_commit_unknown'};
+    }
     const generationDeadlineAtMs=execState.generationDeadlineAtMs||execState.deadlineAtMs;let lastMutationAtMs=Date.now(),previous='',lastDiagReportAtMs=0;
     function reportWaitDiag(reason='periodic'){
       if(isExecutionCancelled())return;const nowMs=Date.now();if(reason==='periodic'&&nowMs-lastDiagReportAtMs<4800)return;lastDiagReportAtMs=nowMs;

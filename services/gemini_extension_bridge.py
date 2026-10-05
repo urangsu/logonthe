@@ -1003,6 +1003,9 @@ class GeminiBridgeHTTPServer:
                             "rid", "candidateCount", "selectedTag", "disabled", "ariaDisabled",
                             "sendConfirmed", "boundNode", "clicked", "keyed", "stableMs",
                             "composerCleared", "generationStarted", "composerContainsPrompt",
+                            "userUniqueTurns", "userCorrelated", "responseUniqueTurns",
+                            "route", "elapsedMs", "runtimeBuild", "clickCount", "dispatchAttempted",
+                            "selectedClass", "ariaLabel", "iconText",
                         ) if key in payload}
                         logger.log(f"[GEMINI][{ev_type}] " + json.dumps(fields, ensure_ascii=False))
                     elif ev_type == "RESPONSE_TURN_BOUND":

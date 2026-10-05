@@ -1,4 +1,5 @@
 import random
+import math
 import threading
 from dataclasses import dataclass
 from enum import Enum
@@ -66,8 +67,17 @@ class PacingService:
         self.skip_event.set()
 
     def _range(self, min_key: str, max_key: str, default_min: float = 1.0, default_max: float = 2.5) -> Tuple[float, float]:
-        low = float(self.config.get(min_key, default_min))
-        high = float(self.config.get(max_key, default_max))
+        def duration(key, default):
+            try:
+                value = float(self.config.get(key, default))
+                if not math.isfinite(value):
+                    raise ValueError("non-finite duration")
+                return max(0.0, value)
+            except (TypeError, ValueError):
+                logger.log(f"[PACING][INVALID_CONFIG] {key}: 기본값 {default}초 사용", "WARNING")
+                return default
+        low = duration(min_key, default_min)
+        high = duration(max_key, default_max)
         if high < low:
             low, high = high, low
         return low, high
@@ -175,7 +185,7 @@ class PacingService:
             self.state_manager.update(new_state=FeedState.PAUSED, message=f"잠시 쉬는 중... ({seconds:.1f}초)")
 
         logger.log(f"☕ [PAUSE] 작업 간격 조정을 위해 {seconds:.1f}초 동안 잠시 대기합니다.")
-        reason = interruptible_wait(self.stop_event, seconds, pause_event=self.pause_event, skip_event=self.skip_event)
+        reason = self._wait_internal(seconds, stage="pacing_pause")
         if reason == WaitInterruptionReason.SKIPPED:
             self.skip_event.clear()
         return PacingResult(PacingKind.PAUSE, seconds, reason)

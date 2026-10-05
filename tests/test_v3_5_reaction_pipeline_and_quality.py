@@ -6,6 +6,20 @@ from services.comments.community_rhythm import FinalQualityGate, CommunityRhythm
 
 
 class TestV35ReactionPipelineAndQuality(unittest.TestCase):
+    def test_toothpaste_is_product_even_when_sweet_flavor_is_described(self):
+        title = "달콤한 어린이 치약 사용기"
+        excerpt = "딸기맛이라 달콤하고 부드러워 아이가 거부감 없이 양치해요"
+        plan = ReactionContextPlanner.plan(title, excerpt)
+        self.assertEqual(plan.domain, "PRODUCT")
+        self.assertEqual(plan.reaction_mode, "feature_reaction")
+        domain, anchors, _ = ReactionContextPlanner.discover_domain_and_terms(title, excerpt)
+        self.assertEqual(domain, "PRODUCT")
+        self.assertIn("치약", anchors)
+
+    def test_food_review_with_incidental_toothpaste_reference_remains_food(self):
+        plan = ReactionContextPlanner.plan("민트초코 아이스크림 맛집", "달콤하고 부드러운 아이스크림이에요 치약 같다는 사람도 있지만 디저트로 먹었어요")
+        self.assertEqual(plan.domain, "FOOD")
+
     def test_01_style_service_completely_free_of_empathy_word(self):
         """1. StylePlanService 및 reaction_candidates에 '공감' 단어가 전혀 포함되지 않음"""
         for reaction in StylePlanService.REACTION_TYPES_COMMUNITY:
@@ -168,6 +182,26 @@ class TestV35ReactionPipelineAndQuality(unittest.TestCase):
         self.assertIn("없는 맛·시설 등 사실은 만들지 마", food)
         self.assertNotIn("더쿠", food)
         self.assertNotIn("관찰자 입장", food)
+
+    def test_repeated_laughter_changes_guidance_not_registered_text(self):
+        from services.comments.policy import CommentStylePolicy
+        policy = CommentStylePolicy.from_context(config={"allow_soft_emoji": True})
+        prompt = AIPromptBuilder.build_v3_5(
+            title="만두 후기", selected_context="만두피가 얇고 속이 꽉 찼어요",
+            style_policy=policy, recent_comments=["만두 좋네요 ㅎㅎ", "속이 꽉 찼네요 ㅎㅎ"],
+            corpus_examples=["맛 궁금하네요 ㅎㅎ", "이 조합 좋네요 😊"],
+        )
+        self.assertIn("표지는 이번엔 쉬어가자", prompt)
+        self.assertNotIn("맛 궁금하네요 ㅎㅎ", prompt)
+        self.assertIn("이 조합 좋네요 😊", prompt)
+        self.assertIn("표지는 없어도 되고", prompt)
+        self.assertLess(len(prompt), 900)
+        restrained = AIPromptBuilder.build_v3_5(
+            title="반려견이 무지개다리를 건넜어요", selected_context="오래 함께한 강아지를 떠나보냈어요",
+            style_policy=policy, recent_comments=["ㅎㅎ", "ㅎㅎ"],
+        )
+        self.assertNotIn("이 조합 좋네요", restrained)
+        self.assertNotIn("이번엔 쉬어가자", restrained)
 
     def test_08_food_focus_miss_code_category_and_feedback(self):
         """8. food_focus_miss 코드가 fact_violation으로 분류되고 전용 재작성 피드백이 생성되는지 확인"""

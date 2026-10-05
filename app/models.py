@@ -158,6 +158,7 @@ class CommentProcessResult:
     draft_text: Optional[str] = None
     submitted_text: Optional[str] = None
     error: Optional[str] = None
+    already_present: bool = False
 
 
 @dataclass

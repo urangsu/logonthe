@@ -82,7 +82,7 @@ class TestV133DiscoveryAndRuntime(unittest.TestCase):
             source.load_more()
             mock_switch.assert_called_once()
 
-    def test_disc_002_same_blog_second_post_skipped(self):
+    def test_disc_002_same_blog_second_post_remains_available(self):
         page = MagicMock()
         card1 = MagicMock()
         card1.locator.return_value.first.get_attribute.return_value = "https://m.blog.naver.com/same_author/101"
@@ -98,16 +98,18 @@ class TestV133DiscoveryAndRuntime(unittest.TestCase):
 
         cards_mock = MagicMock()
         cards_mock.count.return_value = 2
-        cards_mock.nth.side_effect = [card1, card2]
+        cards_mock.nth.side_effect = [card1, card1, card2]
 
         with patch("naver.sources.MobileDOMResolver.get_feed_cards", return_value=cards_mock), \
-             patch("naver.sources.MobileDOMResolver.get_card_post_link", side_effect=[MagicMock(count=lambda: 1, get_attribute=lambda k: "https://m.blog.naver.com/same_author/101"), MagicMock(count=lambda: 1, get_attribute=lambda k: "https://m.blog.naver.com/same_author/102")]), \
-             patch("naver.sources.MobileDOMResolver.get_card_title", side_effect=["맛집 후기", "맛집 또 다녀옴"]), \
+             patch("naver.sources.MobileDOMResolver.get_card_post_link", side_effect=lambda card: card.locator.return_value.first), \
+             patch("naver.sources.MobileDOMResolver.get_card_title", side_effect=["맛집 후기", "맛집 후기", "맛집 또 다녀옴"]), \
              patch("naver.sources.MobileDOMResolver.get_card_author", return_value="same_author"):
             source = RecommendationFeedSource(page, max_items=10)
             posts = source.discover_posts()
             self.assertEqual(len(posts), 1)
             self.assertEqual(posts[0].key, "same_author:101")
+            second = source.discover_posts()
+            self.assertEqual([p.key for p in second], ["same_author:102"])
 
     def test_disc_003_and_004_filtered_and_idempotent_do_not_consume_max_items(self):
         config = MagicMock()
@@ -169,8 +171,8 @@ class TestV133DiscoveryAndRuntime(unittest.TestCase):
     def test_disc_007_runtime_contract_source_of_truth(self):
         """runtime_contract.json과 manifest.json 및 Python loader 일치 검증"""
         contract = load_runtime_contract()
-        self.assertEqual(contract.extension_version, "13.2.5")
-        self.assertEqual(contract.runtime_build, "13.2.5-route-grace-v1")
+        self.assertEqual(contract.extension_version, "13.2.6")
+        self.assertEqual(contract.runtime_build, "13.2.6-turn-correlation-v2")
         self.assertEqual(contract.protocol_version, 3)
         self.assertEqual(contract.bridge_schema_version, 2)
 

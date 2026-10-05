@@ -158,10 +158,17 @@ class DiscoveryTopicFilter:
         elif not detected_pos_cat and re.search(r"\b주식\b", sub_no_corp):
             finance_ev.append("주식")
 
-        for p in (r"ETF", r"배당(?:주)?", r"코인", r"비트코인", r"가상화폐", r"증시", r"재테크", r"포트폴리오", r"지원금", r"환급금", r"대출\s*금리"):
+        for p in (r"ETF", r"배당(?:주)?", r"코인", r"비트코인", r"가상화폐", r"증시", r"재테크", r"지원금", r"환급금", r"대출\s*금리"):
             m = re.search(p, combined, flags=re.IGNORECASE)
             if m:
                 finance_ev.append(m.group(0))
+
+        # Brand/design portfolios are not investment evidence on lifestyle posts.
+        if re.search(r"포트폴리오", combined) and (
+            not detected_pos_cat
+            or re.search(r"(?:투자|주식|채권|자산|금융|배당)\s*포트폴리오|포트폴리오\s*(?:투자|수익|리밸런싱|자산|종목)", combined)
+        ):
+            finance_ev.append("포트폴리오")
 
         # 분양: 문맥 예외 (아파트/청약/입주/오피스텔 분양 또는 분양가일 때만 block)
         if re.search(r"(?:아파트|청약|입주|오피스텔|상가|부동산)\s*분양|분양가|분양\s*일정", combined):

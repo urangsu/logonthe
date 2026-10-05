@@ -5,7 +5,7 @@ from app.models import FeedPost, FeedSourceType
 from app.errors import classify_playwright_failure, BrowserFailureKind, BrowserDisconnectedError
 from naver.resolver import MobileDOMResolver, NeighborCountSource
 from naver.url_utils import extract_canonical_post
-from services.pacing import interruptible_wait
+from services.pacing import interruptible_wait, WaitInterruptionReason
 from src.logger import logger
 from app.run_control import StopRequestedException
 
@@ -23,6 +23,39 @@ class FeedSource:
 
     def is_exhausted(self) -> bool:
         raise NotImplementedError
+
+    def _scroll_feed_and_wait(self):
+        # Target the feed's own scroll container, not the mouse's current location.
+        before = self.page.evaluate("""() => {
+            const cards = Array.from(document.querySelectorAll("li[class*='card_wrapper'], li[class*='item__'], div[class*='card_wrapper']"));
+            const last = cards[cards.length - 1];
+            let host = last && last.parentElement;
+            while (host && host !== document.body && host !== document.documentElement) {
+                if (/(auto|scroll)/.test(getComputedStyle(host).overflowY) && host.scrollHeight > host.clientHeight + 1) break;
+                host = host.parentElement;
+            }
+            if (!host || host === document.body || host === document.documentElement) host = document.scrollingElement;
+            const snapshot = {cards: cards.length, tail: last ? last.textContent.slice(-160) : '', top: host.scrollTop, height: host.scrollHeight};
+            host.scrollTo({top: host.scrollHeight, behavior: 'instant'});
+            return snapshot;
+        }""")
+        after = before
+        for _ in range(6):
+            if self.run_control:
+                self.run_control.interruptible_wait(0.5, stage="feed_render_wait")
+                self.run_control.checkpoint("after_feed_render_wait")
+            elif interruptible_wait(self.stop_event, 0.5, pause_event=self.pause_event) == WaitInterruptionReason.STOPPED:
+                raise StopRequestedException()
+            after = self.page.evaluate("""() => {
+                const cards = Array.from(document.querySelectorAll("li[class*='card_wrapper'], li[class*='item__'], div[class*='card_wrapper']"));
+                const last = cards[cards.length - 1];
+                return {cards: cards.length, tail: last ? last.textContent.slice(-160) : ''};
+            }""")
+            if isinstance(before, dict) and isinstance(after, dict) and (
+                before.get('cards') != after.get('cards') or before.get('tail') != after.get('tail')
+            ):
+                break
+        logger.log(f"[FEED][LOAD_MORE] before={before} after={after}")
 
 
 class NeighborFeedSource(FeedSource):
@@ -53,6 +86,8 @@ class NeighborFeedSource(FeedSource):
                 self.run_control.interruptible_wait(1.5, stage="open_neighbor_source")
             else:
                 interruptible_wait(self.stop_event, 1.5, pause_event=self.pause_event)
+        except StopRequestedException:
+            raise
         except Exception as e:
             kind = classify_playwright_failure(e, page=self.page, context=getattr(self.page, "context", None))
             if kind in (BrowserFailureKind.CONTEXT_CLOSED, BrowserFailureKind.BROWSER_DISCONNECTED):
@@ -75,6 +110,8 @@ class NeighborFeedSource(FeedSource):
         for idx in range(card_count):
             if self.stop_event and self.stop_event.is_set():
                 break
+            if self.run_control:
+                self.run_control.checkpoint("neighbor_card")
 
             try:
                 card = cards.nth(idx)
@@ -110,16 +147,15 @@ class NeighborFeedSource(FeedSource):
             self.run_control.checkpoint("before_scroll")
 
         try:
-            self.page.mouse.wheel(0, 900)
-            if self.run_control and hasattr(self.run_control, "interruptible_wait"):
-                self.run_control.interruptible_wait(1.0, stage="after_scroll")
-            else:
-                interruptible_wait(self.stop_event, 1.0, pause_event=self.pause_event)
+            self._scroll_feed_and_wait()
             return True
+        except StopRequestedException:
+            raise
         except Exception as e:
             kind = classify_playwright_failure(e, page=self.page, context=getattr(self.page, "context", None))
             if kind in (BrowserFailureKind.CONTEXT_CLOSED, BrowserFailureKind.BROWSER_DISCONNECTED):
                 raise BrowserDisconnectedError(f"이웃 피드 스크롤 중 브라우저 종료 감지: {e}")
+            logger.log(f"[FEED][LOAD_ERROR] 이웃 피드: {e}", "WARNING")
             return False
 
     def is_exhausted(self) -> bool:
@@ -307,13 +343,7 @@ class RecommendationFeedSource(FeedSource):
                 self.examined_keys.add(post.key)
                 cards_parsed += 1
 
-                # 1) 동일 블로그 1세션 1글 제한 (프로필 조회 전에 최대한 거른다)
-                if post.blog_id in self.seen_blogs:
-                    cards_same_blog += 1
-                    logger.log(f"  ⏭️ [SOURCE] 동일 블로그 1세션 1글 제한에 따라 스킵: {post.blog_id}")
-                    continue
-
-                # 2) Topic filter (버릴 글에 프로필 조회 비용을 쓰지 않는다)
+                # Comment quotas belong to the controller; later posts still allow likes.
                 try:
                     snippet = card.inner_text().strip()
                 except Exception:
@@ -359,11 +389,7 @@ class RecommendationFeedSource(FeedSource):
             self.run_control.checkpoint("before_scroll")
 
         try:
-            self.page.mouse.wheel(0, 900)
-            if self.run_control and hasattr(self.run_control, "interruptible_wait"):
-                self.run_control.interruptible_wait(1.0, stage="after_scroll")
-            else:
-                interruptible_wait(self.stop_event, 1.0, pause_event=self.pause_event)
+            self._scroll_feed_and_wait()
             return True
         except StopRequestedException:
             raise
@@ -371,6 +397,7 @@ class RecommendationFeedSource(FeedSource):
             kind = classify_playwright_failure(e, page=self.page, context=getattr(self.page, "context", None))
             if kind in (BrowserFailureKind.CONTEXT_CLOSED, BrowserFailureKind.BROWSER_DISCONNECTED):
                 raise BrowserDisconnectedError(f"추천 피드 스크롤 중 브라우저 종료 감지: {e}")
+            logger.log(f"[FEED][LOAD_ERROR] 추천 피드: {e}", "WARNING")
             return False
 
 
