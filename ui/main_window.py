@@ -774,14 +774,70 @@ class MainWindow(ctk.CTk):
         self.command_bridge.send_apply_clipboard_comment(final_comment)
         logger.log(f"🔄 [REFINE] 댓글 변형 적용 ({mode}): \"{res.body}\"")
 
+    def _bridge_port_conflict_message(self, diag: dict) -> str:
+        kind = str((diag or {}).get("kind", "unknown_listener"))
+        owner = (diag or {}).get("owner") or {}
+        existing = (diag or {}).get("existing") or {}
+        pid = owner.get("pid", "")
+        command = owner.get("command", "")
+        owner_text = f"\n소유 프로세스: {command or 'unknown'}" + (f" (PID {pid})" if pid else "")
+        if kind == "existing_nfa_bridge":
+            active = existing.get("activeRequestId") or "없음"
+            build = existing.get("contentBuild") or "unknown"
+            status = existing.get("status") or "unknown"
+            return (
+                "43127 포트를 다른 Naver Feed Assistant 브리지가 사용 중입니다.\n"
+                "다른 실행 중인 앱/백그라운드 인스턴스를 종료한 뒤 이 창에서 [확장 연결 테스트]를 다시 누르세요."
+                f"{owner_text}\n기존 브리지: status={status}, activeRequest={active}, build={build}"
+            )
+        if kind == "foreign_process":
+            return (
+                "43127 포트를 다른 프로그램이 사용 중이라 Gemini 브리지를 시작할 수 없습니다.\n"
+                "해당 프로그램을 종료하거나 43127 사용 프로세스를 확인한 뒤 [확장 연결 테스트]를 다시 누르세요."
+                f"{owner_text}"
+            )
+        return (
+            "43127 포트가 사용 중이지만 소유 프로세스를 식별하지 못했습니다.\n"
+            "터미널에서 lsof -nP -iTCP:43127 -sTCP:LISTEN 으로 확인한 뒤 점유 프로세스를 종료하고 "
+            "[확장 연결 테스트]를 다시 누르세요."
+        )
+
+    def _ensure_local_bridge_server(self, show_dialog: bool = False) -> bool:
+        if self.gemini_extension_bridge.bridge_server_started:
+            return True
+        try:
+            self.gemini_bridge_server.start()
+            logger.log(
+                f"[GEMINI][BRIDGE_RECOVERED] 로컬 브리지 재기동 성공: "
+                f"127.0.0.1:{self.gemini_bridge_server.port}"
+            )
+            return True
+        except OSError:
+            diag = self.gemini_bridge_server.diagnose_port_conflict()
+            msg = self._bridge_port_conflict_message(diag)
+            logger.log(
+                f"[GEMINI][BRIDGE_RECOVERY_BLOCKED] kind={diag.get('kind')} "
+                f"owner={diag.get('owner')} existing={diag.get('existing')}",
+                "ERROR",
+            )
+            if show_dialog:
+                messagebox.showwarning("Gemini 로컬 브리지 포트 충돌", msg)
+            return False
+
     def _test_chrome_connection(self):
+        if not self._ensure_local_bridge_server(show_dialog=True):
+            return
         diag = self.gemini_extension_bridge.preflight()
         if diag.ready:
             msg = f"일반 Chrome Gemini 확장 연결 성공\n\n제목: {diag.title}\nURL: {diag.url}"
             messagebox.showinfo("Gemini 연결 성공", msg)
             logger.log(f"[GEMINI/EXTENSION] 연결 성공: {diag.title} ({diag.url})")
         else:
-            msg = f"Gemini 확장 연결 실패: {diag.status}\n\n확장을 설치하고 토큰을 저장한 뒤 로그인된 Gemini 탭을 새로고침하세요."
+            detail = f"\n\n상세: {diag.message}" if diag.message else ""
+            msg = (
+                f"Gemini 확장 연결 실패: {diag.status}{detail}\n\n"
+                "Chrome 확장 13.2.6이 로드되어 있고 로그인된 Gemini 탭이 열려 있는지 확인한 뒤 다시 시도하세요."
+            )
             messagebox.showwarning("Gemini 연결 실패", msg)
             logger.log(f"[GEMINI/EXTENSION] 연결 실패: {diag.message}", "WARNING")
 
@@ -1198,6 +1254,13 @@ class MainWindow(ctk.CTk):
     def _start_task(self):
         if self.worker_thread and self.worker_thread.is_alive():
             messagebox.showwarning("경고", "이미 작업이 실행 중입니다.")
+            return
+
+        gemini_required = bool(
+            self.gemini_web_enabled_var.get()
+            and (self.comment_enabled_var.get() or self.auto_comment_submit_var.get())
+        )
+        if gemini_required and not self._ensure_local_bridge_server(show_dialog=True):
             return
 
         # 1. 숫자 입력 검증
