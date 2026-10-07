@@ -158,6 +158,38 @@ class GeminiExtensionBridgeTests(unittest.TestCase):
         finally:
             server.stop()
 
+
+    def test_bridge_port_conflict_identifies_existing_nfa_and_recovers_after_release(self):
+        owner_bridge = GeminiExtensionBridge()
+        owner_server = GeminiBridgeHTTPServer(owner_bridge, port=0)
+        owner_server.start()
+        contender_bridge = GeminiExtensionBridge()
+        contender_server = GeminiBridgeHTTPServer(contender_bridge, port=owner_server.port)
+        try:
+            with self.assertRaises(OSError):
+                contender_server.start(bind_attempts=1, bind_retry_delay=0)
+            self.assertFalse(contender_bridge.bridge_server_started)
+            self.assertIn("existing_nfa_bridge", contender_bridge.bridge_server_error)
+
+            diag = contender_server.diagnose_port_conflict()
+            self.assertEqual(diag["kind"], "existing_nfa_bridge")
+            self.assertEqual(diag["existing"].get("bridgeSessionId"), owner_bridge.bridge_session_id)
+
+            owner_server.stop()
+            contender_server.start(bind_attempts=5, bind_retry_delay=0.05)
+            self.assertTrue(contender_bridge.bridge_server_started)
+
+            conn = http.client.HTTPConnection("127.0.0.1", contender_server.port, timeout=1)
+            conn.request("GET", "/v1/status")
+            resp = conn.getresponse()
+            payload = json.loads(resp.read().decode("utf-8"))
+            conn.close()
+            self.assertEqual(resp.status, 200)
+            self.assertEqual(payload.get("bridgeSessionId"), contender_bridge.bridge_session_id)
+        finally:
+            owner_server.stop()
+            contender_server.stop()
+
     def test_classify_gemini_failure_pre_dispatch(self):
         for code in ["send_not_ready", "prompt_exact_readback_failed", "prompt_editor_changed_before_send", "fresh_chat_not_verified", "bridge_not_started"]:
             failure = classify_gemini_failure("failed", code, dispatch_attempted=False, click_count=0)
