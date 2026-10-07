@@ -1,7 +1,12 @@
 from __future__ import annotations
 
+import errno
+import http.client
 import json
+import os
+import shutil
 import socketserver
+import subprocess
 import threading
 import time
 import uuid
@@ -836,7 +841,93 @@ class GeminiBridgeHTTPServer:
         self._server = None
         self._thread = None
 
-    def start(self) -> None:
+    @staticmethod
+    def _listener_owner(port: int) -> Dict[str, object]:
+        """Best-effort listener diagnostics. Never kills or mutates another process."""
+        lsof = shutil.which("lsof")
+        if not lsof:
+            return {}
+        try:
+            proc = subprocess.run(
+                [lsof, "-nP", f"-iTCP:{int(port)}", "-sTCP:LISTEN", "-Fpc"],
+                capture_output=True,
+                text=True,
+                timeout=1.5,
+            )
+            pid = ""
+            command = ""
+            for line in (proc.stdout or "").splitlines():
+                if line.startswith("p") and not pid:
+                    pid = line[1:].strip()
+                elif line.startswith("c") and not command:
+                    command = line[1:].strip()
+            if not pid and not command:
+                return {}
+            return {
+                "pid": int(pid) if pid.isdigit() else pid,
+                "command": command,
+            }
+        except Exception:
+            return {}
+
+    def _probe_existing_bridge(self) -> Optional[Dict[str, object]]:
+        """Return /v1/status only when the listener looks like another NFA bridge."""
+        try:
+            conn = http.client.HTTPConnection(self.host, self.port, timeout=0.8)
+            conn.request("GET", "/v1/status", headers={"Accept": "application/json"})
+            resp = conn.getresponse()
+            raw = resp.read().decode("utf-8", errors="replace")
+            conn.close()
+            if resp.status != 200:
+                return None
+            payload = json.loads(raw or "{}")
+            if not isinstance(payload, dict):
+                return None
+            # These fields are specific enough to distinguish our bridge from an arbitrary local HTTP service.
+            if "bridgeSessionId" not in payload or "status" not in payload or "bridgeSchemaVersion" not in payload:
+                return None
+            return payload
+        except Exception:
+            return None
+
+    def diagnose_port_conflict(self) -> Dict[str, object]:
+        existing = self._probe_existing_bridge()
+        owner = self._listener_owner(self.port)
+        if existing is not None:
+            kind = "existing_nfa_bridge"
+        elif owner:
+            kind = "foreign_process"
+        else:
+            kind = "unknown_listener"
+        return {
+            "kind": kind,
+            "host": self.host,
+            "port": self.port,
+            "owner": owner,
+            "existing": existing or {},
+        }
+
+    @staticmethod
+    def _format_port_conflict(diag: Dict[str, object]) -> str:
+        owner = diag.get("owner") or {}
+        existing = diag.get("existing") or {}
+        parts = [
+            f"address already in use ({diag.get('host')}:{diag.get('port')})",
+            f"kind={diag.get('kind')}",
+        ]
+        if owner:
+            parts.append(f"pid={owner.get('pid', '')}")
+            parts.append(f"process={owner.get('command', '')}")
+        if existing:
+            parts.append(f"existingSession={existing.get('bridgeSessionId', '')}")
+            parts.append(f"existingStatus={existing.get('status', '')}")
+            parts.append(f"existingActiveRequest={existing.get('activeRequestId', '')}")
+            parts.append(f"existingBuild={existing.get('contentBuild', '')}")
+        return "; ".join(parts)
+
+    def start(self, bind_attempts: int = 3, bind_retry_delay: float = 0.25) -> None:
+        if self._server is not None:
+            return
         bridge = self.bridge
 
         class Handler(BaseHTTPRequestHandler):
@@ -1064,32 +1155,57 @@ class GeminiBridgeHTTPServer:
                     return self._json(200, {"ok": True})
                 return self._json(404, {"error": "not_found"})
 
-        try:
-            self._server = _LoopbackHTTPServer((self.host, self.port), Handler)
-            self.port = int(self._server.server_port)
-            self.bridge.bridge_server_started = True
-            self.bridge.bridge_server_error = ""
-            self._thread = threading.Thread(target=self._server.serve_forever, daemon=True)
-            self._thread.start()
-
-            self_test_status = "FAIL"
+        attempts = max(1, int(bind_attempts or 1))
+        for attempt in range(1, attempts + 1):
             try:
-                import http.client
-                conn = http.client.HTTPConnection(self.host, self.port, timeout=1.0)
-                conn.request("GET", "/v1/status")
-                resp = conn.getresponse()
-                if resp.status == 200:
-                    self_test_status = "PASS"
-                conn.close()
-            except Exception as st_err:
-                self_test_status = f"FAIL({st_err})"
+                self._server = _LoopbackHTTPServer((self.host, self.port), Handler)
+                break
+            except OSError as e:
+                self._server = None
+                is_in_use = e.errno == errno.EADDRINUSE or "address already in use" in str(e).lower()
+                if is_in_use and attempt < attempts:
+                    time.sleep(max(0.0, float(bind_retry_delay or 0.0)))
+                    continue
+                self.bridge.bridge_server_started = False
+                if is_in_use:
+                    diag = self.diagnose_port_conflict()
+                    detail = self._format_port_conflict(diag)
+                    self.bridge.bridge_server_error = detail
+                    logger.log(f"[GEMINI][BRIDGE_PORT_CONFLICT] {detail}", "ERROR")
+                    raise OSError(errno.EADDRINUSE, detail) from e
+                self.bridge.bridge_server_error = str(e)
+                logger.log(f"[GEMINI] Bridge HTTP 서버 시작 실패 ({self.host}:{self.port}): {e}", "ERROR")
+                raise
+            except Exception as e:
+                self._server = None
+                self.bridge.bridge_server_started = False
+                self.bridge.bridge_server_error = str(e)
+                logger.log(f"[GEMINI] Bridge HTTP 서버 시작 실패 ({self.host}:{self.port}): {e}", "ERROR")
+                raise
 
-            logger.log(f"[GEMINI][BRIDGE_SERVER] bind={self.host}:{self.port} selfTest={self_test_status}")
-        except Exception as e:
+        if self._server is None:
             self.bridge.bridge_server_started = False
-            self.bridge.bridge_server_error = str(e)
-            logger.log(f"[GEMINI] Bridge HTTP 서버 시작 실패 ({self.host}:{self.port}): {e}", "ERROR")
-            raise
+            self.bridge.bridge_server_error = "bridge_bind_failed"
+            raise OSError("bridge_bind_failed")
+
+        self.port = int(self._server.server_port)
+        self.bridge.bridge_server_started = True
+        self.bridge.bridge_server_error = ""
+        self._thread = threading.Thread(target=self._server.serve_forever, daemon=True)
+        self._thread.start()
+
+        self_test_status = "FAIL"
+        try:
+            conn = http.client.HTTPConnection(self.host, self.port, timeout=1.0)
+            conn.request("GET", "/v1/status")
+            resp = conn.getresponse()
+            if resp.status == 200:
+                self_test_status = "PASS"
+            conn.close()
+        except Exception as st_err:
+            self_test_status = f"FAIL({st_err})"
+
+        logger.log(f"[GEMINI][BRIDGE_SERVER] bind={self.host}:{self.port} selfTest={self_test_status}")
 
     def stop(self) -> None:
         if self._server:
@@ -1099,3 +1215,5 @@ class GeminiBridgeHTTPServer:
             self._thread.join(timeout=2)
         self._server = None
         self._thread = None
+        self.bridge.bridge_server_started = False
+        self.bridge.bridge_server_error = ""
