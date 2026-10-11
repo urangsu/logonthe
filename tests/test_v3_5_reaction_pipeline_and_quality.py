@@ -160,11 +160,13 @@ class TestV35ReactionPipelineAndQuality(unittest.TestCase):
             corpus_examples=["만두피 얇은 거 좋네요 ㅎㅎ", "두 번째 예시는 주입하지 않음"],
             style_policy=policy, version=PROMPT_VERSION_V3_5,
         )
-        self.assertIn(policy.style_instruction, prompt)
+        self.assertIn(policy.target_length_desc, prompt)
+        self.assertIn("웃음·이모지는 어울리면 합계 1개까지", prompt)
         self.assertIn("만두피 얇은 거 좋네요 ㅎㅎ", prompt)
         self.assertNotIn("두 번째 예시는 주입하지 않음", prompt)
         self.assertIn("소재나 문장을 복사하지 마", prompt)
-        self.assertIn("칭찬·방문 약속을 덧붙이지 마", prompt)
+        self.assertIn("말이 끝나면 끝내", prompt)
+        self.assertNotIn("이번 글의 반응 방향", prompt)
         self.assertEqual(AIPromptBuilder.select_v3_5_style_examples(["x" * 101, "짧은 예시"]), ["짧은 예시"])
 
     def test_cooking_cadence_is_food_only_and_keeps_factual_boundary(self):
@@ -176,10 +178,10 @@ class TestV35ReactionPipelineAndQuality(unittest.TestCase):
             title="비 오는 추석", selected_context="귀경길 비 예보가 있어요",
             reaction_instruction="비 소식에 아쉬움을 표현해", content_focus="GENERAL",
         )
-        self.assertIn("짧은 감탄이나 솔직한 끌림", food)
-        self.assertIn("감탄 없이 시작해도 돼", food)
-        self.assertNotIn("짧은 감탄이나 솔직한 끌림", ordinary)
-        self.assertIn("없는 맛·시설 등 사실은 만들지 마", food)
+        self.assertIn("달걀 구성에 반응해", food)
+        self.assertIn("읽고 든 느낌 한 가지만", food)
+        self.assertNotIn("음식 글도", ordinary)
+        self.assertIn("없는 사실·사진 묘사·방문·시식 경험은 만들지 마", food)
         self.assertNotIn("더쿠", food)
         self.assertNotIn("관찰자 입장", food)
 
@@ -193,8 +195,8 @@ class TestV35ReactionPipelineAndQuality(unittest.TestCase):
         )
         self.assertIn("표지는 이번엔 쉬어가자", prompt)
         self.assertNotIn("맛 궁금하네요 ㅎㅎ", prompt)
-        self.assertIn("이 조합 좋네요 😊", prompt)
-        self.assertIn("표지는 없어도 되고", prompt)
+        self.assertNotIn("이 조합 좋네요 😊", prompt)
+        self.assertIn("없어도 좋아", prompt)
         self.assertLess(len(prompt), 900)
         restrained = AIPromptBuilder.build_v3_5(
             title="반려견이 무지개다리를 건넜어요", selected_context="오래 함께한 강아지를 떠나보냈어요",

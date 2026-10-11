@@ -73,10 +73,10 @@ def test_user_voice_principles_are_compact_and_do_not_import_visit_stories():
         title="만두 후기", excerpt="만두피가 얇고 속이 꽉 차 있어요",
         reaction_instruction="만두피에 반응해",
     )
-    assert "짧은 혼잣말처럼" in prompt
-    assert "과장·본문 요약·상투적 인사" in prompt
-    assert "제공되지 않은 방문·시식 경험" in prompt
-    assert "진지하거나 슬픈 글" in prompt
+    assert "읽고 든 느낌 한 가지만 툭" in prompt
+    assert "요약·과장·상투적 인사" in prompt
+    assert "없는 사실·사진 묘사·방문·시식 경험" in prompt
+    assert "작성자의 좋고 아쉬운 마음을 바꾸지 마" in prompt
     assert "116개" not in prompt
     assert "김유랑" not in prompt
     assert len(prompt) < 500
@@ -99,7 +99,7 @@ def test_bereavement_keeps_decoration_options_but_suppresses_food_excitement():
     assert "짧고 담백한 존댓말" in prompt
     assert "만두 조합 대박" not in prompt
     assert "솔직한 끌림" not in prompt
-    assert "억지 위로나 교훈" in prompt
+    assert "억지 위로·교훈 없이" in prompt
     assert AIPromptBuilder.select_v3_5_style_examples(["예시 ㅎㅎ"], title, excerpt) == []
 
 

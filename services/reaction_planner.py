@@ -509,8 +509,8 @@ class ReactionContextPlanner:
                         break
                 sec_desc = f"와 {sec}" if sec and sec != pri else ""
                 instruction = (
-                    f"{pri}{sec_desc} 조합에서 끌리는 부분에 짧고 솔직하게 반응해. "
-                    "맛에 대한 궁금함이나 의외인 느낌을 편하게 표현해."
+                    f"{pri}{sec_desc}에 짧고 솔직하게 반응해. "
+                    "궁금함·의외성·연상 중 맞는 느낌만 골라. 조합 설명은 필수가 아냐."
                 )
                 evidence = f"조합/특수재료 근거({pri}{sec_desc})"
             elif visual_salience >= 4.0 and visual_salience > taste_salience:
@@ -548,7 +548,7 @@ class ReactionContextPlanner:
                 else:
                     mode = "future_interest"
                     instruction = (
-                        f"{pri} 메뉴에 관심을 보이거나 나중에 맛보고 싶다는 느낌으로 가볍게 반응해."
+                        f"{pri}에서 떠오른 느낌을 편하게 표현해. 먹고 싶다는 말이나 방문 계획은 필수가 아냐."
                     )
                     evidence = f"메뉴 언급({pri})"
 
