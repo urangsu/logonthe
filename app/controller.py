@@ -407,8 +407,9 @@ class FeedController:
             if self.gemini_extension_bridge:
                 preflight = self.gemini_extension_bridge.await_ready(timeout=6.0, stop_event=self.stop_event)
                 if not preflight.ready:
-                    self.state_mgr.update(new_state=FeedState.ERROR, message=f"Gemini 확장 연결 실패: {preflight.status}")
-                    logger.log(f"[GEMINI][PREFLIGHT] 피드 시작 차단: {preflight.status}", "ERROR")
+                    detail = f"{preflight.status}: {preflight.message}" if preflight.message else preflight.status
+                    self.state_mgr.update(new_state=FeedState.ERROR, message=f"Gemini 확장 연결 실패: {detail}")
+                    logger.log(f"[GEMINI][PREFLIGHT] 피드 시작 차단: {detail}", "ERROR")
                     return
 
         BlogPopularityService.clear_cache()

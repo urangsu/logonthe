@@ -102,4 +102,3 @@ def test_thoughtful_length_and_period_contract_is_preserved():
     prompt = AIPromptBuilder.build_v3_5(title="산책", excerpt="바람이 좋아요", style_policy=policy)
     assert policy.target_length_desc in prompt
     assert "마침표 없이" not in prompt
-
