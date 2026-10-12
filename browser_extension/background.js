@@ -241,15 +241,22 @@ const pageWorldSubmissions = new Map();
 
 async function ensureGeminiForeground(tabId) {
   let timer;
+  let timedOut = false;
+  const timeoutError = () => ({ ok: false, error: 'gemini_foreground_unavailable' });
   const activate = async () => {
     const tab = await chrome.tabs.get(tabId);
+    if (timedOut) return timeoutError();
     if (!/^https:\/\/gemini\.google\.com(?:\/|$)/.test(tab.url || '') || !Number.isInteger(tab.windowId)) {
       return { ok: false, error: 'invalid_gemini_tab' };
     }
     const win = await chrome.windows.get(tab.windowId);
+    if (timedOut) return timeoutError();
     if (win.state === 'minimized') await chrome.windows.update(tab.windowId, { state: 'normal' });
+    if (timedOut) return timeoutError();
     await chrome.tabs.update(tabId, { active: true, autoDiscardable: false });
+    if (timedOut) return timeoutError();
     await chrome.windows.update(tab.windowId, { focused: true });
+    if (timedOut) return timeoutError();
     const current = await chrome.tabs.get(tabId);
     const currentWindow = await chrome.windows.get(tab.windowId);
     const ok = current.active && current.windowId === tab.windowId && currentWindow.focused
@@ -259,7 +266,7 @@ async function ensureGeminiForeground(tabId) {
   try {
     return await Promise.race([
       activate(),
-      new Promise(resolve => { timer = setTimeout(() => resolve({ ok: false, error: 'gemini_foreground_unavailable' }), 2500); }),
+      new Promise(resolve => { timer = setTimeout(() => { timedOut = true; resolve(timeoutError()); }, 2500); }),
     ]);
   } catch (_) {
     return { ok: false, error: 'gemini_foreground_unavailable' };

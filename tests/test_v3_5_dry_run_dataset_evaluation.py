@@ -5,6 +5,7 @@ v3.5 Reaction Pipeline 50-Item Dry-run Benchmark & Quality KPI Evaluation
 
 import json
 import os
+import tempfile
 import unittest
 from services.reaction_planner import ReactionContextPlanner
 from services.comment_context_selector import select_comment_context
@@ -175,6 +176,8 @@ class TestV35DryRunDatasetEvaluation(unittest.TestCase):
 
     def test_07_generate_and_save_dry_run_report(self):
         """전체 50개 데이터셋에 대한 v3.5 ReactionPlan 및 프롬프트 생성 결과 JSON 리포트 저장"""
+        report_dir = tempfile.TemporaryDirectory()
+        self.addCleanup(report_dir.cleanup)
         report_entries = []
 
         for item in self.fixtures:
@@ -210,11 +213,11 @@ class TestV35DryRunDatasetEvaluation(unittest.TestCase):
                 "prompt_sample": prompt[:200] + "...",
             })
 
-        output_json = "/Volumes/무제/jusik/naver-blog-bot-v13-1-community-rhythm/dry_run_report_v3_5.json"
+        output_json = os.path.join(report_dir.name, "dry_run_report_v3_5.json")
         with open(output_json, "w", encoding="utf-8") as f:
             json.dump(report_entries, f, ensure_ascii=False, indent=2)
 
-        output_md = "/Volumes/무제/jusik/naver-blog-bot-v13-1-community-rhythm/dry_run_report_v3_5.md"
+        output_md = os.path.join(report_dir.name, "dry_run_report_v3_5.md")
         with open(output_md, "w", encoding="utf-8") as f:
             f.write("# v3.5 Reaction Pipeline 50-Item Dry-run Benchmark Report\n\n")
             f.write("| No | ID | Category | Domain | Mode | Primary Anchor | Needs More Context |\n")

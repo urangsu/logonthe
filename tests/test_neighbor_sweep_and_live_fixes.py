@@ -377,6 +377,9 @@ class TestNeighborMutualAndSweepMode(unittest.TestCase):
             collected_total=1,
             pages_visited=1,
             page_fingerprints=["fp1"],
+            terminal=True,
+            collection_complete=True,
+            relationship_complete=True,
         )
 
         posts = [

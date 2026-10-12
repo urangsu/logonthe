@@ -132,7 +132,7 @@ def check_food_relevance(
     sensory_terms = (
         "바삭", "촉촉", "고소", "쫀득", "쫄깃", "진한 향", "매콤", "얼큰", "단짠",
         "육즙", "부드러", "달달", "담백", "시원", "칼칼", "풍미", "불향", "알싸",
-        "달콤", "새콤", "짭짤", "식감", "튀김옷"
+        "달콤", "새콤", "짭짤", "식감", "튀김옷", "꼬들", "두툼", "푸짐"
     )
     for term in sensory_terms:
         if term in draft_clean and term in excerpt_clean:

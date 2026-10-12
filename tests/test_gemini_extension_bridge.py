@@ -3,6 +3,7 @@ import time
 import unittest
 import json
 import http.client
+from unittest.mock import Mock, patch
 
 from services.gemini_extension_bridge import (
     GeminiCommand,
@@ -16,6 +17,35 @@ from services.gemini_extension_bridge import (
 
 
 class GeminiExtensionBridgeTests(unittest.TestCase):
+    def test_preflight_never_starts_server_while_reading_status(self):
+        bridge = GeminiExtensionBridge()
+        bridge.bridge_server_started = False
+        bridge.server = Mock()
+        self.assertFalse(bridge.preflight().ready)
+        bridge.server.start.assert_not_called()
+
+    def test_send_diagnostics_preserve_focus_fields_in_python_log(self):
+        bridge = GeminiExtensionBridge()
+        server = GeminiBridgeHTTPServer(bridge, port=0)
+        server.start()
+        try:
+            with patch("services.gemini_extension_bridge.logger.log") as log:
+                conn = http.client.HTTPConnection("127.0.0.1", server.port, timeout=2)
+                conn.request("POST", "/v1/event", json.dumps({
+                    "type": "SEND_COMMIT_UNKNOWN", "rid": "focus-test",
+                    "visibilityState": "hidden", "documentFocused": False,
+                }), {"Content-Type": "application/json"})
+                response = conn.getresponse()
+                response.read()
+                conn.close()
+                self.assertEqual(response.status, 200)
+                messages = [call.args[0] for call in log.call_args_list]
+                diag = next(message for message in messages if "SEND_COMMIT_UNKNOWN" in message)
+                self.assertIn('"visibilityState": "hidden"', diag)
+                self.assertIn('"documentFocused": false', diag)
+        finally:
+            server.stop()
+
     def test_preflight_requires_fresh_ready_heartbeat(self):
         bridge = GeminiExtensionBridge(expected_extension_version="13.2.3", expected_build_id="13.2.3-r3")
         self.assertFalse(bridge.preflight().ready)

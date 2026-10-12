@@ -24,6 +24,7 @@ v3.5 Simulated Pipeline Contract Test
 
 import json
 import os
+import tempfile
 import unittest
 from typing import Any, Dict, List
 
@@ -39,7 +40,6 @@ from services.comments.grounding_gate import CommentGroundingGate
 from app.processor import check_food_relevance
 from tests.dry_run_dataset_v3_5 import FIXTURES_50
 
-_REPORT_DIR = "/Volumes/무제/jusik/naver-blog-bot-v13-1-community-rhythm"
 
 
 # ---------------------------------------------------------------------------
@@ -645,13 +645,15 @@ class TestV35SimulatedPipelineContract(unittest.TestCase):
                 f"[{r['id']}] Final status should be APPROVED, got {r['final_status']}: gate={r['final_gate_valid']}, grounding={r['grounding_valid']}"
             )
 
+        report_dir = tempfile.TemporaryDirectory()
+        self.addCleanup(report_dir.cleanup)
         # JSON 리포트
-        json_path = os.path.join(_REPORT_DIR, "simulated_pipeline_report_5cases.json")
+        json_path = os.path.join(report_dir.name, "simulated_pipeline_report_5cases.json")
         with open(json_path, "w", encoding="utf-8") as f:
             json.dump(results, f, ensure_ascii=False, indent=2)
 
         # Markdown 리포트
-        md_path = os.path.join(_REPORT_DIR, "simulated_pipeline_report_5cases.md")
+        md_path = os.path.join(report_dir.name, "simulated_pipeline_report_5cases.md")
         with open(md_path, "w", encoding="utf-8") as f:
             f.write("# v3.5 Simulated Pipeline 5대 케이스 검증 결과\n\n")
             f.write("> ※ 본 리포트의 모델 출력은 테스트 fixture에 사전 정의된 simulated output이며\n")

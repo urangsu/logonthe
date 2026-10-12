@@ -201,6 +201,23 @@ test('FOREGROUND: focus failure never dispatches a submission', async () => {
   assert.strictEqual(injections, 0);
 });
 
+test('FOREGROUND: late tab lookup after timeout cannot activate a window', async () => {
+  const { background, context } = loadRealBackgroundJs();
+  let expire, resolveTab, updates = 0;
+  context.setTimeout = callback => { expire = callback; return 1; };
+  context.clearTimeout = () => {};
+  context.chrome.tabs.get = () => new Promise(resolve => { resolveTab = resolve; });
+  context.chrome.tabs.update = async () => { updates++; };
+  context.chrome.windows.update = async () => { updates++; };
+  const pending = background.ensureGeminiForeground(7);
+  expire();
+  assert.strictEqual((await pending).ok, false);
+  resolveTab({ id: 7, windowId: 3, url: 'https://gemini.google.com/app' });
+  await Promise.resolve();
+  await Promise.resolve();
+  assert.strictEqual(updates, 0);
+});
+
 test('FOREGROUND: expiration while focusing never dispatches a submission', async () => {
   const { background, context } = loadRealBackgroundJs();
   const meta = { tabId: 7, generationDeadlineAtMs: Date.now() + 10000 };

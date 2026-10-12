@@ -61,6 +61,20 @@ def test_menu_dictionary_never_substitutes_for_article_evidence():
         "망고시루 먹어보고 싶네요", "피자를 주문했어요", ["피자"], "food_desire")[0]
 
 
+@pytest.mark.parametrize("draft,context", [
+    ("꼬들꼬들한 면발이라 식감이 매력적이겠네요", "면발은 꼬들꼬들하고 국물이 진해요"),
+    ("두툼한 패티가 푸짐하게 쌓여서 눈에 들어오네요", "두툼한 소고기 패티가 푸짐하게 쌓여 있어요"),
+])
+def test_shared_sensory_paraphrase_does_not_need_repeated_menu(draft, context):
+    assert check_food_relevance(draft, context, [], "taste_reaction")[0]
+
+
+def test_sensory_intensity_not_in_context_is_not_evidence():
+    assert not check_food_relevance(
+        "향이 진한 편이라 취향이 나뉘겠네요", "블루치즈 특유의 향 때문에 호불호가 갈려요",
+        ["블루치즈"], "combination_curiosity")[0]
+
+
 def test_adverb_is_not_a_menu_attribute_target():
     result = CommentDraftInspector.inspect(
         "바로 무쳐주는 매콤한 보쌈김치 너무 땡기네요",
