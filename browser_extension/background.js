@@ -237,6 +237,86 @@ async function ensureFreshGeminiConversation(tabId) {
 const inFlightCommandResolvers = new Map();
 const cancelledRequestIds = new Set();
 const resultDeliveryRegistry = new Map();
+const pageWorldSubmissions = new Map();
+
+async function ensureGeminiForeground(tabId) {
+  let timer;
+  const activate = async () => {
+    const tab = await chrome.tabs.get(tabId);
+    if (!/^https:\/\/gemini\.google\.com(?:\/|$)/.test(tab.url || '') || !Number.isInteger(tab.windowId)) {
+      return { ok: false, error: 'invalid_gemini_tab' };
+    }
+    const win = await chrome.windows.get(tab.windowId);
+    if (win.state === 'minimized') await chrome.windows.update(tab.windowId, { state: 'normal' });
+    await chrome.tabs.update(tabId, { active: true, autoDiscardable: false });
+    await chrome.windows.update(tab.windowId, { focused: true });
+    const current = await chrome.tabs.get(tabId);
+    const currentWindow = await chrome.windows.get(tab.windowId);
+    const ok = current.active && current.windowId === tab.windowId && currentWindow.focused
+      && /^https:\/\/gemini\.google\.com(?:\/|$)/.test(current.url || '');
+    return { ok: Boolean(ok), error: ok ? '' : 'gemini_foreground_unavailable' };
+  };
+  try {
+    return await Promise.race([
+      activate(),
+      new Promise(resolve => { timer = setTimeout(() => resolve({ ok: false, error: 'gemini_foreground_unavailable' }), 2500); }),
+    ]);
+  } catch (_) {
+    return { ok: false, error: 'gemini_foreground_unavailable' };
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
+function submitMarkedPrompt(requestId, expectedPath, expectedText, deadlineAtMs) {
+  const fail = error => ({ clicked: false, keyed: false, world: 'MAIN', error });
+  if (!Number.isFinite(deadlineAtMs) || deadlineAtMs <= 0 || Date.now() >= deadlineAtMs || location.pathname !== expectedPath) return fail('send_state_lost');
+  if (document.visibilityState === 'hidden' || (typeof document.hasFocus === 'function' && !document.hasFocus())) return fail('gemini_foreground_lost');
+  const selector = `[data-nfa-submit="${requestId}"]`;
+  const nodes = [...document.querySelectorAll(selector)];
+  const input = nodes.find(n => n.isContentEditable || n.tagName === 'TEXTAREA');
+  const button = nodes.find(n => n.tagName === 'BUTTON');
+  const text = () => input?.tagName === 'TEXTAREA' ? input.value : input?.textContent;
+  const ready = () => input?.isConnected && button?.isConnected && !button.disabled
+    && button.getAttribute('aria-disabled') !== 'true' && text() === expectedText;
+  if (!ready()) return fail('prompt_or_button_changed');
+  // Events created in the page realm share the application's event prototypes.
+  input.dispatchEvent(new InputEvent('input', { bubbles: true, inputType: 'insertText', data: null }));
+  if (typeof button.focus === 'function') button.focus();
+  if (!ready() || Date.now() >= deadlineAtMs || location.pathname !== expectedPath) return fail('send_state_lost');
+  button.click();
+  return { clicked: true, keyed: false, world: 'MAIN' };
+}
+
+async function submitInPageWorld(message, sender) {
+  const rid = message.requestId;
+  const inFlight = inFlightCommandResolvers.get(rid);
+  const meta = inFlight?.commandMetadata;
+  if (!meta || meta.tabId !== sender.tab?.id || sender.frameId !== 0 || cancelledRequestIds.has(rid)) {
+    return { clicked: false, error: 'invalid_submission_identity' };
+  }
+  if (!/^[a-zA-Z0-9_-]{1,128}$/.test(rid) || !Number.isFinite(meta.generationDeadlineAtMs) || meta.generationDeadlineAtMs <= 0 || Date.now() >= meta.generationDeadlineAtMs) {
+    return { clicked: false, error: 'submission_expired' };
+  }
+  if (pageWorldSubmissions.has(rid)) return await pageWorldSubmissions.get(rid);
+  const pending = Promise.resolve().then(async () => {
+    const foreground = await ensureGeminiForeground(meta.tabId);
+    if (!foreground.ok) return { clicked: false, error: foreground.error };
+    if (cancelledRequestIds.has(rid) || inFlightCommandResolvers.get(rid) !== inFlight || Date.now() >= meta.generationDeadlineAtMs) {
+      return { clicked: false, error: 'submission_expired' };
+    }
+    const results = await chrome.scripting.executeScript({
+    target: { tabId: meta.tabId, frameIds: [0] }, world: 'MAIN',
+    func: submitMarkedPrompt,
+    args: [rid, message.expectedPath, message.expectedText, meta.generationDeadlineAtMs],
+    });
+    return results[0]?.result || { clicked: false, error: 'submission_no_ack' };
+  })
+    .catch(() => ({ clicked: false, error: 'submission_transport_unknown' }));
+  pageWorldSubmissions.set(rid, pending);
+  while (pageWorldSubmissions.size > 200) pageWorldSubmissions.delete(pageWorldSubmissions.keys().next().value);
+  return await pending;
+}
 
 function trackCancelledRequestId(rid) {
   if (!rid) return;
@@ -383,6 +463,11 @@ async function runCommandCycle() {
     const claim = await bridgeFetch('/v1/claim', 'POST', { requestId: command.requestId, claimant: `${contract.runtimeBuild}_tab_${activeRuntime.tabId}` }, 5000);
     if (!claim.claimed) return;
   } catch (_) { return; }
+  const foreground = await ensureGeminiForeground(activeRuntime.tabId);
+  if (!foreground.ok) {
+    await bridgeFetch('/v1/result', 'POST', { requestId: command.requestId, postKey: command.postKey, navigationVersion: command.navigationVersion, status: 'failed', text: '', error: foreground.error }, 10000).catch(() => {});
+    return;
+  }
   const freshCheck = await ensureFreshGeminiConversation(activeRuntime.tabId);
   if (!freshCheck.ok) {
     console.warn('[GEMINI][BACKGROUND] fresh chat verification failed:', freshCheck.error);
@@ -430,7 +515,7 @@ async function runCommandCycle() {
         }
       } catch (_) {}
     }, 400);
-    inFlightCommandResolvers.set(command.requestId, { resolve: cleanupAndResolve, timer, keepAliveInterval, cancelCheckInterval, commandMetadata: { requestId: command.requestId, postKey: command.postKey, navigationVersion: command.navigationVersion } });
+    inFlightCommandResolvers.set(command.requestId, { resolve: cleanupAndResolve, timer, keepAliveInterval, cancelCheckInterval, commandMetadata: { requestId: command.requestId, postKey: command.postKey, navigationVersion: command.navigationVersion, tabId: activeRuntime.tabId, generationDeadlineAtMs: command.generationDeadlineAtMs || command.generation_deadline_at_ms || (command.generation_deadline_at ? command.generation_deadline_at * 1000 : targetDeadlineAtMs) } });
     command.tabId = freshCheck.tabId || activeRuntime.tabId;
     command.contentInstanceId = freshCheck.contentInstanceId;
     command.conversationEpoch = freshCheck.conversationEpoch;
@@ -551,6 +636,10 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
     if (message.event) bridgeFetch('/v1/event', 'POST', message.event, 4000).catch(() => {});
     sendResponse({ ok: true }); return true;
   }
+  if (message?.type === 'NFA_SUBMIT_PAGE_WORLD') {
+    submitInPageWorld(message, sender).then(sendResponse).catch(() => sendResponse({ clicked: false, error: 'submission_transport_unknown' }));
+    return true;
+  }
   if (message?.type === 'bridgeFetch') {
     bridgeFetch(message.path, message.method || 'GET', message.body || null).then(data => sendResponse({ ok: true, data })).catch(error => sendResponse({ ok: false, error: String(error?.message || error) }));
     return true;
@@ -567,3 +656,4 @@ globalThis.__NFA_BACKGROUND__ = {
   bridgeFetch,
   runCommandCycle
 };
+Object.assign(globalThis.__NFA_BACKGROUND__, { submitMarkedPrompt, submitInPageWorld, inFlightCommandResolvers, ensureGeminiForeground });

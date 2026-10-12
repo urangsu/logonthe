@@ -109,6 +109,27 @@ function loadRealContentJs(customEnv = {}) {
 }
 
 function prepareEmptyComposer(context, editorEl) {
+  const marked = new Map();
+  const composer = editorEl.closest('chat-window, .input-area, .composer, .input-container, form, main');
+  const nodes = [editorEl, ...(composer?.querySelectorAll('button') || [])];
+  for (const node of nodes) {
+    const get = node.getAttribute?.bind(node);
+    node.setAttribute = (key, value) => { if (key === 'data-nfa-submit') marked.set(node, value); };
+    node.removeAttribute = key => { if (key === 'data-nfa-submit') marked.delete(node); };
+    node.getAttribute = key => key === 'data-nfa-submit' ? marked.get(node) : get?.(key);
+  }
+  const pageHarness = loadRealBackgroundJs();
+  pageHarness.context.document = { querySelectorAll: selector => [...marked].filter(([, rid]) => selector.includes(rid)).map(([node]) => node) };
+  pageHarness.context.location = context.location;
+  pageHarness.context.InputEvent = context.InputEvent;
+  const send = context.chrome.runtime.sendMessage;
+  context.chrome.runtime.sendMessage = (message, callback) => {
+    if (message.type === 'NFA_SUBMIT_PAGE_WORLD') {
+      callback(pageHarness.background.submitMarkedPrompt(message.requestId, message.expectedPath, message.expectedText, Date.now() + 5000));
+      return;
+    }
+    return send(message, callback);
+  };
   editorEl.innerText = editorEl.textContent = '';
   context.document.execCommand = (command, _ui, text) => {
     if (command === 'delete') editorEl.innerText = editorEl.textContent = '';
@@ -116,6 +137,90 @@ function prepareEmptyComposer(context, editorEl) {
     return true;
   };
 }
+
+test('PAGE-WORLD: input event precedes one click, changed prompt and focus rerender never click', () => {
+  const { background, context } = loadRealBackgroundJs();
+  const events = [];
+  const input = { isContentEditable: true, isConnected: true, textContent: '본문', dispatchEvent: () => events.push('input') };
+  const button = { tagName: 'BUTTON', isConnected: true, disabled: false, getAttribute: () => null,
+    focus: () => events.push('focus'), click: () => events.push('click') };
+  context.document = { querySelectorAll: () => [input, button] };
+  context.location = { pathname: '/app' };
+  context.InputEvent = class {};
+  assert.strictEqual(background.submitMarkedPrompt('r1', '/app', '본문', Date.now() + 1000).clicked, true);
+  assert.deepStrictEqual(events, ['input', 'focus', 'click']);
+  events.length = 0;
+  assert.strictEqual(background.submitMarkedPrompt('r1', '/app', '변경', Date.now() + 1000).clicked, false);
+  assert.strictEqual(events.length, 0);
+  button.focus = () => { button.isConnected = false; };
+  assert.strictEqual(background.submitMarkedPrompt('r1', '/app', '본문', Date.now() + 1000).clicked, false);
+  assert.ok(!events.includes('click'));
+});
+
+test('PAGE-WORLD: sender/deadline correlation and duplicate messages allow at most one injection', async () => {
+  const { background, context } = loadRealBackgroundJs();
+  let injections = 0;
+  context.chrome.scripting = { executeScript: async opts => { injections++; assert.strictEqual(opts.world, 'MAIN'); return [{ result: { clicked: true } }]; } };
+  const message = { requestId: 'one', expectedPath: '/app', expectedText: '본문' };
+  const sender = { tab: { id: 7 }, frameId: 0 };
+  background.inFlightCommandResolvers.set('one', { commandMetadata: { tabId: 7, generationDeadlineAtMs: Date.now() + 10000 } });
+  assert.strictEqual((await background.submitInPageWorld(message, { tab: { id: 8 }, frameId: 0 })).clicked, false);
+  await Promise.all([background.submitInPageWorld(message, sender), background.submitInPageWorld(message, sender)]);
+  assert.strictEqual(injections, 1);
+  background.inFlightCommandResolvers.get('one').commandMetadata.generationDeadlineAtMs = Date.now() - 1;
+  assert.strictEqual((await background.submitInPageWorld(message, sender)).clicked, false);
+  assert.strictEqual(injections, 1);
+});
+
+test('FOREGROUND: restore the existing minimized window and activate only the existing tab', async () => {
+  const { background, context } = loadRealBackgroundJs();
+  const calls = [];
+  let active = false, focused = false, state = 'minimized';
+  context.chrome.tabs.get = async id => ({ id, windowId: 3, active, url: 'https://gemini.google.com/app' });
+  context.chrome.tabs.update = async (id, props) => { calls.push(['tab', id, props]); active = props.active; };
+  context.chrome.windows.get = async id => ({ id, focused, state });
+  context.chrome.windows.update = async (id, props) => { calls.push(['window', id, props]); focused = props.focused ?? focused; state = props.state ?? state; };
+  assert.strictEqual((await background.ensureGeminiForeground(7)).ok, true);
+  assert.deepStrictEqual(JSON.parse(JSON.stringify(calls)), [
+    ['window', 3, { state: 'normal' }],
+    ['tab', 7, { active: true, autoDiscardable: false }],
+    ['window', 3, { focused: true }],
+  ]);
+});
+
+test('FOREGROUND: focus failure never dispatches a submission', async () => {
+  const { background, context } = loadRealBackgroundJs();
+  context.chrome.windows.get = async id => ({ id, focused: false, state: 'normal' });
+  context.chrome.windows.update = async () => { throw new Error('focus denied'); };
+  let injections = 0;
+  context.chrome.scripting = { executeScript: async () => { injections++; return []; } };
+  background.inFlightCommandResolvers.set('focus', { commandMetadata: { tabId: 7, generationDeadlineAtMs: Date.now() + 10000 } });
+  const result = await background.submitInPageWorld({ requestId: 'focus' }, { tab: { id: 7 }, frameId: 0 });
+  assert.strictEqual(result.clicked, false);
+  assert.strictEqual(result.error, 'gemini_foreground_unavailable');
+  assert.strictEqual(injections, 0);
+});
+
+test('FOREGROUND: expiration while focusing never dispatches a submission', async () => {
+  const { background, context } = loadRealBackgroundJs();
+  const meta = { tabId: 7, generationDeadlineAtMs: Date.now() + 10000 };
+  context.chrome.windows.update = async () => { meta.generationDeadlineAtMs = Date.now() - 1; };
+  let injections = 0;
+  context.chrome.scripting = { executeScript: async () => { injections++; return []; } };
+  background.inFlightCommandResolvers.set('expired', { commandMetadata: meta });
+  const result = await background.submitInPageWorld({ requestId: 'expired' }, { tab: { id: 7 }, frameId: 0 });
+  assert.strictEqual(result.error, 'submission_expired');
+  assert.strictEqual(injections, 0);
+});
+
+test('PAGE-WORLD: hidden or unfocused document never clicks', () => {
+  const { background, context } = loadRealBackgroundJs();
+  context.location = { pathname: '/app' };
+  for (const doc of [{ visibilityState: 'hidden' }, { visibilityState: 'visible', hasFocus: () => false }]) {
+    context.document = { ...doc, querySelectorAll() { throw new Error('must stop before accessing composer'); } };
+    assert.strictEqual(background.submitMarkedPrompt('one', '/app', '본문', Date.now() + 10000).error, 'gemini_foreground_lost');
+  }
+});
 
 function makeSendFixture() {
   const harness = loadRealContentJs();
@@ -254,6 +359,10 @@ function loadRealBackgroundJs(customEnv = {}) {
         getPlatformInfo: (cb) => { if (typeof cb === 'function') cb({}); },
         lastError: null
       },
+      windows: {
+        get: async id => ({ id, focused: true, state: 'normal' }),
+        update: async (id, props) => ({ id, ...props }),
+      },
       tabs: {
         onUpdated: {
           addListener: () => {}
@@ -271,7 +380,7 @@ function loadRealBackgroundJs(customEnv = {}) {
         },
         get: async (tabId, cb) => {
           if (customEnv.onTabGet) return customEnv.onTabGet(tabId, cb);
-          const tab = { id: tabId, status: 'complete', url: 'https://gemini.google.com/app', title: 'Google Gemini' };
+          const tab = { id: tabId, windowId: 1, active: true, status: 'complete', url: 'https://gemini.google.com/app', title: 'Google Gemini' };
           if (typeof cb === 'function') cb(tab);
           return tab;
         },

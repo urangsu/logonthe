@@ -96,6 +96,11 @@ class EngagementAuditService:
         # Master Buddy Table 초기화
         master_buddies_map: Dict[str, Dict[str, Any]] = {}
         for b_id_key, b_info in all_buddies.items():
+            feed_state = getattr(b_info, "news_feed_state", "확인 불가")
+            if feed_state == "확인 불가" and hasattr(b_info, "new_posts_setting"):
+                s_val = str(getattr(b_info, "new_posts_setting", "") or "").strip().upper()
+                if s_val in {"ON", "OFF"}:
+                    feed_state = s_val
             master_buddies_map[b_id_key] = {
                 "blog_id": b_id_key,
                 "nickname": b_info.nickname,
@@ -105,7 +110,9 @@ class EngagementAuditService:
                 "buddy_type": b_info.buddy_type,
                 "added_date": b_info.added_date,
                 "last_post_date": b_info.last_post_date or "",
-                "news_feed_state": getattr(b_info, "news_feed_state", "확인 불가"),
+                "news_feed_state": feed_state,
+                "new_posts_setting": feed_state,
+                "새글소식": feed_state,
                 "like_count": 0,
                 "comment_count": 0,
                 "comment_entry_count": 0,
@@ -218,6 +225,10 @@ class EngagementAuditService:
         grace_count = sum(1 for r in unresponsive_rows if r["is_recent_buddy"])
         real_unresponsive_count = unresponsive_count - grace_count
 
+        news_feed_on_count = sum(1 for r in master_rows if r.get("news_feed_state") == "ON")
+        news_feed_off_count = sum(1 for r in master_rows if r.get("news_feed_state") == "OFF")
+        news_feed_unknown_count = sum(1 for r in master_rows if r.get("news_feed_state") not in ("ON", "OFF"))
+
         active_buddies_count = sum(1 for r in master_rows if r.get("reaction_category") == "우수 반응(3회이상)")
         audit_state: Literal["complete", "partial", "failed"] = "complete" if all_post_scans_complete else "partial"
 
@@ -236,6 +247,9 @@ class EngagementAuditService:
             "both_like_and_comment_count": both_count,
             "liked_only_count": liked_only_count,
             "commented_only_count": commented_only_count,
+            "news_feed_on_count": news_feed_on_count,
+            "news_feed_off_count": news_feed_off_count,
+            "news_feed_unknown_count": news_feed_unknown_count,
             "master_buddies": master_rows,
             "unresponsive_buddies": unresponsive_rows,
         }
@@ -246,6 +260,7 @@ class EngagementAuditService:
         logger.log(f"==================================================")
         logger.log(f"🎉 [AUDIT] 전체 이웃 {total_buddies}명 기준 무반응 감사 완료! (상태: {audit_state.upper()})")
         logger.log(f"   👥 전체 등록 이웃 (Master): {total_buddies}명")
+        logger.log(f"   🔔 새글소식: ON {news_feed_on_count}명 / OFF(차단) {news_feed_off_count}명 (확인불가: {news_feed_unknown_count}명)")
         logger.log(f"   ❤️ 최근 글에 반응한 이웃: {reacted_buddies_count}명 (우수 반응 3회 이상: {active_buddies_count}명, 공감+댓글 모두: {both_count}명, 공감만: {liked_only_count}명, 댓글만: {commented_only_count}명)")
         logger.log(f"   🚫 최근 글 무반응 이웃: {unresponsive_count}명 (추가일 기준 참고: {grace_count}명 / 확인된 무반응: {real_unresponsive_count}명)")
         logger.log(f"   이웃별 누적 반응 CSV: {summary_csv}")

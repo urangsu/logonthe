@@ -42,6 +42,15 @@ class BuddyInfo:
     setting_evidence: Optional[str] = None
     buddy_type_evidence: Optional[str] = None
 
+    @property
+    def news_feed_state(self) -> str:
+        s = (self.new_posts_setting or "").strip().upper()
+        if s == "ON":
+            return "ON"
+        elif s == "OFF":
+            return "OFF"
+        return "확인 불가"
+
 
 @dataclass
 class BuddyCollectionResult:
@@ -59,6 +68,8 @@ class BuddyCollectionResult:
     mutual_count: int = 0
     non_mutual_count: int = 0
     unknown_count: int = 0
+    news_feed_on_count: int = 0
+    news_feed_off_count: int = 0
 
 
 BUDDY_DOM = r"""() => {
@@ -142,6 +153,56 @@ const parseRelation = (cellEl, rowEl) => {
   return { type: 'unknown', evidence: 'unresolved' };
 };
 
+const parseNewPostsSetting = (cellEl, rowEl) => {
+  const inspect = el => {
+    if (!el) return null;
+    const toggleLinks = Array.from(el.querySelectorAll("a.alert, a[onclick*='oonoff'], a[class*='alert']"));
+    const targets = toggleLinks.length ? toggleLinks : [el];
+    for (const t of targets) {
+      const blindText = (t.querySelector('.blind')?.textContent || '').trim().toUpperCase();
+      if (blindText === 'OFF' || blindText === '차단' || blindText === '꺼짐') {
+        return { setting: 'OFF', verified: true, evidence: 'blind:' + blindText };
+      }
+      if (blindText === 'ON' || blindText === '켜짐') {
+        return { setting: 'ON', verified: true, evidence: 'blind:' + blindText };
+      }
+
+      const cls = (t.className || '').toString();
+      if (/(?:^|\s)(?:off|alert_off|btn_off)(?:\s|$)/i.test(cls)) {
+        return { setting: 'OFF', verified: true, evidence: 'class:' + cls };
+      }
+      if (/(?:^|\s)(?:on|alert_on|btn_on)(?:\s|$)/i.test(cls)) {
+        return { setting: 'ON', verified: true, evidence: 'class:' + cls };
+      }
+
+      const rawText = (t.textContent || '').trim().toUpperCase();
+      if (/\bOFF\b/.test(rawText)) return { setting: 'OFF', verified: true, evidence: 'text:OFF' };
+      if (/\bON\b/.test(rawText)) return { setting: 'ON', verified: true, evidence: 'text:ON' };
+
+      const aria = (t.getAttribute('aria-label') || t.getAttribute('title') || '').trim();
+      if (/OFF|차단|꺼짐/i.test(aria)) return { setting: 'OFF', verified: true, evidence: 'aria:' + aria };
+      if (/ON|소식받기|켜짐/i.test(aria)) return { setting: 'ON', verified: true, evidence: 'aria:' + aria };
+    }
+
+    const cb = el.querySelector('input[type=checkbox]');
+    if (cb) {
+      return { setting: cb.checked ? 'ON' : 'OFF', verified: true, evidence: 'checkbox:' + String(cb.checked) };
+    }
+    return null;
+  };
+
+  if (cellEl) {
+    const res = inspect(cellEl);
+    if (res) return res;
+  }
+  const directLink = rowEl.querySelector("a[onclick*='oonoff'], a.alert");
+  if (directLink) {
+    const res = inspect(directLink);
+    if (res) return res;
+  }
+  return { setting: 'unknown', verified: false, evidence: 'unresolved' };
+};
+
 const items=[], rows=Array.from(table.querySelectorAll('tbody > tr')).filter(r=>r.querySelector("input[name='buddySeq'],input[name='buddyBlogNo']"));
 let unresolved=0;
 for (const row of rows) {
@@ -152,7 +213,7 @@ for (const row of rows) {
   if(ids.length!==1){unresolved++;continue;}
   const raw=(cell(name)?.textContent||links[0].a.textContent||'').trim();
   const dates=cells.map(c=>c.textContent.trim()).filter(t=>/\d{2}[.\-]\d{2}[.\-]\d{2}/.test(t));
-  const checkbox=cell(setting)?.querySelector('input[type=checkbox]');
+  const postSetting = parseNewPostsSetting(cell(setting), row);
 
   let groupName = (cell(group)?.textContent||'').trim();
   if (!groupName || groupName === '그룹') {
@@ -180,15 +241,17 @@ for (const row of rows) {
     buddy_type_evidence: rel.evidence,
     added_date: cell(add)?.textContent.trim() || dates[0] || '',
     last_post_date: cell(last)?.textContent.trim() || dates[1] || '',
-    new_posts_setting: 'unknown',
-    setting_semantics_verified: false,
-    setting_evidence: checkbox ? 'native_checkbox:' + String(checkbox.checked) : null
+    new_posts_setting: postSetting.setting,
+    setting_semantics_verified: postSetting.verified,
+    setting_evidence: postSetting.evidence
   });
 }
 const scope=table.parentElement; const total=scope?.querySelector('.total,.buddy_count'); const m=total?.textContent.replace(/,/g,'').match(/\d+/); const expected=m?Number(m[0]):null;
 let pager=null, ancestor=table.parentElement; for(let depth=0;ancestor&&depth<3&& !['BODY','HTML'].includes(ancestor.tagName);depth++,ancestor=ancestor.parentElement){const ps=Array.from(ancestor.querySelectorAll('.paginate,.pagination,.paging')).filter(shown); if(ps.length===1){pager=ps[0];break;} if(ps.length>1){pager=null;break;}}
 const links=pager?Array.from(pager.querySelectorAll('a')).filter(shown):[]; const label=a=>[a.textContent,a.getAttribute('aria-label'),a.getAttribute('title'),a.querySelector('img')?.alt].filter(Boolean).join(' ').trim(); const disabled=a=>a.getAttribute('aria-disabled')==='true'||a.classList.contains('disabled'); const current=Number((pager?.querySelector('[aria-current=page],strong,em')?.textContent||'').trim())||null; const nums=links.filter(a=>/^\d+$/.test(a.textContent.trim())&&!disabled(a)).map(a=>Number(a.textContent.trim())).filter(n=>!current||n>current).sort((a,b)=>a-b); const next=nums[0]||null; const nextLink=next?links.find(a=>Number(a.textContent.trim())===next):links.find(a=>!disabled(a)&&(a.rel==='next'||/다음|next|^>+$/i.test(label(a)))); const terminal=!nextLink&&links.filter(a=>!disabled(a)&&/다음|next|^>+$/i.test(label(a))).length===0;
-return {scopeVerified:true,relationshipColumnFound:type>=0,items,expectedTotal:expected,unresolvedEntries:unresolved,nextPage:next||(nextLink&&current?current+1:null),nextHref:nextLink?.href||null,terminal};
+// A missing pager is not evidence that every buddy has been collected.
+const terminalEvidence=Boolean(pager)||(expected!==null&&expected===items.length);
+return {scopeVerified:true,relationshipColumnFound:type>=0,items,expectedTotal:expected,unresolvedEntries:unresolved,nextPage:next||(nextLink&&current?current+1:null),nextHref:nextLink?.href||null,terminal:terminal&&terminalEvidence};
 }"""
 
 
@@ -232,7 +295,13 @@ class BuddyListCollector:
                     identity = _canonical_blog_id(item.get("blog_id"))
                     if not identity: issues.append("invalid_buddy_identity"); continue
                     if identity in buddies: issues.append("overlapping_buddy_pages"); continue
-                    setting = item.get("new_posts_setting") if item.get("setting_semantics_verified") is True and item.get("new_posts_setting") in {"on", "off"} else "unknown"
+                    raw_setting = str(item.get("new_posts_setting") or "").strip().upper()
+                    if item.get("setting_semantics_verified") is True and raw_setting in {"ON", "OFF"}:
+                        setting = raw_setting
+                    elif raw_setting in {"ON", "OFF"}:
+                        setting = raw_setting
+                    else:
+                        setting = "unknown"
                     buddies[identity] = BuddyInfo(
                         identity,
                         item.get("nickname") or identity,
@@ -264,6 +333,8 @@ class BuddyListCollector:
         mutual_count = sum(1 for b in buddies.values() if getattr(b, "buddy_type", "") == "서로이웃")
         non_mutual_count = sum(1 for b in buddies.values() if getattr(b, "buddy_type", "") == "이웃")
         unknown_count = sum(1 for b in buddies.values() if getattr(b, "buddy_type", "") not in ("서로이웃", "이웃"))
+        news_feed_on_count = sum(1 for b in buddies.values() if getattr(b, "news_feed_state", "") == "ON")
+        news_feed_off_count = sum(1 for b in buddies.values() if getattr(b, "news_feed_state", "") == "OFF")
 
         rel_complete = (unknown_count == 0) and (len(buddies) > 0 or expected == 0)
         if not rel_complete and len(buddies) > 0:
@@ -293,5 +364,7 @@ class BuddyListCollector:
             mutual_count=mutual_count,
             non_mutual_count=non_mutual_count,
             unknown_count=unknown_count,
+            news_feed_on_count=news_feed_on_count,
+            news_feed_off_count=news_feed_off_count,
         )
 

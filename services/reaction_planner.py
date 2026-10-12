@@ -492,7 +492,17 @@ class ReactionContextPlanner:
             has_special_ingredient = any(ing in combined for ing in ("블루치즈", "고르곤졸라", "트러플", "마라", "바질"))
             has_explicit_combo = any(k in combined for k in cls.EXPLICIT_COMBINATION_PHRASES)
 
-            if (combo_salience >= 4.0 and (has_special_ingredient or has_explicit_combo)) and (combo_salience >= visual_salience and combo_salience >= taste_salience):
+            negative_feeling = re.search(
+                r"아쉬(?:웠|워|운|움)(?!\s*(?:점\s*)?(?:이|은)?\s*없)|실망|별로|지쳤|속상|힘들었|기대\s*이하",
+                excerpt_s,
+            )
+            if negative_feeling:
+                mode = "writer_feeling"
+                instruction = "작성자가 아쉬웠던 부분에 짧게 호응해. 먹고 싶다는 반응이나 억지 칭찬으로 바꾸지 마."
+                if re.search(r"맛있|좋았|만족|괜찮|보람", excerpt_s):
+                    instruction = "좋았던 점과 아쉬웠던 점을 함께 존중해. 눈에 들어온 마음 하나에 짧게 호응해."
+                evidence = f"작성자 감정({negative_feeling.group()})"
+            elif (combo_salience >= 4.0 and (has_special_ingredient or has_explicit_combo)) and (combo_salience >= visual_salience and combo_salience >= taste_salience):
                 mode = "combination_curiosity"
                 if matched_special:
                     pri = matched_special[0]
@@ -509,8 +519,8 @@ class ReactionContextPlanner:
                         break
                 sec_desc = f"와 {sec}" if sec and sec != pri else ""
                 instruction = (
-                    f"{pri}{sec_desc} 조합에서 끌리는 부분에 짧고 솔직하게 반응해. "
-                    "맛에 대한 궁금함이나 의외인 느낌을 편하게 표현해."
+                    f"{pri}에서 눈에 들어온 부분에 네 느낌을 짧게 붙여줘. "
+                    "다른 메뉴를 묶거나 궁금하다는 말로 끝낼 필요는 없어."
                 )
                 evidence = f"조합/특수재료 근거({pri}{sec_desc})"
             elif visual_salience >= 4.0 and visual_salience > taste_salience:
@@ -548,7 +558,7 @@ class ReactionContextPlanner:
                 else:
                     mode = "future_interest"
                     instruction = (
-                        f"{pri} 메뉴에 관심을 보이거나 나중에 맛보고 싶다는 느낌으로 가볍게 반응해."
+                        f"{pri}에서 떠오른 느낌을 편하게 표현해. 먹고 싶다는 말이나 방문 계획은 필수가 아냐."
                     )
                     evidence = f"메뉴 언급({pri})"
 

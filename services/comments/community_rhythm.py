@@ -12,6 +12,7 @@ import unicodedata
 from dataclasses import dataclass
 from enum import Enum
 from typing import ClassVar, Dict, List, Optional, Tuple, Union
+from services.food_comment_focus import FoodCommentFocus
 
 
 class CommunityRhythmPreset(str, Enum):
@@ -1163,11 +1164,29 @@ class CommentDraftInspector:
                     for attr in side_attributes:
                         if re.search(rf"(?:{side_kw})[^\.\n]{{0,25}}{attr}|{attr}[^\.\n]{{0,25}}(?:{side_kw})", norm_excerpt):
                             if attr in normalized and side_kw not in normalized:
-                                main_transfer = re.search(rf"([가-힣]{{2,10}})(?:이|가|은|는|\s+).*{attr}|{attr}[가-힣\s]*\s+([가-힣]{{2,10}})", normalized)
-                                if main_transfer:
-                                    raw_noun = main_transfer.group(1) or main_transfer.group(2)
+                                # Match the attribute's adjacent subject/object,
+                                # not an arbitrary adverb earlier in the sentence.
+                                targets = list(re.finditer(
+                                    rf"([가-힣]{{2,10}}?)(?:이|가|은|는)\s*(?:정말\s*|아주\s*)?{attr}", normalized,
+                                )) + list(re.finditer(
+                                    rf"{attr}(?:한|하게)?\s+([가-힣]{{2,10}})", normalized,
+                                ))
+                                for main_transfer in targets:
+                                    raw_noun = main_transfer.group(1)
                                     target_noun = re.sub(r"(?:이라니|라니|에서|에게|으로|로|이|가|은|는|을|를|도|의)$", "", raw_noun) if raw_noun else ""
-                                    if target_noun and target_noun not in side_dish_words and target_noun in norm_excerpt:
+                                    target_is_side = any(side in target_noun for side in side_dish_words) if target_noun else False
+                                    target_is_food = bool(target_noun and target_noun.endswith(
+                                        tuple(FoodCommentFocus.RESTAURANT_DISHES + FoodCommentFocus.CAFE_DISHES)
+                                        + ("고기", "탕", "국", "면", "밥"),
+                                    ))
+                                    target_has_attribute = bool(target_noun and re.search(
+                                        rf"(?:{re.escape(target_noun)})(?:이|가|은|는|도)?\s*(?:정말\s*|아주\s*)?{attr}|{attr}(?:한|하게)?\s*(?:볶은\s*)?(?:{re.escape(target_noun)})",
+                                        norm_excerpt,
+                                    ))
+                                    if (len(target_noun or "") >= 2
+                                            and raw_noun not in ("바로", "너무", "정말", "진짜", "살짝", "완전")
+                                            and target_is_food and not target_is_side and not target_has_attribute
+                                            and target_noun in norm_excerpt):
                                         return DraftInspectionResult(
                                             passed=False, stage=2, code="mismatched_attribute_target",
                                             matched=f"{target_noun}+{attr}",

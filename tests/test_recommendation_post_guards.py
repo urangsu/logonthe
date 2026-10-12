@@ -190,9 +190,10 @@ class TestRecommendationPostGuards(unittest.TestCase):
         self.assertEqual(reader.cache, {})
 
     def test_excluded_post_has_no_gemini_or_like_or_comment_actions(self):
-        for like_enabled in (False, True):
-            with self.subTest(like_enabled=like_enabled):
-                processor = PostProcessor(cfg(), like_enabled=like_enabled, state_manager=StateManager())
+        for like_enabled, comment_enabled in ((False, True), (True, False), (True, True)):
+            with self.subTest(like_enabled=like_enabled, comment_enabled=comment_enabled):
+                processor = PostProcessor(cfg(), like_enabled=like_enabled,
+                                          comment_enabled=comment_enabled, state_manager=StateManager())
                 processor.post_eligibility_service.evaluate = MagicMock(return_value=PostEligibilityResult(False, "neighbor_count_exceeded"))
                 page = MagicMock()
                 with patch("app.processor.TargetPostGuard.verify"), \
@@ -265,6 +266,7 @@ class TestRecommendationPostGuards(unittest.TestCase):
              patch.object(RecommendationFeedSource, "discover_posts", discover):
             controller = FeedController(config, history, StateManager())
             controller.pacing.wait_next_post = MagicMock(return_value=MagicMock(stopped=False, skipped=False))
+            controller.pacing.wait_post_like = MagicMock(return_value=MagicMock(stopped=False, skipped=False))
             controller.pacing.maybe_pause = MagicMock(return_value=None)
             processor = processor_cls.return_value
             processor.current_result = None
@@ -301,6 +303,7 @@ class TestRecommendationPostGuards(unittest.TestCase):
         controller, order, source = self.run_controller(target=2, allowed_after=3)
         self.assertEqual(order, [event for n in range(1, 6) for event in (("candidate", n), ("process", n))])
         self.assertEqual(controller.pacing.wait_next_post.call_count, 5)
+        self.assertEqual(controller.pacing.wait_post_like.call_count, 3)
         self.assertIn("target_reached", controller.state_mgr.get_state().message)
         self.assertEqual(source.max_items, 50)  # max(target*5, 50): 목표는 실제 댓글/공감 성공 수
 

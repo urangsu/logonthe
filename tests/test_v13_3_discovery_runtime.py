@@ -171,8 +171,8 @@ class TestV133DiscoveryAndRuntime(unittest.TestCase):
     def test_disc_007_runtime_contract_source_of_truth(self):
         """runtime_contract.json과 manifest.json 및 Python loader 일치 검증"""
         contract = load_runtime_contract()
-        self.assertEqual(contract.extension_version, "13.2.6")
-        self.assertEqual(contract.runtime_build, "13.2.6-turn-correlation-v2")
+        self.assertEqual(contract.extension_version, "13.2.8")
+        self.assertEqual(contract.runtime_build, "13.2.8-foreground-send-v1")
         self.assertEqual(contract.protocol_version, 3)
         self.assertEqual(contract.bridge_schema_version, 2)
 
@@ -180,6 +180,8 @@ class TestV133DiscoveryAndRuntime(unittest.TestCase):
         with open(manifest_path, "r", encoding="utf-8") as f:
             manifest = json.load(f)
         self.assertEqual(manifest["version"], contract.extension_version)
+        from services.config import DEFAULT_CONFIG_V2
+        self.assertEqual(DEFAULT_CONFIG_V2["gemini_extension_version"], contract.extension_version)
 
     def test_disc_008_runtime_contract_fail_closed_on_missing(self):
         with patch("os.path.exists", return_value=False):

@@ -195,7 +195,7 @@ class FeedController:
             "user_skipped", "user_skipped_pre_like", "stopped_pre_like",
             "low_confidence_skip", "low_confidence_precondition",
         }
-        if (like_error and like_error not in non_failure_like_reasons) or result.comment_result.status == CommentSubmitState.FAILED:
+        if is_gemini_failure or (like_error and like_error not in non_failure_like_reasons) or result.comment_result.status == CommentSubmitState.FAILED:
             self.failed_count += 1
 
         if is_gemini_failure:
@@ -1011,6 +1011,18 @@ class FeedController:
                         logger.log("  ⏭️ [PACING] 사용자 스킵 요청 감지 -> 다음 글 진입 전 대기 및 휴식을 생략하고 즉시 이동합니다.")
                         self.skip_event.clear()
                     else:
+                        eligibility = getattr(result, "eligibility", None) if result else None
+                        guard_excluded = bool(eligibility and not eligibility.allowed)
+                        topic_excluded = str(getattr(comment_res, "error", "") or "").startswith("topic_blocked:")
+                        if guard_excluded or topic_excluded:
+                            logger.log("[PACING][GUARD_EXCLUDED] 제외 글도 공감→댓글 대기 설정을 적용합니다.")
+                            guard_wait = self.pacing.wait_post_like()
+                            if guard_wait.stopped or self.stop_event.is_set():
+                                final_close_reason = "user_stop"
+                                break
+                            if guard_wait.skipped:
+                                self.skip_event.clear()
+                                continue
                         p_res = self.pacing.wait_next_post()
                         if p_res.stopped or (self.stop_event and self.stop_event.is_set()):
                             final_close_reason = "user_stop"

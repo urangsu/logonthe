@@ -183,7 +183,7 @@ class TestV35SimulatedPipelineContract(unittest.TestCase):
         self.assertNotIn("주차", plan.secondary_anchor)
         self.assertNotIn("매장", plan.secondary_anchor)
         self.assertIn("블루치즈", plan.reaction_instruction)
-        self.assertIn("조합", plan.reaction_instruction)
+        self.assertIn("네 느낌", plan.reaction_instruction)
 
     def test_02_donkatsu_primary_anchor_not_generic_menu(self):
         """돈카츠: primary_anchor가 일반어('메뉴')가 아닌 구체적 메뉴명('돈카츠')으로 확정"""

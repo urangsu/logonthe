@@ -97,16 +97,7 @@ class MainWindow(ctk.CTk):
         self.history_store = HistoryStore()
         self.state_mgr = StateManager()
         self.command_bridge = ClipboardCommandBridge()
-        self.stop_event = threading.Event()
-        self.pause_event = threading.Event()
-        self.skip_event = threading.Event()
-        self.run_control = RunControl(
-            stop_event=self.stop_event,
-            pause_event=self.pause_event,
-            skip_event=self.skip_event,
-            state_manager=self.state_mgr,
-        )
-        self.run_control.on_state_change = lambda st, reason: self.after(0, self._sync_run_control_ui, st, reason)
+        self._prepare_feed_run_control()
         ensure_comment_mode_consistency(self.config_service)
         self.worker_thread: Optional[threading.Thread] = None
         self.reply_session: Optional[BrowserSession] = None
@@ -1166,6 +1157,7 @@ class MainWindow(ctk.CTk):
                         f"🎉 [내 블로그 이웃 전수 및 무반응 감사 완료 (상태: {audit_st})]\n\n"
                         f"• 분석 대상 최근 글: {rep['recent_post_count']}개\n"
                         f"• 👥 전체 등록 이웃: {rep.get('total_buddies_count', 0)}명\n"
+                        f"• 🔔 새글소식 설정: ON {rep.get('news_feed_on_count', 0)}명 / OFF(차단) {rep.get('news_feed_off_count', 0)}명\n"
                         f"• ❤️ 최근 글 반응 이웃: {rep.get('reacted_buddies_count', 0)}명 (3회 이상 우수: {rep.get('active_buddies_count', 0)}명)\n"
                         f"   (공감+댓글: {rep.get('both_like_and_comment_count', 0)}명, 공감만: {rep.get('liked_only_count', 0)}명, 댓글만: {rep.get('commented_only_count', 0)}명)\n"
                         f"• 🚫 최근 글 무반응 이웃: {rep.get('unresponsive_buddies_count', 0)}명\n"
@@ -1194,6 +1186,18 @@ class MainWindow(ctk.CTk):
                 session.close()
 
         threading.Thread(target=task, daemon=True).start()
+
+    def _prepare_feed_run_control(self):
+        self.stop_event = threading.Event()
+        self.pause_event = threading.Event()
+        self.skip_event = threading.Event()
+        self.run_control = RunControl(
+            stop_event=self.stop_event,
+            pause_event=self.pause_event,
+            skip_event=self.skip_event,
+            state_manager=self.state_mgr,
+        )
+        self.run_control.on_state_change = lambda st, reason: self.after(0, self._sync_run_control_ui, st, reason)
 
     def _start_task(self):
         if self.worker_thread and self.worker_thread.is_alive():
@@ -1335,10 +1339,7 @@ class MainWindow(ctk.CTk):
         self.btn_pause.configure(state="normal", text="⏸️ 일시정지", fg_color="#D97706", hover_color="#B45309")
         self.btn_skip_post.configure(state="normal")
         self.btn_stop.configure(state="normal")
-        self.stop_event.clear()
-        self.pause_event.clear()
-        self.skip_event.clear()
-        self.run_control.request_resume()
+        self._prepare_feed_run_control()
         self.command_bridge.clear()
 
         controller = FeedController(

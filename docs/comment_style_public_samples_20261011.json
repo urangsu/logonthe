@@ -1,0 +1,45 @@
+{
+  "collected_at": "2026-10-11",
+  "purpose": "manual_style_review_only",
+  "automatic_prompt_injection": false,
+  "member_identifiers_retained": false,
+  "note": "Short public excerpts, not full threads or an approved training corpus. Community language is not a recommended blog comment verbatim.",
+  "samples": [
+    {
+      "source_url": "https://theqoo.net/cook/4345504837",
+      "excerpt": "어웅 부지런해 침나온다 🤤",
+      "pattern": "수고에 대한 반응과 식욕을 한 호흡에 연결",
+      "do_not_copy": "반말과 표지를 그대로 강제하지 않음"
+    },
+    {
+      "source_url": "https://theqoo.net/cook/4345504837",
+      "excerpt": "금손 부럽다 잘봤어",
+      "pattern": "설명 없이 짧은 감정으로 끝냄",
+      "do_not_copy": "모든 글에 금손이라는 상투적 칭찬을 붙이지 않음"
+    },
+    {
+      "source_url": "https://theqoo.net/cook/4243627178",
+      "excerpt": "와 퀄리티뭐야..",
+      "pattern": "놀라움을 짧게 전달",
+      "do_not_copy": "구체적 근거 없는 과장 반응은 이식하지 않음"
+    },
+    {
+      "source_url": "https://theqoo.net/cook/4243627178",
+      "excerpt": "와 대박 댓글에 바람떡도 넘 귀엽당",
+      "pattern": "전체가 아니라 눈에 들어온 특정 디테일을 집음",
+      "do_not_copy": "현재 입력에 없는 답글 속 사실은 사용하지 않음"
+    },
+    {
+      "source_url": "https://theqoo.net/cook/4065947048",
+      "excerpt": "뭐가문젠지는 이 글 봐서는 모르겠는데",
+      "pattern": "모르는 것을 단정하지 않음",
+      "do_not_copy": "불필요한 문제 진단이나 조언을 덧붙이지 않음"
+    },
+    {
+      "source_url": "https://theqoo.net/cook/4065947048",
+      "excerpt": "힘들게 열심히했는데 이러네저러네맛없다 하면 속상하자나",
+      "pattern": "요리 실패의 정보보다 작성자의 감정에 호응",
+      "do_not_copy": "자신도 겪었다는 경험을 만들어내지 않음"
+    }
+  ]
+}

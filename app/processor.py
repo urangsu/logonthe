@@ -30,6 +30,7 @@ from services.like_eligibility import LikeEligibilityService, LikeEligibility
 from services.post_eligibility import PostEligibilityService
 from services.like_transaction import LikeTransactionService, LikeConfidence, LikeCircuitBreaker
 from services.food_comment_focus import FoodCommentFocus
+from services.reaction_planner import ReactionContextPlanner
 from services.ai_prompt import AIPromptBuilder
 from services.clipboard_bridge import ClipboardCommandBridge
 from services.gemini_web import GeminiWebBridge
@@ -94,14 +95,10 @@ def check_food_relevance(
     reaction_mode: str = "detail_observation",
 ) -> Tuple[bool, str]:
     """
-    3단계 음식 연관성(Relevance) 검증:
+    본문 근거 기반 음식 연관성(Relevance) 검증:
     A. Direct anchor: 검증된 음식 앵커 직접 언급
     B. Grounded sensory evidence: 본문과 초안 양쪽에 공통 존재하는 감각/맛/식감 키워드
-    C. Reaction-plan compatible semantic signal:
-       - combination_curiosity: 조합, 어떤 맛, 궁금, 독특, 어우러, 궁합, 호불호
-       - taste_reaction: 맛, 향, 식감, 풍미, 맛있는, 느낌
-       - visual_reaction: 푸짐, 비주얼, 두툼, 가득, 색감, 플레이팅, 사진
-       - future_interest: 맛보고 싶, 먹어보고 싶, 궁금하네요, 궁금해
+    reaction_mode는 호출 호환용이며 특정 표현을 통과 조건으로 강요하지 않는다.
     """
     draft_clean = (draft or "").strip()
     excerpt_clean = (excerpt or "").strip()
@@ -116,8 +113,18 @@ def check_food_relevance(
     if is_exclusively_non_food:
         return False, "exclusively_non_food"
 
+    # FoodFocus's short anchor list can omit the planner's actual menu.
+    # Recover only food candidates that are present in this article's context.
+    context_foods = [a for a in verified_anchors if a and a in excerpt_clean]
+    candidates = (
+        list(FoodCommentFocus.RESTAURANT_DISHES)
+        + list(FoodCommentFocus.CAFE_DISHES)
+        + list(ReactionContextPlanner.SPECIAL_COMBINATION_INGREDIENTS)
+        + ReactionContextPlanner.extract_open_vocabulary_food_candidates(excerpt_clean)
+    )
+
     # Tier A: Direct anchor mention
-    for a in verified_anchors:
+    for a in context_foods:
         if a and a in draft_clean:
             return True, f"tier_a_direct_anchor:{a}"
 
@@ -131,23 +138,18 @@ def check_food_relevance(
         if term in draft_clean and term in excerpt_clean:
             return True, f"tier_b_grounded_sensory:{term}"
 
-    # Tier C: Reaction-plan compatible semantic signal
-    if reaction_mode == "combination_curiosity":
-        combo_signals = ("조합", "어떤 맛", "궁금", "독특", "어우러", "궁합", "호불호")
-        if any(s in draft_clean for s in combo_signals):
-            return True, "tier_c_combination_semantic"
-    elif reaction_mode == "taste_reaction":
-        taste_signals = ("맛", "향", "식감", "풍미", "맛있", "느낌")
-        if any(s in draft_clean for s in taste_signals):
-            return True, "tier_c_taste_semantic"
-    elif reaction_mode == "visual_reaction":
-        visual_signals = ("푸짐", "비주얼", "두툼", "가득", "색감", "플레이팅", "사진")
-        if any(s in draft_clean for s in visual_signals):
-            return True, "tier_c_visual_semantic"
-    elif reaction_mode == "future_interest":
-        interest_signals = ("맛보고 싶", "먹어보고 싶", "궁금하네요", "궁금해", "먹어보고")
-        if any(s in draft_clean for s in interest_signals):
-            return True, "tier_c_future_interest_semantic"
+    for anchor in candidates:
+        if (len(anchor) >= 2 and anchor in excerpt_clean and anchor in draft_clean
+                and ReactionContextPlanner._is_food_candidate(anchor)):
+            return True, f"tier_a_context_food:{anchor}"
+
+    if reaction_mode == "writer_feeling":
+        for feeling in ("아쉬", "실망", "지쳤", "속상", "힘들", "기대 이하"):
+            if feeling in excerpt_clean and feeling in draft_clean:
+                return True, f"grounded_writer_feeling:{feeling}"
+
+    # Mode labels are drafting hints, not evidence. In particular, saying
+    # 'combination' or 'curious' must not bypass contextual grounding.
 
     return False, "no_food_anchor_or_sensory_evidence"
 
@@ -619,6 +621,9 @@ class PostProcessor:
         post_key = post.key or post.url
         try:
             return self._process_internal(detail_page, post, action_plan=action_plan)
+        except StopRequestedException:
+            logger.log(f"[POST_PROCESSOR_STOPPED] post={post_key} stage={getattr(self, 'current_stage', 'unknown')}")
+            raise
         except Exception as exc:
             import traceback
             stage = getattr(self, "current_stage", "unknown")
@@ -1395,7 +1400,8 @@ class PostProcessor:
                                                     or getattr(gen_ctx, "recent_comments", [])
                                                 )
                                                 _style_norm_res = CommentStyleNormalizer.normalize_style(
-                                                    gemini_answer,
+                                                    CommentStyleNormalizer.strip_emojis(gemini_answer)
+                                                    if self.config.get("allow_soft_emoji") is False else gemini_answer,
                                                     post_key=post.key,
                                                     recent_comments=_recent_norm_comments,
                                                 )
@@ -1775,7 +1781,7 @@ class PostProcessor:
                                                             rx_mode = gen_ctx.reaction_plan.reaction_mode if (gen_ctx.reaction_plan and hasattr(gen_ctx.reaction_plan, "reaction_mode")) else "detail_observation"
                                                             is_food_relevant, rel_reason = check_food_relevance(
                                                                 draft=gemini_answer,
-                                                                excerpt=gen_ctx.selected_context or gen_ctx.excerpt,
+                                                                excerpt=f"{gen_ctx.title}\n{gen_ctx.selected_context or gen_ctx.excerpt}",
                                                                 verified_anchors=gen_ctx.verified_anchors,
                                                                 reaction_mode=rx_mode,
                                                             )
@@ -1786,7 +1792,7 @@ class PostProcessor:
                                                                 logger.log(f"⚠️ [COMMENT][FOOD_FOCUS_MISS] post={post.key} reason={rel_reason} answer={gemini_answer!r}", "WARNING")
                                                                 if not getattr(self, "_quality_food_retry_done", False) and gen_ctx.attempt_count < gen_ctx.max_attempts:
                                                                     self._quality_food_retry_done = True
-                                                                    feedback = "음식/메뉴/맛에 대한 구체적인 디테일이나 조합에 반응해 주세요 (매장/인테리어/일반 분위기 반응 지양)."
+                                                                    feedback = "글 속 음식이나 글쓴이의 식사 경험에서 눈에 든 한 가지에 짧게 반응해 주세요. 메뉴를 나열하거나 조합 표현을 억지로 넣지 않아도 됩니다."
                                                                     logger.log(f"🔄 [GEMINI/EXTENSION] 음식 포커스 누락(food_focus_miss) -> 1회 자동 재작성 피드백 반영: {feedback}", "WARNING")
                                                                     if (self.stop_event and self.stop_event.is_set()) or (self.skip_event and self.skip_event.is_set()):
                                                                         if self.stop_event and self.stop_event.is_set():

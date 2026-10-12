@@ -78,6 +78,7 @@ class TestCircuitBreakerResilience(unittest.TestCase):
         )
         controller._handle_post_result(res4)
         self.assertEqual(controller.consecutive_gemini_failures, 3)
+        self.assertEqual(controller.failed_count, 3)
         self.assertTrue(pause_event.is_set(), "3회 누적 실패 시 pause_event가 설정되어야 함")
         self.assertEqual(state_mgr.get_state().current_state, FeedState.PAUSED)
         self.assertEqual(state_mgr.get_state().pause_reason, "gemini_circuit_breaker")

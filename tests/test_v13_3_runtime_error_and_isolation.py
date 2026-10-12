@@ -8,12 +8,25 @@ from app.models import (
 )
 from app.controller import FeedController
 from app.processor import PostProcessor
+from app.run_control import StopRequestedException
 from app.state import StateManager, FeedState
 from services.relationship_resolver import RelationshipType, RelationshipResolution
 from services.pacing import PacingResult
 
 
 class TestV133RuntimeErrorAndIsolation(unittest.TestCase):
+    def test_requested_stop_is_not_logged_as_runtime_error(self):
+        processor = PostProcessor(config={})
+        post = FeedPost(key="u:1", source=FeedSourceType.RECOMMENDATION,
+                        url="https://m.blog.naver.com/u/1", blog_id="u")
+        with patch.object(processor, "_process_internal", side_effect=StopRequestedException("stop")), \
+                patch("app.processor.logger.log") as log:
+            with self.assertRaises(StopRequestedException):
+                processor.process(MagicMock(), post)
+        messages = [str(call.args[0]) for call in log.call_args_list]
+        self.assertTrue(any("POST_PROCESSOR_STOPPED" in message for message in messages))
+        self.assertFalse(any("POST_PROCESSOR_EXCEPTION" in message for message in messages))
+
     def setUp(self):
         sampling = patch("app.controller.SamplingHistoryManager")
         manager = sampling.start().return_value

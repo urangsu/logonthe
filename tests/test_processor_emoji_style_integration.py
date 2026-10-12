@@ -7,7 +7,7 @@ PostProcessor 단위의 이모지 및 스타일 정규화 엔드투엔드 통합
 2. P1 — style_profile.emoji_ratio 런타임 강제변경 제거 검증 (사용자 학습 프로필 오염 방지)
 3. sampled + single 😋 → 실제 FINAL_TEXT 및 에디터 주입 텍스트에 😋 존재
 4. sampling miss → 😋 제거
-5. recent cooldown → 최근 등록 이력에 이모지 있으면 제거
+5. recent cooldown → 최근 등록 이력에 같은 이모지가 있으면 제거
 6. 😋😋🔥 등 다중/과장형 이모티콘 → 전면 제거
 7. 20℃, 1.5㎏, ©, ™ 등 일반 단위 및 특수 기호 → 100% 원형 유지
 8. kept emoji 상태로 editor readback + submit 검증까지 PASS
@@ -169,18 +169,33 @@ class TestProcessorEmojiStyleIntegration(unittest.TestCase):
         self.assertNotIn("😋", injected_text)
 
     def test_recent_cooldown_emoji_stripped(self):
-        """최근 등록 댓글 5개 중 이모지가 있으면 샘플링 대상이어도 쿨다운으로 제거된다"""
+        """최근 등록 댓글 5개 중 같은 이모지가 있으면 제거된다"""
         sampled_pk = self._find_sampled_post_key(should_sample=True)
         raw_text = "솥뚜껑 삼겹살에 김치 조합 비주얼부터 맛있어 보여요 😋"
 
         # 최근 등록 댓글에 이모지 포함
-        recent_comments = ["댓글 1", "댓글 2 ✨", "댓글 3"]
+        recent_comments = ["댓글 1", "댓글 2 😋", "댓글 3"]
         result, injected_text, processor = self._run_processor_with_answer(
             raw_text, sampled_pk, recent_submitted_comments=recent_comments
         )
 
         self.assertEqual(result.comment_result.status, CommentSubmitState.SUBMITTED)
         self.assertIsNotNone(injected_text)
+        self.assertNotIn("😋", injected_text)
+
+    def test_different_recent_emoji_is_preserved(self):
+        result, injected_text, _ = self._run_processor_with_answer(
+            "솥뚜껑 삼겹살에 김치 비주얼부터 맛있어 보여요 😋",
+            self._find_sampled_post_key(True), ["눈에 들어오네요 👀"])
+        self.assertEqual(result.comment_result.status, CommentSubmitState.SUBMITTED)
+        self.assertIn("😋", injected_text)
+
+    def test_explicit_emoji_disabled_is_not_overridden(self):
+        self.config["allow_soft_emoji"] = False
+        result, injected_text, _ = self._run_processor_with_answer(
+            "솥뚜껑 삼겹살에 김치 비주얼부터 맛있어 보여요 😋",
+            self._find_sampled_post_key(True))
+        self.assertEqual(result.comment_result.status, CommentSubmitState.SUBMITTED)
         self.assertNotIn("😋", injected_text)
 
     def test_multiple_and_exaggerated_emoji_stripped(self):

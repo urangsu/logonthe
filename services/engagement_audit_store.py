@@ -5,7 +5,7 @@ import time
 from typing import Any, Dict, List, Optional, Tuple
 
 BUDDY_FIELDNAMES_MASTER = [
-    "블로그ID", "닉네임", "블로그링크", "그룹", "이웃구분", "추가일", "내 새글보기",
+    "블로그ID", "닉네임", "블로그링크", "그룹", "이웃구분", "추가일", "새글소식",
     "반응한 글 수", "공감한 글 수", "댓글 단 글 수", "총댓글 수", "관찰 범위", "확인 시각", "반응 구분",
 ]
 
@@ -27,6 +27,17 @@ class EngagementAuditStore:
     @classmethod
     def format_master_row(cls, row: Dict[str, Any]) -> Dict[str, Any]:
         blog_id = row.get("blog_id", "")
+        news_feed = (
+            row.get("새글소식")
+            or row.get("news_feed_state")
+            or row.get("new_posts_setting")
+            or row.get("내 새글보기")
+            or "확인 불가"
+        )
+        if isinstance(news_feed, str):
+            news_feed_upper = news_feed.strip().upper()
+            if news_feed_upper in {"ON", "OFF"}:
+                news_feed = news_feed_upper
         return {
             "블로그ID": blog_id,
             "닉네임": row.get("nickname", ""),
@@ -34,7 +45,8 @@ class EngagementAuditStore:
             "그룹": row.get("group_name") or "기본그룹",
             "이웃구분": row.get("buddy_type", "이웃"),
             "추가일": row.get("added_date", ""),
-            "내 새글보기": row.get("news_feed_state", "확인 불가"),
+            "새글소식": news_feed,
+            "내 새글보기": news_feed,
             "반응한 글 수": row.get("engaged_post_count", 0),
             "공감한 글 수": row.get("like_count", 0),
             "댓글 단 글 수": row.get("comment_count", 0),

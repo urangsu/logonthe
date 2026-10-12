@@ -453,6 +453,14 @@ class GeminiExtensionBridge:
     def preflight(self) -> GeminiPreflight:
         with self._condition:
             if not self.bridge_server_started:
+                server_obj = getattr(self, "server", None)
+                if server_obj and hasattr(server_obj, "start"):
+                    try:
+                        server_obj.start()
+                    except Exception:
+                        pass
+
+            if not self.bridge_server_started:
                 err_lower = self.bridge_server_error.lower()
                 status = "bridge_port_in_use" if "address already in use" in err_lower or "in use" in err_lower else "bridge_server_unavailable"
                 return self._build_preflight(False, status, message=f"Gemini bridge server unavailable: {self.bridge_server_error}")
@@ -820,8 +828,10 @@ class GeminiExtensionBridge:
 
 class _LoopbackHTTPServer(ThreadingHTTPServer):
     """HTTP server without HTTPServer's blocking reverse-DNS lookup."""
+    allow_reuse_address = True
 
     def server_bind(self) -> None:
+        self.allow_reuse_address = True
         socketserver.TCPServer.server_bind(self)
         host, port = self.server_address[:2]
         self.server_name = str(host)
@@ -831,6 +841,7 @@ class _LoopbackHTTPServer(ThreadingHTTPServer):
 class GeminiBridgeHTTPServer:
     def __init__(self, bridge: GeminiExtensionBridge, host: str = "127.0.0.1", port: int = 43127):
         self.bridge = bridge
+        self.bridge.server = self
         self.host = host
         self.port = port
         self._server = None
@@ -1006,6 +1017,7 @@ class GeminiBridgeHTTPServer:
                             "userUniqueTurns", "userCorrelated", "responseUniqueTurns",
                             "route", "elapsedMs", "runtimeBuild", "clickCount", "dispatchAttempted",
                             "selectedClass", "ariaLabel", "iconText",
+                            "world", "error", "visibilityState", "documentFocused",
                         ) if key in payload}
                         logger.log(f"[GEMINI][{ev_type}] " + json.dumps(fields, ensure_ascii=False))
                     elif ev_type == "RESPONSE_TURN_BOUND":

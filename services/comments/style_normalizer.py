@@ -8,7 +8,7 @@ services/comments/style_normalizer.py
 - 반복·과장형 이모지(🔥🔥🔥, 😂😂, ❤️❤️❤️, 😋😋😋🔥 등) 완전 제거
 - 자연스러운 단일 Soft Emoji는 15~20% 확률로 희소하게 보존
 - post_key 기반 deterministic sampling (재시도 시에도 일관된 결과 보장)
-- 실제 등록(SUBMITTED) 댓글 기준 최근 5개 이력 검사 (최근 5건에 이모지가 없을 때만 보존 허용)
+- 실제 등록(SUBMITTED) 댓글 기준 최근 5개에서 같은 이모지 반복만 제한
 - 이모티콘이 없거나 제거된 경우 친근한 종결형 문맥에서 가끔(25%) 단일 물결표(~) 부가
 - 마침표(., 。) 완전 제거 및 소수점(1.5kg) 보존
 """
@@ -171,7 +171,7 @@ class CommentStyleNormalizer:
         Gemini 생성 댓글을 스타일 정규화한다:
         1. 이모지 추출 및 반복/과장형 검사
         2. Soft Emoji Whitelist 검사
-        3. 최근 5개 등록 댓글 이력 검사 (최근 이모지 사용 여부)
+        3. 최근 5개 등록 댓글 이력 검사 (같은 이모지 반복 여부)
         4. post_key 기반 deterministic sampling (15~20%)
         5. keep 또는 strip 결정
         6. 이모지가 없거나 제거된 경우 가끔 단일 물결표(~) 부가
@@ -207,8 +207,10 @@ class CommentStyleNormalizer:
                 reason = "non_whitelisted_emoji"
                 working_text = cls.strip_emojis(original_text)
             else:
-                recent_window = (recent_comments or [])[-emoji_history_window:]
-                recent_emoji_count = sum(1 for c in recent_window if cls.has_emoji(c))
+                window_size = max(0, emoji_history_window)
+                recent_window = (recent_comments or [])[-window_size:] if window_size else []
+                # A different reaction symbol is not a repetition of this one.
+                recent_emoji_count = sum(1 for c in recent_window if emoji in cls.extract_emojis(c))
                 sample_val = cls.stable_hash(f"emoji:{post_key}") % 100 if post_key else 0
 
                 if recent_emoji_count > 0:

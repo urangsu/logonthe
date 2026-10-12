@@ -87,6 +87,13 @@ class RelationshipResolver:
         if unknown_count > 0:
             return True, f"unresolved_relationships_present:{unknown_count}"
 
+        if (self.result.state != "complete"
+                or not self.result.collection_complete
+                or not self.result.terminal
+                or (self.result.expected_total is not None
+                    and self.result.expected_total != self.result.collected_total)):
+            return True, "relationship_collection_incomplete"
+
         return False, ""
 
     def get_mutual_blog_ids(self) -> Set[str]:

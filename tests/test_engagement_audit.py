@@ -165,7 +165,7 @@ class TestEngagementAuditV13(unittest.TestCase):
             self.assertEqual(rows[0]["이웃구분"], "서로이웃")
             self.assertEqual(rows[0]["그룹"], "그룹A")
             self.assertEqual(rows[0]["추가일"], "26.08.20.")
-            self.assertEqual(rows[0]["내 새글보기"], "ON")
+            self.assertEqual(rows[0]["새글소식"], "ON")
             self.assertEqual(rows[0]["공감한 글 수"], "2")
             self.assertEqual(rows[0]["댓글 단 글 수"], "1")
             self.assertEqual(rows[0]["총댓글 수"], "1")
@@ -175,6 +175,7 @@ class TestEngagementAuditV13(unittest.TestCase):
             self.assertEqual(rows[0]["반응 구분"], "반응 확인")
 
             self.assertEqual(rows[1]["블로그ID"], "b2")
+            self.assertEqual(rows[1]["새글소식"], "ON")
             self.assertEqual(rows[1]["반응 구분"], "무반응")
 
     def test_master_csv_classification_3_or_more_reactions(self):
@@ -232,6 +233,125 @@ class TestEngagementAuditV13(unittest.TestCase):
             self.assertEqual(master_dict["buddy_high_comments"]["reaction_category"], "우수 반응(3회이상)")
             self.assertEqual(master_dict["buddy_normal"]["reaction_category"], "반응 확인")
             self.assertEqual(master_dict["buddy_unresp"]["reaction_category"], "무반응")
+
+    def test_news_feed_toggle_and_blocked_posts_detection(self):
+        """새글소식 ON(소식받기)/OFF(차단/꺼짐) 상태 및 감사 보고서 통계 집계 검증"""
+        # 1. BuddyInfo news_feed_state property 검증
+        b_on = BuddyInfo("u_on", "온유저", "B1", "그룹", "이웃", "26.08.20.", "26.01.01.", new_posts_setting="ON")
+        b_off = BuddyInfo("u_off", "오프유저", "B2", "그룹", "서로이웃", "26.08.20.", "26.01.01.", new_posts_setting="OFF")
+        b_unk = BuddyInfo("u_unk", "미확인", "B3", "그룹", "이웃", "26.08.20.", "26.01.01.", new_posts_setting="unknown")
+
+        self.assertEqual(b_on.news_feed_state, "ON")
+        self.assertEqual(b_off.news_feed_state, "OFF")
+        self.assertEqual(b_unk.news_feed_state, "확인 불가")
+
+        # 2. Audit Report 집계 및 CSV 포맷 검증
+        page_mock = MagicMock()
+        b_result = BuddyCollectionResult(
+            buddies={
+                "u_on": b_on,
+                "u_off": b_off,
+                "u_unk": b_unk,
+            },
+            state="complete",
+            expected_total=3,
+            collected_total=3,
+            pages_visited=1,
+            page_fingerprints=["fp1"],
+            news_feed_on_count=1,
+            news_feed_off_count=1,
+        )
+
+        with patch("services.buddy_list_collector.BuddyListCollector.collect_all_buddies", return_value=b_result), \
+             patch("services.my_blog_recent_posts.MyBlogRecentPostService.fetch_recent_posts") as mock_posts, \
+             patch("services.reaction_participant_collector.ReactionParticipantCollector.collect") as mock_likers, \
+             patch("services.comment_participant_collector.CommentParticipantCollector.collect") as mock_commenters:
+
+            mock_posts.return_value = [{"log_no": "999", "url": "https://m.blog.naver.com/me/999", "title": "테스트글"}]
+            mock_likers.return_value = ([], "complete", 0)
+            mock_commenters.return_value = ([], "complete", 0)
+
+            with tempfile.TemporaryDirectory() as output_dir:
+                res = EngagementAuditService.run_audit(page=page_mock, my_blog_id="me", recent_post_count=1, output_dir=output_dir)
+
+                self.assertTrue(res["success"])
+                rep = res["report"]
+                self.assertEqual(rep["news_feed_on_count"], 1)
+                self.assertEqual(rep["news_feed_off_count"], 1)
+                self.assertEqual(rep["news_feed_unknown_count"], 1)
+
+                # CSV 검증
+                csv_path = res["summary_csv_path"]
+                with open(csv_path, "r", encoding="utf-8-sig") as f:
+                    reader = csv.DictReader(f)
+                    rows = {r["블로그ID"]: r for r in reader}
+
+                self.assertEqual(rows["u_on"]["새글소식"], "ON")
+                self.assertEqual(rows["u_off"]["새글소식"], "OFF")
+                self.assertEqual(rows["u_unk"]["새글소식"], "확인 불가")
+
+    def test_buddy_dom_extracts_actual_naver_alert_toggle_html(self):
+        """실제 네이버 이웃 관리의 alert ON/OFF 토글 HTML 파싱 검증 (사용자 제공 실전 HTML 스니펫)"""
+        from services.buddy_list_collector import BUDDY_DOM
+        try:
+            from playwright.sync_api import sync_playwright
+        except ImportError:
+            self.skipTest("playwright not installed")
+
+        html_content = """
+        <!DOCTYPE html>
+        <html>
+        <body>
+          <div class="total">전체 이웃 2명</div>
+          <table>
+            <thead>
+              <tr>
+                <th>선택</th>
+                <th>이웃그룹</th>
+                <th>이웃</th>
+                <th>이웃구분</th>
+                <th>추가일</th>
+                <th>새글소식</th>
+              </tr>
+            </thead>
+            <tbody>
+              <tr>
+                <td><input type="checkbox" name="buddySeq" value="111"></td>
+                <td>기본그룹</td>
+                <td><a href="https://blog.naver.com/user_blocked_off">차단유저</a></td>
+                <td>이웃</td>
+                <td>26.01.01.</td>
+                <td><a href="#" class="alert off 55983693 _returnFalse" onclick="sendClickNlog('bas_neimgr.oonoff','');"><span class="blind 55983693">OFF</span></a></td>
+              </tr>
+              <tr>
+                <td><input type="checkbox" name="buddySeq" value="222"></td>
+                <td>기본그룹</td>
+                <td><a href="https://blog.naver.com/user_active_on">소식받는유저</a></td>
+                <td>서로이웃</td>
+                <td>26.01.02.</td>
+                <td><a href="#" class="alert on 55983694 _returnFalse" onclick="sendClickNlog('bas_neimgr.oonoff','');"><span class="blind 55983694">ON</span></a></td>
+              </tr>
+            </tbody>
+          </table>
+        </body>
+        </html>
+        """
+        with sync_playwright() as p:
+            browser = p.chromium.launch(headless=True)
+            page = browser.new_page()
+            page.set_content(html_content)
+            result = page.evaluate(BUDDY_DOM)
+            browser.close()
+
+        self.assertTrue(result.get("scopeVerified"))
+        items = {item["blog_id"]: item for item in result.get("items", [])}
+        self.assertIn("user_blocked_off", items)
+        self.assertIn("user_active_on", items)
+
+        self.assertEqual(items["user_blocked_off"]["new_posts_setting"], "OFF")
+        self.assertTrue(items["user_blocked_off"]["setting_semantics_verified"])
+        self.assertEqual(items["user_active_on"]["new_posts_setting"], "ON")
+        self.assertTrue(items["user_active_on"]["setting_semantics_verified"])
 
 
 if __name__ == "__main__":

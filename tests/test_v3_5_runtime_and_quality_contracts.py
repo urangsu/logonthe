@@ -170,7 +170,7 @@ class TestV35RuntimeAndQualityContracts(unittest.TestCase):
         plan = ReactionContextPlanner.plan(title=title, excerpt=excerpt)
         self.assertEqual(plan.domain, "FOOD")
         self.assertEqual(plan.reaction_mode, "combination_curiosity")
-        self.assertIn("조합", plan.reaction_instruction)
+        self.assertIn("네 느낌", plan.reaction_instruction)
 
     def test_strong_taste_evidence_selects_taste_reaction(self):
         """구체적인 식감/맛 묘사가 있는 일반 음식 글은 taste_reaction 선택"""

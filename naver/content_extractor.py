@@ -31,14 +31,46 @@ class ContentContextExtractor:
         "div.post_content", ".view_content", ".blog2_container", "article", "div#viewTypeSelector"
     ]
 
+    # Read the rendered DOM without mutating the user's page. Embedded post
+    # previews describe another article, unlike ordinary inline links.
+    BODY_TEXT_SCRIPT = r"""root => {
+        const excluded = '.se-oglink, .se-module-oglink, .se-component-oglink, '
+            + '.se_oglink, .se_link_preview, script, style, noscript, [hidden], [aria-hidden="true"]';
+        const parts = [];
+        function visit(node) {
+            if (node.nodeType === Node.TEXT_NODE) {
+                parts.push(node.nodeValue);
+                return;
+            }
+            if (node.nodeType !== Node.ELEMENT_NODE || node.matches(excluded)) return;
+            const style = getComputedStyle(node);
+            if (style.display === 'none' || style.visibility === 'hidden'
+                || style.visibility === 'collapse') return;
+            const block = node.tagName === 'BR'
+                || !['inline', 'inline-block', 'contents'].includes(style.display);
+            if (block) parts.push('\n');
+            for (const child of node.childNodes) visit(child);
+            if (block) parts.push('\n');
+        }
+        visit(root);
+        return parts.join('').trim();
+    }"""
+
+    @classmethod
+    def _body_text(cls, element: Locator) -> str:
+        text = element.evaluate(cls.BODY_TEXT_SCRIPT)
+        return text if isinstance(text, str) else ""
+
     @classmethod
     def _collect_candidates(cls, page: Page, max_chars: int) -> List[Tuple[int, str]]:
         candidates: List[Tuple[int, str]] = []
+        fallback_candidates: List[Tuple[int, str]] = []
         try:
             frames = list(page.frames)
         except Exception:
             frames = [page]
         for frame in frames:
+            frame_start = len(candidates)
             for sel in cls.CONTENT_SELECTORS:
                 try:
                     locs = frame.locator(sel)
@@ -46,7 +78,7 @@ class ContentContextExtractor:
                         el = locs.nth(idx)
                         if not el.is_visible():
                             continue
-                        raw = el.inner_text().strip()
+                        raw = cls._body_text(el)
                         cleaned = cls.clean_text(raw, max_chars=max_chars)
                         if len(cleaned) < 20:
                             continue
@@ -61,14 +93,16 @@ class ContentContextExtractor:
                 except Exception:
                     continue
             try:
+                if len(candidates) > frame_start:
+                    continue
                 body = frame.locator("body").first
                 if body.count() and body.is_visible():
-                    cleaned = cls.clean_text(body.inner_text().strip(), max_chars=max_chars)
+                    cleaned = cls.clean_text(cls._body_text(body), max_chars=max_chars)
                     if len(cleaned) >= 40:
-                        candidates.append((120 + min(len(cleaned), 500), cleaned))
+                        fallback_candidates.append((120 + min(len(cleaned), 500), cleaned))
             except Exception:
                 pass
-        return candidates
+        return candidates or fallback_candidates
 
     GREETING_PATTERNS = [
         # 독립적인 인사말만 제거한다.

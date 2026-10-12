@@ -172,7 +172,7 @@ class RunControl:
         """
         with self._lock:
             self.current_stage = stage
-            if self.stop_event.is_set():
+            if self.stop_event.is_set() or self.state == RunControlState.STOPPED:
                 self.state = RunControlState.STOPPED
                 raise StopRequestedException("작업 중지 요청됨")
 
@@ -199,7 +199,7 @@ class RunControl:
             while self.state == RunControlState.PAUSED and not self.stop_event.is_set():
                 self._cv.wait(timeout=0.05)
 
-            if self.stop_event.is_set():
+            if self.stop_event.is_set() or self.state == RunControlState.STOPPED:
                 self.state = RunControlState.STOPPED
                 raise StopRequestedException("작업 중지 요청됨")
 

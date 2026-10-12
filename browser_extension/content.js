@@ -29,7 +29,7 @@
     '[data-test-id="model-response"]', '.response-container-content', 'message-content', '.model-response-text'
   ].join(', ');
   let runtimeContract = {
-    extensionVersion: '13.2.6', runtimeBuild: '13.2.6-turn-correlation-v2', protocolVersion: 3, bridgeSchemaVersion: 2
+    extensionVersion: '13.2.8', runtimeBuild: '13.2.8-foreground-send-v1', protocolVersion: 3, bridgeSchemaVersion: 2
   };
   const ROUTE_ALLOCATION_GRACE_MS = 11000;
 
@@ -58,6 +58,7 @@
     if (!activeExecution) return false;
     if (!reqId || activeExecution.requestId === reqId) {
       activeExecution.cancelled = true;
+      activeExecution.cleanupSubmission?.();
       if (activeExecution.requestId) cancelledRequestIds.add(activeExecution.requestId);
       if (typeof activeExecution.cleanupObserver === 'function') {
         try { activeExecution.cleanupObserver(); } catch (_) {}
@@ -884,6 +885,36 @@
     return { clicked: triggerSendViaClick(btn), keyed: false };
   }
 
+  async function submitThroughPageWorld(target, button, command, execState) {
+    const rid = command.requestId;
+    if (isStopped || execState.cancelled || cancelledRequestIds.has(rid)) return { clicked: false, error: 'cancelled' };
+    if (!/^[a-zA-Z0-9_-]{1,128}$/.test(rid)) return { clicked: false, error: 'invalid_submission_identity' };
+    target.setAttribute('data-nfa-submit', rid);
+    button.setAttribute('data-nfa-submit', rid);
+    const cleanup = () => {
+      target.removeAttribute('data-nfa-submit');
+      button.removeAttribute('data-nfa-submit');
+    };
+    execState.cleanupSubmission = cleanup;
+    try {
+      return await new Promise(resolve => {
+        let settled = false;
+        const finish = result => { if (!settled) { settled = true; clearTimeout(timer); resolve(result); } };
+        const timer = setTimeout(() => finish({ clicked: false, error: 'submission_transport_unknown' }), 4000);
+        try {
+          chrome.runtime.sendMessage({ type: 'NFA_SUBMIT_PAGE_WORLD', requestId: rid,
+            expectedPath: location.pathname,
+            expectedText: target.tagName === 'TEXTAREA' ? target.value : target.textContent,
+          }, result => finish(chrome.runtime.lastError || !result
+            ? { clicked: false, error: 'submission_transport_unknown' } : result));
+        } catch (_) { finish({ clicked: false, error: 'submission_transport_unknown' }); }
+      });
+    } finally {
+      cleanup();
+      delete execState.cleanupSubmission;
+    }
+  }
+
   function logSendDiag(diag) {
     try {
       const btn = diag.button;
@@ -896,6 +927,8 @@
         iconText: btn ? (btn.innerText || '').trim().slice(0, 20) : null,
         disabled: Boolean(btn?.disabled),
         ariaDisabled: btn?.getAttribute('aria-disabled') === 'true',
+        visibilityState: document.visibilityState,
+        documentFocused: typeof document.hasFocus === 'function' ? document.hasFocus() : null,
         sendConfirmed: Boolean(diag.confirmed),
         boundNode: Boolean(diag.boundNode)
       };
@@ -1050,11 +1083,11 @@
       return {status:'failed',text:'',error:'send_not_ready'};
     }
     const dispatchAttempted = true;
-    const clickCount = 1;
     const clickAttemptedAtMs = Date.now();
-    const submission = triggerSubmission(target, finalBtn);
+    const submission = await submitThroughPageWorld(target, finalBtn, command, execState);
+    const clickCount = submission.clicked ? 1 : (submission.error === 'submission_transport_unknown' ? null : 0);
     emitEvent('SEND_DISPATCHED', { ...submission, clickCount, dispatchAttempted, clickAttemptedAtMs });
-    if (!submission.clicked) return {status:'failed',text:'',error:'send_dispatch_unconfirmed'};
+    if (!submission.clicked) return {status:'failed',text:'',error:submission.error === 'submission_transport_unknown' ? 'send_commit_unknown' : (submission.error || 'send_dispatch_unconfirmed')};
 
     let currentUserTurn=null,targetResponseNode=null,boundAtMs=0,reResolveAttempted=false,textNonEmptyLogged=false,textStableLogged=false,staleStreamingLogged=false;
     function bindResponseNode(node,evidence) {
@@ -1108,6 +1141,8 @@
       const userInv = getUserInventory();
       const currentEditor = editor();
       emitEvent('SEND_COMMIT_UNKNOWN', {
+        visibilityState: document.visibilityState,
+        documentFocused: typeof document.hasFocus === 'function' ? document.hasFocus() : null,
         composerContainsPrompt: getEditorSurfaces(currentEditor).some(s => isExactPromptMatch(s.text, command.prompt)),
         composerCleared: composerEmpty(currentEditor),
         userUniqueTurns: userInv.userUniqueTurns,
