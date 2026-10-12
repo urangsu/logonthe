@@ -106,6 +106,7 @@ class GeminiCommand:
     acceptance_deadline_at_ms: Optional[int] = None
     timeout_seconds: float = 55.0
     delivery_reserve_seconds: float = 9.0
+    target_tab_id: Optional[int] = None
 
     DELIVERY_RESERVE_SECONDS: float = 9.0
 
@@ -142,7 +143,7 @@ class GeminiCommand:
         gen_ms = self.generation_deadline_at_ms if self.generation_deadline_at_ms is not None else int(gen_at * 1000)
         acc_at = self.acceptance_deadline_at if self.acceptance_deadline_at is not None else deadline
         acc_ms = self.acceptance_deadline_at_ms if self.acceptance_deadline_at_ms is not None else d_ms
-        return {
+        payload = {
             "requestId": self.request_id,
             "postKey": self.post_key,
             "navigationVersion": self.navigation_version,
@@ -159,6 +160,11 @@ class GeminiCommand:
             "timeoutSeconds": self.timeout_seconds,
             "deliveryReserveSeconds": self.delivery_reserve_seconds,
         }
+        if self.target_tab_id is not None:
+            if type(self.target_tab_id) is not int or not 0 < self.target_tab_id <= 2**53 - 1:
+                raise ValueError("invalid_target_tab_id")
+            payload["targetTabId"] = self.target_tab_id
+        return payload
 
 
 @dataclass(frozen=True)

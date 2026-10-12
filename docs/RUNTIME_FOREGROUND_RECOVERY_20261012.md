@@ -43,3 +43,17 @@
 - `node --test tests/test_extension_runtime_contract.mjs tests/test_extension_fake_clock.mjs`: 104 passed.
 - 기존 리포트 네 파일의 전체 테스트 전후 SHA-256이 같음을 확인했다.
 - 실제 Chrome의 기존 Gemini 탭에는 미전송 입력이 남아 있어 변경하지 않았다. 실제 로그인된 Gemini 전송 성공은 위 검사 결과로 대체하지 않는다.
+
+## 추가 실전 진단: 2026-10-13
+
+사용자 승인 후 기존 Chrome 로그인 프로필에 별도 Gemini 진단 탭을 생성했다. 사용자가 기존 확장을 새로고침한 다음, Naver 컨트롤러 없이 격리된 Python 브리지만 실행했다.
+
+- 진단 명령의 선택적 `targetTabId`는 지정 탭만 조회/사용한다. 대상이 없거나 잘못된 ID이면 다른 탭으로 전송하지 않는다. 기존 명령은 해당 필드 없이 이전 방식으로 동작한다.
+- 진단 탭 577071651을 다른 신규 탭 뒤에 둔 상태에서 시작했다. 확장이 대상 탭을 활성화하고 `visibilityState=visible`, `documentFocused=true`를 확인했다.
+- 요청 `96c1f03ee49140b792c3d2972257d051`: MAIN 클릭 1회, 사용자 턴 확인, `SEND_COMMITTED`, 응답 연결, `RESULT_ACCEPTED`, `RESULT_CONSUMED`까지 동일 요청으로 확인했다.
+- 실제 화면과 Python 결과가 모두 `진단 성공 7319`였다. 결과는 `completed`, 오류는 빈 값이었다.
+- 기존 미전송 탭의 입력 길이는 진단 전후 textContent 34 / innerText 130으로 유지됐다. 기존 입력을 제출하거나 수정하지 않았다.
+- 격리 브리지를 정상 종료했다. 네이버 댓글/공감은 실행하지 않았다.
+- 추가 변경 후 Python 브리지 테스트 23 passed, 확장 Node 테스트 105 passed. 전체 Python 테스트는 이 추가 변경 후 다시 실행하지 않았다. 위 748개 결과는 이전 릴리스 검사다.
+
+한 번의 성공은 모든 장시간/백그라운드 상황을 보장하지 않는다. 전송 시 기존 Gemini 창이 앞으로 나오는 방식이며, 완전한 백그라운드 전용 전송은 아니다. Naver 서버 댓글 등록과 장시간 운영은 여전히 별도 실전 검증 대상이다.

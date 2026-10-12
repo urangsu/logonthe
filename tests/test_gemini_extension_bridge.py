@@ -17,6 +17,15 @@ from services.gemini_extension_bridge import (
 
 
 class GeminiExtensionBridgeTests(unittest.TestCase):
+    def test_diagnostic_tab_target_is_optional_and_validated(self):
+        from dataclasses import replace
+        command = GeminiCommand.create("diagnostic", 1, "test")
+        self.assertNotIn("targetTabId", command.to_json())
+        self.assertEqual(replace(command, target_tab_id=123).to_json()["targetTabId"], 123)
+        for invalid in (True, 0, -1, "123", 2**53):
+            with self.assertRaises(ValueError):
+                replace(command, target_tab_id=invalid).to_json()
+
     def test_preflight_never_starts_server_while_reading_status(self):
         bridge = GeminiExtensionBridge()
         bridge.bridge_server_started = False

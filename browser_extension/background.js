@@ -93,11 +93,13 @@ async function ensureAllGeminiTabs() {
   return { tabsFound: tabs.length, results };
 }
 
-async function findActiveGeminiRuntime() {
+async function findActiveGeminiRuntime(targetTabId = null) {
+  if (targetTabId !== null && (!Number.isSafeInteger(targetTabId) || targetTabId <= 0)) return null;
   const tabs = await chrome.tabs.query({ url: '*://gemini.google.com/*' });
   const contract = await getRuntimeContract();
   for (const tab of tabs) {
     if (typeof tab.id !== 'number') continue;
+    if (targetTabId !== null && tab.id !== targetTabId) continue;
     let ping = await pingRuntime(tab.id);
     if (!ping.ok || ping.build !== contract.runtimeBuild) {
       await ensureGeminiRuntime(tab.id);
@@ -460,12 +462,17 @@ async function forwardResultToPython(message, fallbackMeta = null, timeoutMs = 3
 
 async function runCommandCycle() {
   const contract = await getRuntimeContract();
-  const activeRuntime = await findActiveGeminiRuntime();
+  let activeRuntime = await findActiveGeminiRuntime();
   if (!activeRuntime || activeRuntime.ping.status !== 'ready') { await new Promise(r => setTimeout(r, 2000)); return; }
   let cmdData = null;
   try { cmdData = await bridgeFetch('/v1/command/wait?timeout=15', 'GET', null, 20000); } catch (_) { return; }
   const command = cmdData?.command;
   if (!command) return;
+  if (Object.prototype.hasOwnProperty.call(command, 'targetTabId')) {
+    if (!Number.isSafeInteger(command.targetTabId) || command.targetTabId <= 0) return;
+    activeRuntime = await findActiveGeminiRuntime(command.targetTabId);
+    if (!activeRuntime || activeRuntime.ping.status !== 'ready') return;
+  }
   try {
     const claim = await bridgeFetch('/v1/claim', 'POST', { requestId: command.requestId, claimant: `${contract.runtimeBuild}_tab_${activeRuntime.tabId}` }, 5000);
     if (!claim.claimed) return;

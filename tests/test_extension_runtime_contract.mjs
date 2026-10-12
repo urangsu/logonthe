@@ -331,6 +331,20 @@ test('HANDOFF: generic icon and ambiguous send buttons are not dispatch targets'
   assert.strictEqual(f.runtime.findSendControl(f.editorEl), null);
 });
 
+test('explicit diagnostic target never pings another Gemini tab or falls back', async () => {
+  const { context, tabMessages } = loadRealBackgroundJs({
+    onTabQuery: async () => [{ id: 101 }, { id: 202 }],
+  });
+  const selected = await context.findActiveGeminiRuntime(202);
+  assert.strictEqual(selected.tabId, 202);
+  assert.ok(tabMessages.every(message => message.tabId === 202));
+  const count = tabMessages.length;
+  for (const missing of [303, 0, '202']) {
+    assert.strictEqual(await context.findActiveGeminiRuntime(missing), null);
+  }
+  assert.strictEqual(tabMessages.length, count);
+});
+
 function loadRealBackgroundJs(customEnv = {}) {
   const sentMessages = [];
   const tabMessages = [];
