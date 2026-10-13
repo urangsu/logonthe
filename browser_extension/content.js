@@ -29,7 +29,7 @@
     '[data-test-id="model-response"]', '.response-container-content', 'message-content', '.model-response-text'
   ].join(', ');
   let runtimeContract = {
-    extensionVersion: '13.2.8', runtimeBuild: '13.2.8-foreground-send-v1', protocolVersion: 3, bridgeSchemaVersion: 2
+    extensionVersion: '13.2.9', runtimeBuild: '13.2.9-focus-settle-v1', protocolVersion: 3, bridgeSchemaVersion: 2
   };
   const ROUTE_ALLOCATION_GRACE_MS = 11000;
 
