@@ -244,34 +244,47 @@ const pageWorldSubmissions = new Map();
 async function ensureGeminiForeground(tabId) {
   let timer;
   let timedOut = false;
-  const timeoutError = () => ({ ok: false, error: 'gemini_foreground_unavailable' });
+  let stage = 'lookup_tab';
+  const timeoutError = () => ({ ok: false, error: 'gemini_foreground_unavailable', stage, detail: 'foreground_timeout' });
   const activate = async () => {
     const tab = await chrome.tabs.get(tabId);
     if (timedOut) return timeoutError();
     if (!/^https:\/\/gemini\.google\.com(?:\/|$)/.test(tab.url || '') || !Number.isInteger(tab.windowId)) {
       return { ok: false, error: 'invalid_gemini_tab' };
     }
+    stage = 'lookup_window';
     const win = await chrome.windows.get(tab.windowId);
     if (timedOut) return timeoutError();
+    stage = 'restore_window';
     if (win.state === 'minimized') await chrome.windows.update(tab.windowId, { state: 'normal' });
     if (timedOut) return timeoutError();
+    stage = 'activate_tab';
     await chrome.tabs.update(tabId, { active: true, autoDiscardable: false });
     if (timedOut) return timeoutError();
+    stage = 'focus_window';
     await chrome.windows.update(tab.windowId, { focused: true });
     if (timedOut) return timeoutError();
-    const current = await chrome.tabs.get(tabId);
-    const currentWindow = await chrome.windows.get(tab.windowId);
-    const ok = current.active && current.windowId === tab.windowId && currentWindow.focused
-      && /^https:\/\/gemini\.google\.com(?:\/|$)/.test(current.url || '');
-    return { ok: Boolean(ok), error: ok ? '' : 'gemini_foreground_unavailable' };
+    stage = 'verify_focus';
+    while (!timedOut) {
+      const current = await chrome.tabs.get(tabId);
+      if (timedOut) return timeoutError();
+      const currentWindow = await chrome.windows.get(tab.windowId);
+      if (timedOut) return timeoutError();
+      if (current.windowId !== tab.windowId || !/^https:\/\/gemini\.google\.com(?:\/|$)/.test(current.url || '')) {
+        return { ok: false, error: 'invalid_gemini_tab', stage, detail: 'target_changed' };
+      }
+      if (current.active && currentWindow.focused) return { ok: true, error: '' };
+      await new Promise(resolve => setTimeout(resolve, 100));
+    }
+    return timeoutError();
   };
   try {
     return await Promise.race([
       activate(),
       new Promise(resolve => { timer = setTimeout(() => { timedOut = true; resolve(timeoutError()); }, 2500); }),
     ]);
-  } catch (_) {
-    return { ok: false, error: 'gemini_foreground_unavailable' };
+  } catch (error) {
+    return { ok: false, error: 'gemini_foreground_unavailable', stage, detail: String(error?.message || error).slice(0, 200) };
   } finally {
     clearTimeout(timer);
   }
@@ -297,6 +310,13 @@ function submitMarkedPrompt(requestId, expectedPath, expectedText, deadlineAtMs)
   return { clicked: true, keyed: false, world: 'MAIN' };
 }
 
+async function reportForegroundFailure(requestId, tabId, foreground) {
+  await bridgeFetch('/v1/event', 'POST', {
+    type: 'FOREGROUND_FAILED', rid: requestId, tabId,
+    error: foreground.error, stage: foreground.stage, detail: foreground.detail,
+  }, 1000).catch(() => {});
+}
+
 async function submitInPageWorld(message, sender) {
   const rid = message.requestId;
   const inFlight = inFlightCommandResolvers.get(rid);
@@ -310,7 +330,10 @@ async function submitInPageWorld(message, sender) {
   if (pageWorldSubmissions.has(rid)) return await pageWorldSubmissions.get(rid);
   const pending = Promise.resolve().then(async () => {
     const foreground = await ensureGeminiForeground(meta.tabId);
-    if (!foreground.ok) return { clicked: false, error: foreground.error };
+    if (!foreground.ok) {
+      await reportForegroundFailure(rid, meta.tabId, foreground);
+      return { clicked: false, error: foreground.error };
+    }
     if (cancelledRequestIds.has(rid) || inFlightCommandResolvers.get(rid) !== inFlight || Date.now() >= meta.generationDeadlineAtMs) {
       return { clicked: false, error: 'submission_expired' };
     }
@@ -479,6 +502,7 @@ async function runCommandCycle() {
   } catch (_) { return; }
   const foreground = await ensureGeminiForeground(activeRuntime.tabId);
   if (!foreground.ok) {
+    await reportForegroundFailure(command.requestId, activeRuntime.tabId, foreground);
     await bridgeFetch('/v1/result', 'POST', { requestId: command.requestId, postKey: command.postKey, navigationVersion: command.navigationVersion, status: 'failed', text: '', error: foreground.error }, 10000).catch(() => {});
     return;
   }

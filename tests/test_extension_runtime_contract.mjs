@@ -201,6 +201,25 @@ test('FOREGROUND: focus failure never dispatches a submission', async () => {
   assert.strictEqual(injections, 0);
 });
 
+test('FOREGROUND: wait for delayed OS focus without issuing another activation', async () => {
+  const { background, context } = loadRealBackgroundJs();
+  let reads = 0, updates = 0;
+  context.chrome.windows.get = async id => ({ id, state: 'normal', focused: ++reads >= 3 });
+  context.chrome.windows.update = async () => { updates++; };
+  const result = await background.ensureGeminiForeground(7);
+  assert.strictEqual(result.ok, true);
+  assert.strictEqual(updates, 1);
+});
+
+test('FOREGROUND: expose failed API stage without clicking or hiding its cause', async () => {
+  const { background, context } = loadRealBackgroundJs();
+  context.chrome.tabs.update = async () => { throw new Error('Tabs cannot be edited right now (user may be dragging a tab).'); };
+  const result = await background.ensureGeminiForeground(7);
+  assert.strictEqual(result.ok, false);
+  assert.strictEqual(result.stage, 'activate_tab');
+  assert.match(result.detail, /dragging a tab/);
+});
+
 test('FOREGROUND: late tab lookup after timeout cannot activate a window', async () => {
   const { background, context } = loadRealBackgroundJs();
   let expire, resolveTab, updates = 0;
