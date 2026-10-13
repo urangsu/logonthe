@@ -1097,7 +1097,7 @@ class GeminiBridgeHTTPServer:
                             f"[GEMINI][USER_TURN_CONFIRMED] rid={payload.get('rid')} "
                             f"userUniqueTurns={payload.get('userUniqueTurns')}"
                         )
-                    elif ev_type in ("SEND_DIAG", "SEND_DISPATCHED", "SEND_COMMITTED", "SEND_COMMIT_UNKNOWN", "SEND_STATE_LOST"):
+                    elif ev_type in ("SEND_DIAG", "SEND_DISPATCHED", "SEND_COMMITTED", "SEND_COMMIT_UNKNOWN", "SEND_STATE_LOST", "FOREGROUND_FAILED"):
                         fields = {key: payload.get(key) for key in (
                             "rid", "candidateCount", "selectedTag", "disabled", "ariaDisabled",
                             "sendConfirmed", "boundNode", "clicked", "keyed", "stableMs",
@@ -1106,6 +1106,7 @@ class GeminiBridgeHTTPServer:
                             "route", "elapsedMs", "runtimeBuild", "clickCount", "dispatchAttempted",
                             "selectedClass", "ariaLabel", "iconText",
                             "world", "error", "visibilityState", "documentFocused",
+                            "tabId", "stage", "detail",
                         ) if key in payload}
                         logger.log(f"[GEMINI][{ev_type}] " + json.dumps(fields, ensure_ascii=False))
                     elif ev_type == "RESPONSE_TURN_BOUND":

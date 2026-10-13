@@ -17,6 +17,29 @@ from services.gemini_extension_bridge import (
 
 
 class GeminiExtensionBridgeTests(unittest.TestCase):
+    def test_foreground_failure_keeps_stage_and_api_cause_in_log(self):
+        bridge = GeminiExtensionBridge()
+        server = GeminiBridgeHTTPServer(bridge, port=0)
+        server.start()
+        try:
+            with patch("services.gemini_extension_bridge.logger.log") as log:
+                conn = http.client.HTTPConnection("127.0.0.1", server.port, timeout=2)
+                conn.request("POST", "/v1/event", json.dumps({
+                    "type": "FOREGROUND_FAILED", "rid": "focus-test", "tabId": 7,
+                    "error": "gemini_foreground_unavailable", "stage": "activate_tab",
+                    "detail": "Tabs cannot be edited right now",
+                }), {"Content-Type": "application/json"})
+                response = conn.getresponse()
+                response.read()
+                conn.close()
+                self.assertEqual(response.status, 200)
+                messages = [call.args[0] for call in log.call_args_list]
+                diagnostic = next(message for message in messages if "FOREGROUND_FAILED" in message)
+                self.assertIn('"stage": "activate_tab"', diagnostic)
+                self.assertIn("Tabs cannot be edited", diagnostic)
+        finally:
+            server.stop()
+
     def test_diagnostic_tab_target_is_optional_and_validated(self):
         from dataclasses import replace
         command = GeminiCommand.create("diagnostic", 1, "test")
