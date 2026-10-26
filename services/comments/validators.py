@@ -1,6 +1,12 @@
 import re
 from typing import Tuple, List, Optional
 from services.comments.intents import CommentCandidate
+from services.comments.community_rhythm import (
+    COMMENT_POLICIES,
+    CommunityRhythmPreset,
+    FinalQualityGate,
+    FinalQualityResult,
+)
 
 
 class PositiveSafetyValidator:
@@ -131,5 +137,20 @@ class PositiveSafetyValidator:
         # 13. 길이 적합성 검사 (12자 이상 100자 이하, 101자 이상 거부)
         if len(text) < 12 or len(text) > 100:
             return False, f"length_out_of_bounds: {len(text)}자 (허용: 12~100자)"
+
+        # V13.1 shared final-text policy. Keep the historic checks above in
+        # place so this public API retains its existing reason taxonomy and
+        # behavior, while every candidate also receives the new hard bans.
+        quality = FinalQualityGate.validate_candidate_text(text, legacy=True)
+        if not quality.valid:
+            legacy_codes = {
+                "fake_experience": "banned_fake_experience",
+                "absolute_or_pressure": "banned_kkok_phrase",
+                "laughter_or_emoticon": "banned_emoticon",
+                "emoji": "banned_emoticon",
+            }
+            code = legacy_codes.get(quality.code, quality.code)
+            matched = f": '{quality.matched}'" if quality.matched else ""
+            return False, f"{code}{matched}"
 
         return True, None

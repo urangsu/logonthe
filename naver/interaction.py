@@ -248,7 +248,8 @@ class CommentInteractionService:
         cls,
         page: Page,
         stop_event: Optional[threading.Event] = None,
-        command_bridge: Optional[ClipboardCommandBridge] = None
+        command_bridge: Optional[ClipboardCommandBridge] = None,
+        preset: str = "community"
     ) -> UserAction:
         while True:
             if stop_event and stop_event.is_set():
@@ -260,8 +261,13 @@ class CommentInteractionService:
             if command_bridge:
                 cmd = command_bridge.pop_command()
                 if cmd and cmd.kind == WorkerCommandType.APPLY_CLIPBOARD_COMMENT:
-                    if CommentEditorAdapter.set_text(page, cmd.text):
-                        logger.log("  📋 [COMMENT] 클립보드 텍스트를 댓글 에디터에 적용했습니다.")
+                    from services.comments.community_rhythm import FinalQualityGate
+                    gate_res = FinalQualityGate.validate_final_text(cmd.text, preset=preset, source="clipboard")
+                    if gate_res.valid:
+                        if CommentEditorAdapter.set_text(page, cmd.text):
+                            logger.log("  📋 [COMMENT] 클립보드 텍스트를 댓글 에디터에 적용했습니다.")
+                    else:
+                        logger.log(f"  ⚠️ [COMMENT] 클립보드 텍스트가 품질 게이트를 통과하지 못해 적용을 거부했습니다: [{gate_res.code}] {gate_res.reason} (매칭: {gate_res.matched})", "WARNING")
 
             # 2. 브라우저 이벤트 상태 확인
             try:
@@ -297,12 +303,19 @@ class CommentInteractionService:
         cls,
         page: Page,
         final_text: str,
-        stop_event: Optional[threading.Event] = None
+        stop_event: Optional[threading.Event] = None,
+        preset: str = "community"
     ) -> CommentSubmitState:
         """
         댓글 등록 버튼 클릭 및 Fail-closed 검증 (에디터 클리어 및 서버 목록 내 댓글 등장 확인)
         """
         ensure_page_alive(page)
+
+        from services.comments.community_rhythm import FinalQualityGate
+        gate_res = FinalQualityGate.validate_final_text(final_text, preset=preset, source="user_submission")
+        if not gate_res.valid:
+            logger.log(f"  ❌ [COMMENT] 등록 직전 품질 게이트 실패로 제출을 중단합니다: [{gate_res.code}] {gate_res.reason} (매칭: {gate_res.matched})", "ERROR")
+            return CommentSubmitState.FAILED
 
         btn = MobileDOMResolver.get_comment_submit_button(page)
         if btn and btn.count() > 0:

@@ -96,6 +96,7 @@ class GeminiWebBridge:
         prompt: str,
         gemini_url: str = GEMINI_DEFAULT_URL,
         stop_event: Optional[threading.Event] = None,
+        preset: str = "community",
         request_id: Optional[str] = None
     ) -> Optional[str]:
         """
@@ -206,18 +207,11 @@ class GeminiWebBridge:
             logger.log("⚠️ [GEMINI] 유효한 답변 텍스트를 읽어오지 못했습니다. (로컬 엔진으로 전환)", "WARNING")
             return None
 
-        # 6. PositiveSafetyValidator 검증
-        cand = CommentCandidate(
-            body=final_answer,
-            category="AI_GENERATED",
-            reaction_intent=ReactionIntent.DETAIL_PRAISE,
-            first_person_intent=FirstPersonIntent.NONE,
-            subject="",
-            template_id="gemini_web_v5"
-        )
-        valid, reason = PositiveSafetyValidator.validate_candidate(cand)
-        if not valid:
-            logger.log(f"⚠️ [GEMINI] AI 생성 댓글이 안전성 검증을 통과하지 못했습니다 ({reason}). 로컬 엔진으로 전환합니다.", "WARNING")
+        # 6. FinalQualityGate 검증
+        from services.comments.community_rhythm import FinalQualityGate
+        gate_res = FinalQualityGate.validate_final_text(final_answer, preset=preset, source="gemini")
+        if not gate_res.valid:
+            logger.log(f"⚠️ [GEMINI] AI 생성 댓글이 품질 게이트를 통과하지 못했습니다 ([{gate_res.code}] {gate_res.reason} / 매칭: {gate_res.matched}). 로컬 엔진으로 전환합니다.", "WARNING")
             return None
 
         # 7. OS 클립보드 복사

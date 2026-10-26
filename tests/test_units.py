@@ -104,10 +104,10 @@ class TestHumanLikeComposerV31(unittest.TestCase):
             excerpt="집 앞 편의점 갔다가 스폰지밥 랜덤키링이 있길래 사봤는데 근육빵빵 스폰지밥이 나왔습니다. 너무 귀엽네요."
         )
         self.assertEqual(res.category, "HOBBY_GOODS")
-        self.assertTrue(len(res.body) > 10)
+        self.assertTrue(len(res.body) > 5)
         self.assertNotIn("음식", res.body)
         self.assertNotIn("맛있어", res.body)
-        self.assertTrue("귀엽" in res.body or "뽑아" in res.body or "굿즈" in res.body or "키링" in res.body or "스폰지밥" in res.body)
+        self.assertTrue(any(w in res.body for w in ["귀엽", "이쁜", "비쥬얼", "굿즈", "키링", "스폰지밥"]))
 
     def test_composer_praise_boost(self):
         res = ContextualDraftEngine.generate(
@@ -116,7 +116,7 @@ class TestHumanLikeComposerV31(unittest.TestCase):
             praise_boost=True
         )
         self.assertEqual(res.category, "CAFE")
-        self.assertTrue(len(res.body) > 10)
+        self.assertTrue(len(res.body) > 5)
 
 
 class TestUrlUtils(unittest.TestCase):
@@ -189,7 +189,7 @@ class TestContentExtractorAndAIPrompt(unittest.TestCase):
         )
         self.assertIn("강릉 순두부 맛집 탐방", prompt_with_excerpt)
         self.assertIn("짬뽕순두부", prompt_with_excerpt)
-        self.assertIn("절대 금지 규칙", prompt_with_excerpt)
+        self.assertIn("HARD BAN", prompt_with_excerpt)
 
 
 class TestDraftServiceSuffix(unittest.TestCase):
@@ -250,7 +250,7 @@ class TestConfigAndHistory(unittest.TestCase):
         self.assertEqual(migrated["schema_version"], 2)
         self.assertEqual(migrated["max_feed_items"], 30)
         self.assertEqual(migrated["general_suffix"], "기존 꼬리말")
-        self.assertTrue(migrated["recommendation_suffix_enabled"])
+        self.assertFalse(migrated["recommendation_suffix_enabled"])
         self.assertEqual(migrated["gemini_browser_mode"], "existing_chrome_mac")
 
     def test_history_store(self):

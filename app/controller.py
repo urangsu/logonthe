@@ -189,6 +189,14 @@ class FeedController:
 
                     processed_keys.add(post.key)
 
+                    # 주제 필터 (피드 탐색 시 푸드/카페/리빙 선호, IT/카메라/스펙 자동 스킵)
+                    if source_type != FeedSourceType.DIRECT and self.config.get("topic_filter_enabled", True) and post.title:
+                        from naver.discovery.topic_filter import DiscoveryTopicFilter
+                        allowed, topic_reason = DiscoveryTopicFilter.is_allowed(post.title, post.excerpt or "")
+                        if not allowed:
+                            logger.log(f"  🚫 [TOPIC_FILTER] 비선호 주제({topic_reason}) 감지 -> 방문 제외: \"{post.title}\"")
+                            continue
+
                     # 컴포넌트 레벨 멱등성 검사 (Like와 Comment 독립 판단)
                     is_local_liked = self.history.is_liked(post.key)
                     is_local_commented = self.history.is_comment_submitted(post.key)
