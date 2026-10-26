@@ -121,13 +121,13 @@ def test_combined_audit_scans_comments_once_and_exports_both_lists(tmp_path, req
     with patch("services.engagement_audit_service.BuddyRequestCollector.collect_received", return_value=requests), \
          patch("services.engagement_audit_service.BuddyListCollector.collect_all_buddies", return_value=buddies), \
          patch("services.engagement_audit_service.MyBlogRecentPostService.fetch_recent_posts", return_value=[{"log_no": "123", "title": "글"}]) as posts, \
-         patch("services.engagement_audit_service.ReactionParticipantCollector.collect") as likes, \
+         patch("services.engagement_audit_service.ReactionParticipantCollector.collect", return_value=([{"blog_id": "existing"}], "complete", 1)) as likes, \
          patch("services.engagement_audit_service.CommentParticipantCollector.collect", return_value=([{"blog_id": "shared", "comment_entry_count": 2}, {"blog_id": "new", "comment_entry_count": 1}], "complete", 3)) as comments:
         result = EngagementAuditService.run_audit(MagicMock(), "me", output_dir=str(tmp_path), target_scope="all")
     assert result["success"]
     posts.assert_called_once()
     comments.assert_called_once()
-    likes.assert_not_called()
+    likes.assert_called_once()
     assert len(result["summary_csv_paths"]) == 2
     assert len({os.path.basename(p) for p in result["summary_csv_paths"]}) == 2
     sheets = {}
@@ -136,7 +136,9 @@ def test_combined_audit_scans_comments_once_and_exports_both_lists(tmp_path, req
             sheets["applicants" if "applicant_" in path else "buddies"] = list(csv.DictReader(handle))
     assert {r["블로그ID"] for r in sheets["buddies"]} == {"existing", "shared"}
     assert sheets["buddies"][0]["새글소식"] == "OFF"
-    assert all("공감한 글 수" not in r for r in sheets["buddies"])
+    by_id = {r["블로그ID"]: r for r in sheets["buddies"]}
+    assert by_id["existing"]["공감한 글 수"] == "1"
+    assert by_id["shared"]["총댓글 수"] == "2"
     if request_state == "complete":
         assert {r["블로그ID"] for r in sheets["applicants"]} == {"new", "shared"}
         assert result["audit_state"] == "complete"

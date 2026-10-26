@@ -1,3 +1,4 @@
+import os
 import time
 from datetime import date, timedelta
 from typing import Dict, Any, List, Optional, Tuple, Literal
@@ -42,6 +43,39 @@ class EngagementAuditService:
         except Exception:
             return False
 
+    # 그룹 기준 강조 판정 임계값
+    HIGHLIGHT_LIKE_BLUE_MIN = 5       # 일반 그룹: 공감 글 수가 이 값 이상이면 파랑
+    HIGHLIGHT_COMMENT_BLUE_MIN = 3    # 일반 그룹: 총댓글 수가 이 값 이상이면 파랑
+    HIGHLIGHT_LIKE_GROUP_RED_MAX = 5  # 좋아요 그룹: 공감 글 수가 이 값 이하이면 빨강
+    EXCLUDED_GROUP_KEYWORD = "사기꾼"
+    LIKE_GROUP_KEYWORD = "좋아요"
+
+    @classmethod
+    def classify_highlight(
+        cls,
+        group_name: str,
+        like_count: int,
+        comment_entry_count: int,
+        scan_complete: bool,
+        is_recent_buddy: bool = False,
+    ) -> Tuple[str, str]:
+        """그룹별 강조 (색상, 라벨)을 반환한다. 색상은 blue/red/빈 문자열.
+
+        - 사기꾼 그룹: 판정 없음
+        - 좋아요 그룹: 공감이 기준 이하이면 red (수집이 완전하고 신규 이웃이 아닐 때만)
+        - 그 외 그룹: 공감 또는 댓글이 기준 이상이면 blue (부분 수집이어도 최소 수 충족이면 유효)
+        """
+        group = (group_name or "").strip()
+        if cls.EXCLUDED_GROUP_KEYWORD in group:
+            return "", ""
+        if cls.LIKE_GROUP_KEYWORD in group:
+            if scan_complete and not is_recent_buddy and like_count <= cls.HIGHLIGHT_LIKE_GROUP_RED_MAX:
+                return "red", f"좋아요 부족({like_count}회)"
+            return "", ""
+        if like_count >= cls.HIGHLIGHT_LIKE_BLUE_MIN or comment_entry_count >= cls.HIGHLIGHT_COMMENT_BLUE_MIN:
+            return "blue", f"우수 반응(공감 {like_count}회/댓글 {comment_entry_count}개)"
+        return "", ""
+
     @classmethod
     def run_audit(
         cls,
@@ -60,7 +94,7 @@ class EngagementAuditService:
             return {"success": False, "error": "invalid_audit_scope"}
         applicants = target_scope == "applicants"
         combined = target_scope == "all"
-        comments_only = applicants or combined
+        comments_only = applicants
         if not b_id:
             logger.log("❌ [AUDIT] 블로그 ID가 지정되지 않았습니다.", "ERROR")
             return {"success": False, "error": "empty_blog_id"}
@@ -150,6 +184,8 @@ class EngagementAuditService:
                 "no_reaction": True,
                 "is_recent_buddy": not applicants and cls.is_grace_period(b_info.added_date, days=2),
                 "reaction_category": "확인 불가",
+                "highlight": "",
+                "highlight_label": "",
                 "scan_complete": True
             }
 
@@ -253,6 +289,12 @@ class EngagementAuditService:
                 row["no_reaction"] = None
                 row["reaction_category"] = "확인 불가"
 
+            if not applicants:
+                row["highlight"], row["highlight_label"] = cls.classify_highlight(
+                    row.get("group_name", ""), l_cnt, row.get("comment_entry_count", 0),
+                    all_post_scans_complete, bool(row.get("is_recent_buddy")),
+                )
+
             master_rows.append(row)
             if row["no_reaction"] is True:
                 unresponsive_rows.append(row)
@@ -318,6 +360,7 @@ class EngagementAuditService:
                 if scope == "applicants":
                     for row in rows:
                         row["requested_date"] = members[row["blog_id"]].requested_date or ""
+                        row["highlight"], row["highlight_label"] = "", ""
                 subset = {**report, "target_scope": scope, "master_buddies": rows}
                 summary_paths.append(EngagementAuditStore.save_summary(subset, output_dir=output_dir))
             summary_csv = summary_paths[0]
@@ -334,7 +377,14 @@ class EngagementAuditService:
         else:
             logger.log(f"   ❤️ 최근 글에 반응한 이웃: {reacted_buddies_count}명 (우수 반응 3회 이상: {active_buddies_count}명, 공감+댓글 모두: {both_count}명, 공감만: {liked_only_count}명, 댓글만: {commented_only_count}명)")
         logger.log(f"   🚫 최근 글 무반응 이웃: {unresponsive_count}명 (추가일 기준 참고: {grace_count}명 / 확인된 무반응: {real_unresponsive_count}명)")
+        blue_count = sum(1 for r in master_rows if r.get("highlight") == "blue")
+        red_count = sum(1 for r in master_rows if r.get("highlight") == "red")
+        if not applicants:
+            logger.log(f"   그룹 판정: 파랑(우수 반응) {blue_count}명 / 빨강(좋아요 그룹 공감 부족) {red_count}명")
+        summary_xlsx_paths = [p for p in (EngagementAuditStore.xlsx_path_for(c) for c in summary_paths) if os.path.exists(p)]
         logger.log(f"   이웃별 누적 반응 CSV: {summary_csv}")
+        if summary_xlsx_paths:
+            logger.log(f"   색상 표시 엑셀: {', '.join(summary_xlsx_paths)}")
 
         return {
             "success": True,
@@ -342,4 +392,5 @@ class EngagementAuditService:
             "report": report,
             "summary_csv_path": summary_csv,
             "summary_csv_paths": summary_paths,
+            "summary_xlsx_paths": summary_xlsx_paths,
         }

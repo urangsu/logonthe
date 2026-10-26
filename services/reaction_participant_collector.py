@@ -76,8 +76,11 @@ class ReactionParticipantCollector:
                             });
                         }
                     }
+                    const moreEl = document.querySelector("button.btn_more, a.btn_more, .more_btn, .u_likeit_list_btn_more");
+                    const moreVisible = !!(moreEl && moreEl.offsetParent !== null);
                     return {
                         displayedCount: displayedCount,
+                        moreVisible: moreVisible,
                         items: results
                     };
                 }
@@ -87,7 +90,13 @@ class ReactionParticipantCollector:
             displayed_cnt = res_data.get("displayedCount")
 
             state: Literal["complete", "partial", "failed"] = "complete"
-            if displayed_cnt is None or len(likers_data) < displayed_cnt or (stop_event and stop_event.is_set()):
+            if stop_event and stop_event.is_set():
+                state = "partial"
+            elif displayed_cnt is None:
+                # 표시 수를 모를 때는 더보기가 없고 1명 이상 로드된 경우에만 전체로 본다 (0명은 확정 금지)
+                if res_data.get("moreVisible") or not likers_data:
+                    state = "partial"
+            elif len(likers_data) < displayed_cnt:
                 state = "partial"
 
             return likers_data, state, displayed_cnt

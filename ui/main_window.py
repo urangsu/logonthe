@@ -1225,23 +1225,27 @@ class MainWindow(ctk.CTk):
                     summary_csv = res.get("summary_csv_path", "")
                     summary_paths = res.get("summary_csv_paths", [summary_csv])
                     audit_st = rep.get("audit_state", "complete").upper()
+                    xlsx_paths = res.get("summary_xlsx_paths", [])
+                    open_paths = xlsx_paths or summary_paths
                     msg = (
-                        f"[이웃·신청자 댓글 조회 완료 (상태: {audit_st})]\n\n"
+                        f"[이웃·신청자 공감/댓글 조회 완료 (상태: {audit_st})]\n\n"
                         f"• 기존 이웃: {rep.get('existing_buddies_count', 0)}명\n"
                         f"• 서로이웃 신청자: {rep.get('total_applicants_count', 0)}명\n"
                         f"• 기존 이웃 명단 수집: {rep.get('existing_collection_state', '확인 불가')}\n"
                         f"• 신청자 명단 수집: {rep.get('request_collection_state', '확인 불가')}\n"
                         f"• 조회 범위: 최근 내 글 {rep['recent_post_count']}개\n\n"
-                        "공감은 조회하지 않습니다. 일부 수집된 댓글 수는 확인된 최소 수입니다.\n\n"
-                        + "\n".join(summary_paths)
-                        + "\n\n두 파일을 바로 여시겠습니까?"
+                        "그룹 기준 색상: 파랑 = 일반 그룹에서 공감 5회 이상 또는 댓글 3개 이상, "
+                        "빨강 = 좋아요 그룹에서 공감 5회 이하 (사기꾼 그룹 제외, 수집이 완전할 때만 빨강).\n"
+                        "일부 수집된 수는 확인된 최소 수입니다.\n\n"
+                        + "\n".join(open_paths)
+                        + "\n\n파일을 바로 여시겠습니까?"
                     )
 
                     def show_dialog():
                         ans = messagebox.askyesno("감사 완료", msg)
                         if ans:
                             try:
-                                subprocess.run(["open", *summary_paths])
+                                subprocess.run(["open", *open_paths])
                             except Exception:
                                 pass
 
