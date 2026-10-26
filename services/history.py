@@ -167,6 +167,9 @@ class HistoryStore:
             if cmt.get("status") == CommentSubmitState.SUBMITTED.value and not cmt.get("unconfirmed"):
                 text = cmt.get("submitted_text") or cmt.get("draft")
                 if text and text.strip():
+                    from services.comments.community_rhythm import ResponseContaminationGate
+                    if ResponseContaminationGate.validate(text).is_contaminated:
+                        continue
                     results.append(text.strip())
             if len(results) >= limit:
                 break

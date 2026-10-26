@@ -71,6 +71,8 @@ class TestNativeSubmitQualityGate(unittest.TestCase):
         cfg = {
             "skip_on_comment_failure": False,
             "allow_local_draft_on_gemini_failure": True,
+            "like_popularity_guard_enabled": False,
+            "daily_visitor_guard_enabled": False,
         }
         processor = PostProcessor(
             config=cfg,
@@ -145,6 +147,8 @@ class TestNativeSubmitQualityGate(unittest.TestCase):
         cfg = {
             "skip_on_comment_failure": False,
             "allow_local_draft_on_gemini_failure": True,
+            "like_popularity_guard_enabled": False,
+            "daily_visitor_guard_enabled": False,
         }
         processor = PostProcessor(
             config=cfg,

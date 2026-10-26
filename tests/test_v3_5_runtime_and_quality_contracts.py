@@ -85,7 +85,8 @@ class TestV35RuntimeAndQualityContracts(unittest.TestCase):
     def test_needs_more_context_expands_or_skips_before_gemini(self, mock_dup_scan, mock_open):
         """본문 근거가 전무(background only)할 때 Gemini를 호출하지 않고 SKIP되는지 검증"""
         proc = PostProcessor(
-            config={"ai_prompt_version": "3.5.0-reaction-planned"},
+            config={"ai_prompt_version": "3.5.0-reaction-planned",
+                    "like_popularity_guard_enabled": False, "daily_visitor_guard_enabled": False},
             auto_comment_submit_enabled=True,
             auto_comment_chance=1.0,
             gemini_web_enabled=True,

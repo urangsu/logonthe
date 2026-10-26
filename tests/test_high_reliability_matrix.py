@@ -131,7 +131,8 @@ class TestHighReliabilityMatrix(unittest.TestCase):
 
     def test_gem_02_new_evidence_retry_reinvokes(self):
         """GEM-02: NEED_MORE_CONTEXT 수신 시 본문 재수집 후 신규 증거가 있을 때만 재호출"""
-        config = {"gemini_response_timeout": 50.0}
+        config = {"gemini_response_timeout": 50.0,
+                  "like_popularity_guard_enabled": False, "daily_visitor_guard_enabled": False}
         processor = PostProcessor(
             config=config,
             comment_enabled=True,
@@ -587,7 +588,8 @@ class TestHighReliabilityMatrix(unittest.TestCase):
     def test_ver_07_pre_submit_persists_unconfirmed_before_click(self):
         """VER-07: 등록 버튼 클릭 직전에 crash/비정상 종료 대비 사전 미확정 상태를 영속 저장"""
         history = HistoryStore(self.history_path)
-        config = {"gemini_response_timeout": 50.0}
+        config = {"gemini_response_timeout": 50.0,
+                  "like_popularity_guard_enabled": False, "daily_visitor_guard_enabled": False}
         processor = PostProcessor(config=config, comment_enabled=True, gemini_web_enabled=False, history_store=history)
 
         from naver.content_extractor import PostContext
@@ -617,7 +619,8 @@ class TestHighReliabilityMatrix(unittest.TestCase):
         history.is_comment_submitted.return_value = False
         history.record_pre_submit.side_effect = HistoryPersistenceError("Disk write failed: simulated out of space")
 
-        config = {"gemini_response_timeout": 50.0}
+        config = {"gemini_response_timeout": 50.0,
+                  "like_popularity_guard_enabled": False, "daily_visitor_guard_enabled": False}
         processor = PostProcessor(config=config, comment_enabled=True, gemini_web_enabled=False, history_store=history)
 
         from naver.content_extractor import PostContext

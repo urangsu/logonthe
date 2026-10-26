@@ -37,6 +37,8 @@ class TestAutoCommentSubmit(unittest.TestCase):
     def setUp(self):
         self.config = {
             "comment_enabled": True,
+            "like_popularity_guard_enabled": False,
+            "daily_visitor_guard_enabled": False,
             "like_enabled": False,
             "auto_comment_submit_enabled": True,
             "auto_comment_chance": 0.60,

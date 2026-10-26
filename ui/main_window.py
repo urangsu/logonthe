@@ -100,6 +100,8 @@ class MainWindow(ctk.CTk):
         self._prepare_feed_run_control()
         ensure_comment_mode_consistency(self.config_service)
         self.worker_thread: Optional[threading.Thread] = None
+        self.audit_thread: Optional[threading.Thread] = None
+        self.audit_stop_event = threading.Event()
         self.reply_session: Optional[BrowserSession] = None
         self.reply_page: Optional[Any] = None
 
@@ -700,12 +702,13 @@ class MainWindow(ctk.CTk):
             command=self._open_login_window
         ).pack(side="left", padx=2)
 
-        ctk.CTkButton(
+        self.btn_engagement_audit = ctk.CTkButton(
             btn_frame, text="📊 반응 CSV", width=105, height=32,
             fg_color="#7C3AED", hover_color="#6D28D9",
             font=ctk.CTkFont(size=11, weight="bold"),
             command=self._run_engagement_audit
-        ).pack(side="left", padx=2)
+        )
+        self.btn_engagement_audit.pack(side="left", padx=2)
 
         ctk.CTkButton(
             btn_frame, text="🔓 락 초기화", width=75, height=32, font=ctk.CTkFont(size=11),
@@ -1169,10 +1172,16 @@ class MainWindow(ctk.CTk):
         threading.Thread(target=task, daemon=True).start()
 
     def _run_engagement_audit(self):
-        """내 블로그 최근 글의 이웃별 누적 공감/댓글을 CSV 하나로 저장한다."""
+        """기존 이웃과 신청자를 한 번의 댓글 수집으로 함께 집계한다."""
         from tkinter import simpledialog
         from services.engagement_audit_service import EngagementAuditService
         import subprocess
+
+        if ((self.worker_thread and self.worker_thread.is_alive())
+                or (self.audit_thread and self.audit_thread.is_alive())):
+            messagebox.showwarning("작업 중", "현재 작업이 끝난 뒤 반응 조회를 실행해 주세요.")
+            return
+        target_scope = "all"
 
         saved_id = self.config_service.get("my_blog_id", "")
         blog_id = simpledialog.askstring(
@@ -1191,6 +1200,11 @@ class MainWindow(ctk.CTk):
             messagebox.showwarning("알림", "프로필이 사용 중입니다. 실행 중인 브라우저나 작업을 먼저 중지해 주세요.")
             return
 
+        self.audit_stop_event = threading.Event()
+        self.btn_engagement_audit.configure(state="disabled")
+        self.btn_start.configure(state="disabled")
+        self.btn_stop.configure(state="normal")
+
         logger.log(f"👥 [AUDIT] '{blog_id}' 블로그 최근 글 반응자 수집을 시작합니다...")
 
         def task():
@@ -1201,47 +1215,55 @@ class MainWindow(ctk.CTk):
                 res = EngagementAuditService.run_audit(
                     page=page,
                     my_blog_id=blog_id,
-                    recent_post_count=int(self.config_service.get("engagement_audit_recent_posts", 5))
+                    recent_post_count=int(self.config_service.get("engagement_audit_recent_posts", 5)),
+                    target_scope=target_scope,
+                    stop_event=self.audit_stop_event,
                 )
 
                 if res.get("success"):
                     rep = res["report"]
                     summary_csv = res.get("summary_csv_path", "")
+                    summary_paths = res.get("summary_csv_paths", [summary_csv])
                     audit_st = rep.get("audit_state", "complete").upper()
-
                     msg = (
-                        f"🎉 [내 블로그 이웃 전수 및 무반응 감사 완료 (상태: {audit_st})]\n\n"
-                        f"• 분석 대상 최근 글: {rep['recent_post_count']}개\n"
-                        f"• 👥 전체 등록 이웃: {rep.get('total_buddies_count', 0)}명\n"
-                        f"• 🔔 새글소식 설정: ON {rep.get('news_feed_on_count', 0)}명 / OFF(차단) {rep.get('news_feed_off_count', 0)}명\n"
-                        f"• ❤️ 최근 글 반응 이웃: {rep.get('reacted_buddies_count', 0)}명 (3회 이상 우수: {rep.get('active_buddies_count', 0)}명)\n"
-                        f"   (공감+댓글: {rep.get('both_like_and_comment_count', 0)}명, 공감만: {rep.get('liked_only_count', 0)}명, 댓글만: {rep.get('commented_only_count', 0)}명)\n"
-                        f"• 🚫 최근 글 무반응 이웃: {rep.get('unresponsive_buddies_count', 0)}명\n"
-                        f"   (추가일과 이후 2일 유예: {rep.get('grace_period_buddies_count', 0)}명 / 확인된 무반응: {rep.get('real_unresponsive_count', 0)}명)\n\n"
-                        f"이웃별 누적 반응 CSV:\n{summary_csv}\n\n"
-                        f"지금 파일을 바로 여시겠습니까?"
+                        f"[이웃·신청자 댓글 조회 완료 (상태: {audit_st})]\n\n"
+                        f"• 기존 이웃: {rep.get('existing_buddies_count', 0)}명\n"
+                        f"• 서로이웃 신청자: {rep.get('total_applicants_count', 0)}명\n"
+                        f"• 기존 이웃 명단 수집: {rep.get('existing_collection_state', '확인 불가')}\n"
+                        f"• 신청자 명단 수집: {rep.get('request_collection_state', '확인 불가')}\n"
+                        f"• 조회 범위: 최근 내 글 {rep['recent_post_count']}개\n\n"
+                        "공감은 조회하지 않습니다. 일부 수집된 댓글 수는 확인된 최소 수입니다.\n\n"
+                        + "\n".join(summary_paths)
+                        + "\n\n두 파일을 바로 여시겠습니까?"
                     )
 
                     def show_dialog():
                         ans = messagebox.askyesno("감사 완료", msg)
                         if ans:
                             try:
-                                subprocess.run(["open", summary_csv])
+                                subprocess.run(["open", *summary_paths])
                             except Exception:
                                 pass
 
                     self.after(0, show_dialog)
                 else:
                     err_msg = res.get('error', 'unknown')
-                    self.after(0, lambda: messagebox.showwarning("수집 실패", f"감사 실패: {err_msg}"))
+                    self.after(0, lambda msg=err_msg: messagebox.showwarning("수집 실패", f"조회 실패: {msg}"))
             except Exception as e:
                 err_text = str(e)
                 logger.log(f"❌ [AUDIT] 수집 중 오류: {err_text}", "ERROR")
                 self.after(0, lambda msg=err_text: messagebox.showerror("오류", f"수집 중 오류 발생: {msg}"))
             finally:
                 session.close()
+                self.after(0, self._on_audit_finished)
 
-        threading.Thread(target=task, daemon=True).start()
+        self.audit_thread = threading.Thread(target=task, daemon=True)
+        self.audit_thread.start()
+
+    def _on_audit_finished(self):
+        self.btn_engagement_audit.configure(state="normal")
+        self.btn_start.configure(state="normal")
+        self.btn_stop.configure(state="disabled")
 
     def _prepare_feed_run_control(self):
         self.stop_event = threading.Event()
@@ -1256,6 +1278,9 @@ class MainWindow(ctk.CTk):
         self.run_control.on_state_change = lambda st, reason: self.after(0, self._sync_run_control_ui, st, reason)
 
     def _start_task(self):
+        if getattr(self, "audit_thread", None) and self.audit_thread.is_alive():
+            messagebox.showwarning("작업 중", "반응 조회가 끝난 뒤 피드 작업을 시작해 주세요.")
+            return
         if self.worker_thread and self.worker_thread.is_alive():
             messagebox.showwarning("경고", "이미 작업이 실행 중입니다.")
             return
@@ -1459,6 +1484,9 @@ class MainWindow(ctk.CTk):
             self.command_bridge.send_skip_post()
 
     def _stop_task(self):
+        if self.audit_thread and self.audit_thread.is_alive():
+            self.audit_stop_event.set()
+            logger.log("[AUDIT] 반응 조회 중지 요청됨")
         if self.worker_thread and self.worker_thread.is_alive():
             self.run_control.request_stop("user_stop")
             logger.log("⏹ 작업 중지 신호 전송됨: 현재 단계 완료 즉시 안전하게 종료합니다...", "WARNING")
@@ -1849,6 +1877,7 @@ class MainWindow(ctk.CTk):
 
     def _on_close(self):
         self.stop_event.set()
+        self.audit_stop_event.set()
         if getattr(self, "reply_session", None):
             try:
                 self.reply_session.stop()

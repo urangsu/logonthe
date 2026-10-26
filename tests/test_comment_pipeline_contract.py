@@ -16,6 +16,8 @@ class TestCommentPipelineContract(unittest.TestCase):
     def setUp(self):
         self.config = {
             "comment_enabled": True,
+            "like_popularity_guard_enabled": False,
+            "daily_visitor_guard_enabled": False,
             "like_enabled": False,
             "secret_comment": False,
             "ai_clipboard_enabled": False,
@@ -164,7 +166,7 @@ class TestCommentPipelineContract(unittest.TestCase):
     def test_comment_004_speculative_duplicate_present_publish_once_cancel_once_zero_editor_submitted(
         self, mock_submit, mock_user_act, mock_dup_scan, mock_ctx, mock_open, mock_tx, mock_elig, mock_like_state, mock_extract, mock_guard
     ):
-        """COMMENT-004 (Speculative): like=True -> early publish 1회 -> duplicate=PRESENT 발견 -> cancel 1회 -> editor 0회 / SUBMITTED 동기화"""
+        """COMMENT-004: duplicate=PRESENT이면 Gemini 발행 없이 기존 댓글 동기화."""
         from services.like_transaction import LikeStateResult, LikeConfidence
         from services.like_eligibility import LikeEligibility, LikeEligibilityResult
 
@@ -194,9 +196,8 @@ class TestCommentPipelineContract(unittest.TestCase):
         )
         res = processor.process(self.mock_page, self.post)
 
-        # Speculative publish occurred, then cancelled upon duplicate detection
-        mock_gemini_bridge.publish.assert_called_once()
-        mock_gemini_bridge.cancel_command.assert_called_once()
+        mock_gemini_bridge.publish.assert_not_called()
+        mock_gemini_bridge.cancel_command.assert_not_called()
         mock_user_act.assert_not_called()
         mock_submit.assert_not_called()
         self.assertEqual(res.comment_result.status, CommentSubmitState.SUBMITTED)
@@ -244,7 +245,7 @@ class TestCommentPipelineContract(unittest.TestCase):
     def test_comment_005_speculative_duplicate_unknown_publish_once_cancel_once_zero_editor_skipped(
         self, mock_submit, mock_user_act, mock_dup_scan, mock_ctx, mock_open, mock_tx, mock_elig, mock_like_state, mock_extract, mock_guard
     ):
-        """COMMENT-005 (Speculative): like=True -> early publish 1회 -> duplicate=UNKNOWN -> cancel 1회 -> editor 0회 / SKIPPED"""
+        """COMMENT-005: duplicate=UNKNOWN이면 Gemini 발행 없이 건너뜀."""
         from services.like_transaction import LikeStateResult, LikeConfidence
         from services.like_eligibility import LikeEligibility, LikeEligibilityResult
 
@@ -270,8 +271,8 @@ class TestCommentPipelineContract(unittest.TestCase):
         )
         res = processor.process(self.mock_page, self.post)
 
-        mock_gemini_bridge.publish.assert_called_once()
-        mock_gemini_bridge.cancel_command.assert_called_once()
+        mock_gemini_bridge.publish.assert_not_called()
+        mock_gemini_bridge.cancel_command.assert_not_called()
         mock_user_act.assert_not_called()
         mock_submit.assert_not_called()
         self.assertEqual(res.comment_result.status, CommentSubmitState.SKIPPED)

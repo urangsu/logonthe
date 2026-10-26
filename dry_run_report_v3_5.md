@@ -6,8 +6,8 @@
 | 2 | food_02_rich_taste_donkatsu | FOOD | FOOD | taste_reaction | 돈카츠 | True |
 | 3 | food_03_two_items_taste_priority | FOOD | FOOD | taste_reaction | 삼겹살 | False |
 | 4 | food_04_truffle_pasta_combo | FOOD | FOOD | combination_curiosity | 트러플 | True |
-| 5 | food_05_ramen_broth | FOOD | FOOD | taste_reaction | 돈코츠 | True |
-| 6 | food_06_burger_visual | FOOD | FOOD | visual_reaction | 패티 | False |
+| 5 | food_05_ramen_broth | FOOD | FOOD | taste_reaction | 라멘 | True |
+| 6 | food_06_burger_visual | FOOD | FOOD | visual_reaction | 수제버거 | False |
 | 7 | food_07_salt_bread_texture | FOOD | FOOD | taste_reaction | 소금빵 | False |
 | 8 | food_08_croffle_visual | FOOD | FOOD | visual_reaction | 아이스크림 | False |
 | 9 | food_09_tteokbokki_taste | FOOD | FOOD | taste_reaction | 떡볶이 | False |
@@ -16,7 +16,7 @@
 | 12 | food_12_mala_special | FOOD | FOOD | combination_curiosity | 마라 | False |
 | 13 | food_13_eel_texture | FOOD | FOOD | taste_reaction | 장어구이 | True |
 | 14 | food_14_tendon_visual | FOOD | FOOD | visual_reaction | 튀김덮밥 | False |
-| 15 | food_15_sashimi_fresh | FOOD | FOOD | taste_reaction | 수산시장 | False |
+| 15 | food_15_sashimi_fresh | FOOD | FOOD | taste_reaction | 연어회 | False |
 | 16 | food_16_pancake_fluffy | FOOD | FOOD | taste_reaction | 팬케이크 | True |
 | 17 | food_17_pho_broth | FOOD | FOOD | taste_reaction | 쌀국수 | True |
 | 18 | food_18_dakgalbi_taste | FOOD | FOOD | taste_reaction | 볶음밥 | False |
@@ -28,7 +28,7 @@
 | 24 | service_04_pt_gym | SERVICE | SERVICE | service_reaction | 헬스장 | True |
 | 25 | service_05_car_detailing | SERVICE | SERVICE | service_reaction | 디테일링 | True |
 | 26 | service_06_pet_grooming | SERVICE | SERVICE | service_reaction | 미용실 | True |
-| 27 | service_07_dental_scaling | SERVICE | SERVICE | service_reaction | 스케일링 | True |
+| 27 | service_07_dental_scaling | SERVICE | PRODUCT | feature_reaction | 칫솔 | True |
 | 28 | service_08_massage_spa | SERVICE | SERVICE | service_reaction | 마사지 | True |
 | 29 | place_01_weekend_jeju_travel | PLACE | PLACE | place_observation | 코스 | True |
 | 30 | place_02_child_jeju_trip | PLACE | PLACE | place_observation | 제주 | False |
@@ -59,43 +59,43 @@
 - **Domain / Mode**: `FOOD` / `combination_curiosity`
 - **Primary / Secondary Anchor**: `블루치즈` / `화덕피자`
 - **Evidence**: 조합/특수재료 근거(블루치즈와 화덕피자)
-- **Instruction**: 블루치즈와 화덕피자 재료와 조합에 관찰자 입장에서 반응해. 먹어본 사람처럼 공감하지 말고 맛에 대한 궁금함이나 조합의 독특함을 표현해.
+- **Instruction**: 블루치즈와 화덕피자 조합에서 끌리는 부분에 짧고 솔직하게 반응해. 맛에 대한 궁금함이나 의외인 느낌을 편하게 표현해.
 
 ### [food_02_rich_taste_donkatsu] 성수동 일식 돈카츠 전문점
 - **Domain / Mode**: `FOOD` / `taste_reaction`
 - **Primary / Secondary Anchor**: `돈카츠` / `튀김`
 - **Evidence**: 본문 맛/식감 언급(돈카츠)
-- **Instruction**: 본문에 언급된 돈카츠의 맛이나 식감 디테일에 관찰자 입장에서 반응해. 본문에 없는 맛이나 식감은 지어내지 마.
+- **Instruction**: 본문의 돈카츠 맛이나 식감 중 끌리는 부분에 네 느낌을 짧게 붙여줘. 맛 설명을 다시 읊을 필요는 없어.
 
 ### [food_03_two_items_taste_priority] 마포 삼겹살 맛집 탐방
 - **Domain / Mode**: `FOOD` / `taste_reaction`
 - **Primary / Secondary Anchor**: `삼겹살` / `된장찌개`
 - **Evidence**: 본문 맛/식감 언급(삼겹살)
-- **Instruction**: 본문에 언급된 삼겹살의 맛이나 식감 디테일에 관찰자 입장에서 반응해. 본문에 없는 맛이나 식감은 지어내지 마.
+- **Instruction**: 본문의 삼겹살 맛이나 식감 중 끌리는 부분에 네 느낌을 짧게 붙여줘. 맛 설명을 다시 읊을 필요는 없어.
 
 ### [food_04_truffle_pasta_combo] 한남동 파스타 트러플 크림 파스타
 - **Domain / Mode**: `FOOD` / `combination_curiosity`
-- **Primary / Secondary Anchor**: `트러플` / `크림`
-- **Evidence**: 조합/특수재료 근거(트러플와 크림)
-- **Instruction**: 트러플와 크림 재료와 조합에 관찰자 입장에서 반응해. 먹어본 사람처럼 공감하지 말고 맛에 대한 궁금함이나 조합의 독특함을 표현해.
+- **Primary / Secondary Anchor**: `트러플` / `파스타`
+- **Evidence**: 조합/특수재료 근거(트러플와 파스타)
+- **Instruction**: 트러플와 파스타 조합에서 끌리는 부분에 짧고 솔직하게 반응해. 맛에 대한 궁금함이나 의외인 느낌을 편하게 표현해.
 
 ### [food_05_ramen_broth] 홍대 일본 라멘 돈코츠 라멘
 - **Domain / Mode**: `FOOD` / `taste_reaction`
-- **Primary / Secondary Anchor**: `돈코츠` / `라멘`
-- **Evidence**: 본문 맛/식감 언급(돈코츠)
-- **Instruction**: 본문에 언급된 돈코츠의 맛이나 식감 디테일에 관찰자 입장에서 반응해. 본문에 없는 맛이나 식감은 지어내지 마.
+- **Primary / Secondary Anchor**: `라멘` / ``
+- **Evidence**: 본문 맛/식감 언급(라멘)
+- **Instruction**: 본문의 라멘 맛이나 식감 중 끌리는 부분에 네 느낌을 짧게 붙여줘. 맛 설명을 다시 읊을 필요는 없어.
 
 ### [food_06_burger_visual] 이태원 수제버거 더블 패티 버거
 - **Domain / Mode**: `FOOD` / `visual_reaction`
-- **Primary / Secondary Anchor**: `패티` / `수제버거`
-- **Evidence**: 시각/구성 디테일(패티)
-- **Instruction**: 패티의 비주얼이나 푸짐한 구성에 가볍게 반응해. 직접 먹어본 척하지 마.
+- **Primary / Secondary Anchor**: `수제버거` / ``
+- **Evidence**: 시각/구성 디테일(수제버거)
+- **Instruction**: 수제버거의 비주얼이나 푸짐한 구성에 가볍게 반응해. 직접 먹어본 척하지 마.
 
 ### [food_07_salt_bread_texture] 성수동 베이커리 소금빵 카페
 - **Domain / Mode**: `FOOD` / `taste_reaction`
-- **Primary / Secondary Anchor**: `소금빵` / `베이커리`
+- **Primary / Secondary Anchor**: `소금빵` / ``
 - **Evidence**: 본문 맛/식감 언급(소금빵)
-- **Instruction**: 본문에 언급된 소금빵의 맛이나 식감 디테일에 관찰자 입장에서 반응해. 본문에 없는 맛이나 식감은 지어내지 마.
+- **Instruction**: 본문의 소금빵 맛이나 식감 중 끌리는 부분에 네 느낌을 짧게 붙여줘. 맛 설명을 다시 읊을 필요는 없어.
 
 ### [food_08_croffle_visual] 익선동 디저트 카페 아이스크림 크로플
 - **Domain / Mode**: `FOOD` / `visual_reaction`
@@ -105,213 +105,213 @@
 
 ### [food_09_tteokbokki_taste] 신당동 즉석 떡볶이 맛집
 - **Domain / Mode**: `FOOD` / `taste_reaction`
-- **Primary / Secondary Anchor**: `떡볶이` / `즉석`
+- **Primary / Secondary Anchor**: `떡볶이` / ``
 - **Evidence**: 본문 맛/식감 언급(떡볶이)
-- **Instruction**: 본문에 언급된 떡볶이의 맛이나 식감 디테일에 관찰자 입장에서 반응해. 본문에 없는 맛이나 식감은 지어내지 마.
+- **Instruction**: 본문의 떡볶이 맛이나 식감 중 끌리는 부분에 네 느낌을 짧게 붙여줘. 맛 설명을 다시 읊을 필요는 없어.
 
 ### [food_10_bagel_combo] 런던 베이글 뮤지엄 쪽파 크림치즈
 - **Domain / Mode**: `FOOD` / `combination_curiosity`
 - **Primary / Secondary Anchor**: `크림치즈` / `베이글`
 - **Evidence**: 조합/특수재료 근거(크림치즈와 베이글)
-- **Instruction**: 크림치즈와 베이글 재료와 조합에 관찰자 입장에서 반응해. 먹어본 사람처럼 공감하지 말고 맛에 대한 궁금함이나 조합의 독특함을 표현해.
+- **Instruction**: 크림치즈와 베이글 조합에서 끌리는 부분에 짧고 솔직하게 반응해. 맛에 대한 궁금함이나 의외인 느낌을 편하게 표현해.
 
 ### [food_11_espresso_crema] 약수동 에스프레소 바 커피 탐방
 - **Domain / Mode**: `FOOD` / `taste_reaction`
 - **Primary / Secondary Anchor**: `에스프레소` / `커피`
 - **Evidence**: 본문 맛/식감 언급(에스프레소)
-- **Instruction**: 본문에 언급된 에스프레소의 맛이나 식감 디테일에 관찰자 입장에서 반응해. 본문에 없는 맛이나 식감은 지어내지 마.
+- **Instruction**: 본문의 에스프레소 맛이나 식감 중 끌리는 부분에 네 느낌을 짧게 붙여줘. 맛 설명을 다시 읊을 필요는 없어.
 
 ### [food_12_mala_special] 건대 마라탕 특유의 얼얼한 맛
 - **Domain / Mode**: `FOOD` / `combination_curiosity`
-- **Primary / Secondary Anchor**: `마라` / `얼얼한`
-- **Evidence**: 조합/특수재료 근거(마라와 얼얼한)
-- **Instruction**: 마라와 얼얼한 재료와 조합에 관찰자 입장에서 반응해. 먹어본 사람처럼 공감하지 말고 맛에 대한 궁금함이나 조합의 독특함을 표현해.
+- **Primary / Secondary Anchor**: `마라` / ``
+- **Evidence**: 조합/특수재료 근거(마라)
+- **Instruction**: 마라 조합에서 끌리는 부분에 짧고 솔직하게 반응해. 맛에 대한 궁금함이나 의외인 느낌을 편하게 표현해.
 
 ### [food_13_eel_texture] 파주 장어구이 몸보신 식당
 - **Domain / Mode**: `FOOD` / `taste_reaction`
-- **Primary / Secondary Anchor**: `장어구이` / `몸보신`
+- **Primary / Secondary Anchor**: `장어구이` / `숯불`
 - **Evidence**: 본문 맛/식감 언급(장어구이)
-- **Instruction**: 본문에 언급된 장어구이의 맛이나 식감 디테일에 관찰자 입장에서 반응해. 본문에 없는 맛이나 식감은 지어내지 마.
+- **Instruction**: 본문의 장어구이 맛이나 식감 중 끌리는 부분에 네 느낌을 짧게 붙여줘. 맛 설명을 다시 읊을 필요는 없어.
 
 ### [food_14_tendon_visual] 샤로수길 텐동 바삭한 튀김덮밥
 - **Domain / Mode**: `FOOD` / `visual_reaction`
-- **Primary / Secondary Anchor**: `튀김덮밥` / `바삭한`
+- **Primary / Secondary Anchor**: `튀김덮밥` / `텐동`
 - **Evidence**: 시각/구성 디테일(튀김덮밥)
 - **Instruction**: 튀김덮밥의 비주얼이나 푸짐한 구성에 가볍게 반응해. 직접 먹어본 척하지 마.
 
 ### [food_15_sashimi_fresh] 노량진 수산시장 모듬회 포장
 - **Domain / Mode**: `FOOD` / `taste_reaction`
-- **Primary / Secondary Anchor**: `수산시장` / `연어회`
-- **Evidence**: 본문 맛/식감 언급(수산시장)
-- **Instruction**: 본문에 언급된 수산시장의 맛이나 식감 디테일에 관찰자 입장에서 반응해. 본문에 없는 맛이나 식감은 지어내지 마.
+- **Primary / Secondary Anchor**: `연어회` / `모듬회`
+- **Evidence**: 본문 맛/식감 언급(연어회)
+- **Instruction**: 본문의 연어회 맛이나 식감 중 끌리는 부분에 네 느낌을 짧게 붙여줘. 맛 설명을 다시 읊을 필요는 없어.
 
 ### [food_16_pancake_fluffy] 가로수길 수플레 팬케이크 브런치
 - **Domain / Mode**: `FOOD` / `taste_reaction`
 - **Primary / Secondary Anchor**: `팬케이크` / `수플레`
 - **Evidence**: 본문 맛/식감 언급(팬케이크)
-- **Instruction**: 본문에 언급된 팬케이크의 맛이나 식감 디테일에 관찰자 입장에서 반응해. 본문에 없는 맛이나 식감은 지어내지 마.
+- **Instruction**: 본문의 팬케이크 맛이나 식감 중 끌리는 부분에 네 느낌을 짧게 붙여줘. 맛 설명을 다시 읊을 필요는 없어.
 
 ### [food_17_pho_broth] 을지로 베트남 쌀국수 맛집
 - **Domain / Mode**: `FOOD` / `taste_reaction`
-- **Primary / Secondary Anchor**: `쌀국수` / `베트남`
+- **Primary / Secondary Anchor**: `쌀국수` / ``
 - **Evidence**: 본문 맛/식감 언급(쌀국수)
-- **Instruction**: 본문에 언급된 쌀국수의 맛이나 식감 디테일에 관찰자 입장에서 반응해. 본문에 없는 맛이나 식감은 지어내지 마.
+- **Instruction**: 본문의 쌀국수 맛이나 식감 중 끌리는 부분에 네 느낌을 짧게 붙여줘. 맛 설명을 다시 읊을 필요는 없어.
 
 ### [food_18_dakgalbi_taste] 춘천 철판 닭갈비 볶음밥
 - **Domain / Mode**: `FOOD` / `taste_reaction`
 - **Primary / Secondary Anchor**: `볶음밥` / `닭갈비`
 - **Evidence**: 본문 맛/식감 언급(볶음밥)
-- **Instruction**: 본문에 언급된 볶음밥의 맛이나 식감 디테일에 관찰자 입장에서 반응해. 본문에 없는 맛이나 식감은 지어내지 마.
+- **Instruction**: 본문의 볶음밥 맛이나 식감 중 끌리는 부분에 네 느낌을 짧게 붙여줘. 맛 설명을 다시 읊을 필요는 없어.
 
 ### [food_19_macaron_texture] 망원동 수제 마카롱 선물 세트
 - **Domain / Mode**: `FOOD` / `taste_reaction`
-- **Primary / Secondary Anchor**: `마카롱` / `수제`
+- **Primary / Secondary Anchor**: `마카롱` / ``
 - **Evidence**: 본문 맛/식감 언급(마카롱)
-- **Instruction**: 본문에 언급된 마카롱의 맛이나 식감 디테일에 관찰자 입장에서 반응해. 본문에 없는 맛이나 식감은 지어내지 마.
+- **Instruction**: 본문의 마카롱 맛이나 식감 중 끌리는 부분에 네 느낌을 짧게 붙여줘. 맛 설명을 다시 읊을 필요는 없어.
 
 ### [food_20_hotpot_nurungji] 안국동 솥밥 정식과 누룽지
 - **Domain / Mode**: `FOOD` / `taste_reaction`
 - **Primary / Secondary Anchor**: `누룽지` / `솥밥`
 - **Evidence**: 본문 맛/식감 언급(누룽지)
-- **Instruction**: 본문에 언급된 누룽지의 맛이나 식감 디테일에 관찰자 입장에서 반응해. 본문에 없는 맛이나 식감은 지어내지 마.
+- **Instruction**: 본문의 누룽지 맛이나 식감 중 끌리는 부분에 네 느낌을 짧게 붙여줘. 맛 설명을 다시 읊을 필요는 없어.
 
 ### [service_01_hair_cut] 청담동 미용실 레이어드컷 변신 후기
 - **Domain / Mode**: `SERVICE` / `service_reaction`
 - **Primary / Secondary Anchor**: `레이어드컷` / `손질`
 - **Evidence**: 서비스 신호(레이어드컷)
-- **Instruction**: 레이어드컷 서비스의 구성이나 진행 방식 디테일에 관찰자 입장에서 반응해.
+- **Instruction**: 레이어드컷 서비스의 구성이나 진행 방식 중 눈에 들어온 부분에 솔직한 느낌을 붙여줘.
 
 ### [service_02_nail_art] 강남 네일샵 봄맞이 그라데이션 네일
 - **Domain / Mode**: `SERVICE` / `service_reaction`
 - **Primary / Secondary Anchor**: `그라데이션` / `케어`
 - **Evidence**: 서비스 신호(그라데이션)
-- **Instruction**: 그라데이션 서비스의 구성이나 진행 방식 디테일에 관찰자 입장에서 반응해.
+- **Instruction**: 그라데이션 서비스의 구성이나 진행 방식 중 눈에 들어온 부분에 솔직한 느낌을 붙여줘.
 
 ### [service_03_skin_care] 분당 피부관리 에스테틱 수분 진정 케어
 - **Domain / Mode**: `SERVICE` / `service_reaction`
 - **Primary / Secondary Anchor**: `마스크팩` / `수분 진정`
 - **Evidence**: 서비스 신호(마스크팩)
-- **Instruction**: 마스크팩 서비스의 구성이나 진행 방식 디테일에 관찰자 입장에서 반응해.
+- **Instruction**: 마스크팩 서비스의 구성이나 진행 방식 중 눈에 들어온 부분에 솔직한 느낌을 붙여줘.
 
 ### [service_04_pt_gym] 역삼 헬스장 1:1 PT 체형 교정 운동
 - **Domain / Mode**: `SERVICE` / `service_reaction`
 - **Primary / Secondary Anchor**: `헬스장` / ``
 - **Evidence**: 서비스 신호(헬스장)
-- **Instruction**: 헬스장 서비스의 구성이나 진행 방식 디테일에 관찰자 입장에서 반응해.
+- **Instruction**: 헬스장 서비스의 구성이나 진행 방식 중 눈에 들어온 부분에 솔직한 느낌을 붙여줘.
 
 ### [service_05_car_detailing] 일산 프리미엄 손세차 광택 디테일링
 - **Domain / Mode**: `SERVICE` / `service_reaction`
 - **Primary / Secondary Anchor**: `디테일링` / `세차`
 - **Evidence**: 서비스 신호(디테일링)
-- **Instruction**: 디테일링 서비스의 구성이나 진행 방식 디테일에 관찰자 입장에서 반응해.
+- **Instruction**: 디테일링 서비스의 구성이나 진행 방식 중 눈에 들어온 부분에 솔직한 느낌을 붙여줘.
 
 ### [service_06_pet_grooming] 송파 애견 미용실 강아지 스파와 가위컷
 - **Domain / Mode**: `SERVICE` / `service_reaction`
 - **Primary / Secondary Anchor**: `미용실` / ``
 - **Evidence**: 서비스 신호(미용실)
-- **Instruction**: 미용실 서비스의 구성이나 진행 방식 디테일에 관찰자 입장에서 반응해.
+- **Instruction**: 미용실 서비스의 구성이나 진행 방식 중 눈에 들어온 부분에 솔직한 느낌을 붙여줘.
 
 ### [service_07_dental_scaling] 여의도 치과 정기 검진 스케일링 후기
-- **Domain / Mode**: `SERVICE` / `service_reaction`
-- **Primary / Secondary Anchor**: `스케일링` / ``
-- **Evidence**: 서비스 신호(스케일링)
-- **Instruction**: 스케일링 서비스의 구성이나 진행 방식 디테일에 관찰자 입장에서 반응해.
+- **Domain / Mode**: `PRODUCT` / `feature_reaction`
+- **Primary / Secondary Anchor**: `칫솔` / `가글`
+- **Evidence**: 제품 신호(칫솔)
+- **Instruction**: 제품의 칫솔 기능이나 디자인 중 관심 가는 부분에 짧고 편하게 반응해. 직접 써본 척하지 마.
 
 ### [service_08_massage_spa] 잠실 아로마 전신 마사지 힐링 테라피
 - **Domain / Mode**: `SERVICE` / `service_reaction`
 - **Primary / Secondary Anchor**: `마사지` / `아로마`
 - **Evidence**: 서비스 신호(마사지)
-- **Instruction**: 마사지 서비스의 구성이나 진행 방식 디테일에 관찰자 입장에서 반응해.
+- **Instruction**: 마사지 서비스의 구성이나 진행 방식 중 눈에 들어온 부분에 솔직한 느낌을 붙여줘.
 
 ### [place_01_weekend_jeju_travel] 주말 제주 여행 코스 정리
 - **Domain / Mode**: `PLACE` / `place_observation`
 - **Primary / Secondary Anchor**: `코스` / `제주`
 - **Evidence**: 장소/여행 신호(코스)
-- **Instruction**: 코스 관련 풍경이나 코스, 공간 디테일에 관찰자 입장에서 반응해. 직접 가본 척하지 마.
+- **Instruction**: 코스 관련 풍경이나 코스, 공간 중 눈에 들어온 부분에 솔직한 느낌을 붙여줘. 직접 가본 척하지 마.
 
 ### [place_02_child_jeju_trip] 아이와 다녀온 제주 여행 후기
 - **Domain / Mode**: `PLACE` / `place_observation`
 - **Primary / Secondary Anchor**: `제주` / `산책로`
 - **Evidence**: 장소/여행 신호(제주)
-- **Instruction**: 제주 관련 풍경이나 코스, 공간 디테일에 관찰자 입장에서 반응해. 직접 가본 척하지 마.
+- **Instruction**: 제주 관련 풍경이나 코스, 공간 중 눈에 들어온 부분에 솔직한 느낌을 붙여줘. 직접 가본 척하지 마.
 
 ### [place_03_hotel_stay_trip] 강릉 호텔 1박 2일 여행 후기
 - **Domain / Mode**: `PLACE` / `place_observation`
 - **Primary / Secondary Anchor**: `강릉` / `1박`
 - **Evidence**: 장소/여행 신호(강릉)
-- **Instruction**: 강릉 관련 풍경이나 코스, 공간 디테일에 관찰자 입장에서 반응해. 직접 가본 척하지 마.
+- **Instruction**: 강릉 관련 풍경이나 코스, 공간 중 눈에 들어온 부분에 솔직한 느낌을 붙여줘. 직접 가본 척하지 마.
 
 ### [place_04_gyeongju_cherry_blossom] 경주 보문단지 벚꽃 산책길 여행
 - **Domain / Mode**: `PLACE` / `place_observation`
 - **Primary / Secondary Anchor**: `둘레길` / `산책길`
 - **Evidence**: 장소/여행 신호(둘레길)
-- **Instruction**: 둘레길 관련 풍경이나 코스, 공간 디테일에 관찰자 입장에서 반응해. 직접 가본 척하지 마.
+- **Instruction**: 둘레길 관련 풍경이나 코스, 공간 중 눈에 들어온 부분에 솔직한 느낌을 붙여줘. 직접 가본 척하지 마.
 
 ### [place_05_busan_night_view] 부산 광안리 해수욕장 야경 코스
 - **Domain / Mode**: `PLACE` / `place_observation`
 - **Primary / Secondary Anchor**: `바다` / `해변`
 - **Evidence**: 장소/여행 신호(바다)
-- **Instruction**: 바다 관련 풍경이나 코스, 공간 디테일에 관찰자 입장에서 반응해. 직접 가본 척하지 마.
+- **Instruction**: 바다 관련 풍경이나 코스, 공간 중 눈에 들어온 부분에 솔직한 느낌을 붙여줘. 직접 가본 척하지 마.
 
 ### [place_06_danyang_paragliding] 단양 패러글라이딩 활공장 전망대
 - **Domain / Mode**: `PLACE` / `place_observation`
 - **Primary / Secondary Anchor**: `전망대` / ``
 - **Evidence**: 장소/여행 신호(전망대)
-- **Instruction**: 전망대 관련 풍경이나 코스, 공간 디테일에 관찰자 입장에서 반응해. 직접 가본 척하지 마.
+- **Instruction**: 전망대 관련 풍경이나 코스, 공간 중 눈에 들어온 부분에 솔직한 느낌을 붙여줘. 직접 가본 척하지 마.
 
 ### [place_07_yeosu_cable_car] 여수 밤바다 해상케이블카 관람
 - **Domain / Mode**: `PLACE` / `place_observation`
 - **Primary / Secondary Anchor**: `바다` / `풍경`
 - **Evidence**: 장소/여행 신호(바다)
-- **Instruction**: 바다 관련 풍경이나 코스, 공간 디테일에 관찰자 입장에서 반응해. 직접 가본 척하지 마.
+- **Instruction**: 바다 관련 풍경이나 코스, 공간 중 눈에 들어온 부분에 솔직한 느낌을 붙여줘. 직접 가본 척하지 마.
 
 ### [place_08_gapyeong_arboretum] 가평 아침고요수목원 산책로 코스
 - **Domain / Mode**: `PLACE` / `place_observation`
 - **Primary / Secondary Anchor**: `산책로` / `숲길`
 - **Evidence**: 장소/여행 신호(산책로)
-- **Instruction**: 산책로 관련 풍경이나 코스, 공간 디테일에 관찰자 입장에서 반응해. 직접 가본 척하지 마.
+- **Instruction**: 산책로 관련 풍경이나 코스, 공간 중 눈에 들어온 부분에 솔직한 느낌을 붙여줘. 직접 가본 척하지 마.
 
 ### [prod_01_cordless_vacuum] 무선청소기 흡입력 실사용 솔직 리뷰
 - **Domain / Mode**: `PRODUCT` / `feature_reaction`
 - **Primary / Secondary Anchor**: `청소기` / ``
 - **Evidence**: 제품 신호(청소기)
-- **Instruction**: 제품의 청소기 기능이나 디자인, 사용 디테일에 관찰자 입장에서 가볍게 반응해. 직접 써본 척하지 마.
+- **Instruction**: 제품의 청소기 기능이나 디자인 중 관심 가는 부분에 짧고 편하게 반응해. 직접 써본 척하지 마.
 
 ### [prod_02_bluetooth_headphone] 노이즈캔슬링 블루투스 헤드폰 개봉기
 - **Domain / Mode**: `PRODUCT` / `feature_reaction`
 - **Primary / Secondary Anchor**: `헤드폰` / ``
 - **Evidence**: 제품 신호(헤드폰)
-- **Instruction**: 제품의 헤드폰 기능이나 디자인, 사용 디테일에 관찰자 입장에서 가볍게 반응해. 직접 써본 척하지 마.
+- **Instruction**: 제품의 헤드폰 기능이나 디자인 중 관심 가는 부분에 짧고 편하게 반응해. 직접 써본 척하지 마.
 
 ### [prod_03_mechanical_keyboard] 기계식 키보드 저소음 적축 타건감
 - **Domain / Mode**: `PRODUCT` / `feature_reaction`
 - **Primary / Secondary Anchor**: `키보드` / ``
 - **Evidence**: 제품 신호(키보드)
-- **Instruction**: 제품의 키보드 기능이나 디자인, 사용 디테일에 관찰자 입장에서 가볍게 반응해. 직접 써본 척하지 마.
+- **Instruction**: 제품의 키보드 기능이나 디자인 중 관심 가는 부분에 짧고 편하게 반응해. 직접 써본 척하지 마.
 
 ### [prod_04_air_purifier] 원룸 공기청정기 저소음 모드 리뷰
 - **Domain / Mode**: `PRODUCT` / `feature_reaction`
 - **Primary / Secondary Anchor**: `공기청정기` / ``
 - **Evidence**: 제품 신호(공기청정기)
-- **Instruction**: 제품의 공기청정기 기능이나 디자인, 사용 디테일에 관찰자 입장에서 가볍게 반응해. 직접 써본 척하지 마.
+- **Instruction**: 제품의 공기청정기 기능이나 디자인 중 관심 가는 부분에 짧고 편하게 반응해. 직접 써본 척하지 마.
 
 ### [prod_05_smartwatch_battery] 스마트워치 배터리 사용 시간 사용기
 - **Domain / Mode**: `PRODUCT` / `feature_reaction`
 - **Primary / Secondary Anchor**: `배터리` / `사용기`
 - **Evidence**: 제품 신호(배터리)
-- **Instruction**: 제품의 배터리 기능이나 디자인, 사용 디테일에 관찰자 입장에서 가볍게 반응해. 직접 써본 척하지 마.
+- **Instruction**: 제품의 배터리 기능이나 디자인 중 관심 가는 부분에 짧고 편하게 반응해. 직접 써본 척하지 마.
 
 ### [prod_06_power_bank] 초고속 충전 대용량 보조배터리
 - **Domain / Mode**: `PRODUCT` / `feature_reaction`
 - **Primary / Secondary Anchor**: `노트북` / ``
 - **Evidence**: 제품 신호(노트북)
-- **Instruction**: 제품의 노트북 기능이나 디자인, 사용 디테일에 관찰자 입장에서 가볍게 반응해. 직접 써본 척하지 마.
+- **Instruction**: 제품의 노트북 기능이나 디자인 중 관심 가는 부분에 짧고 편하게 반응해. 직접 써본 척하지 마.
 
 ### [prod_07_camping_chair] 경량 캠핑의자 접이식 릴렉스 체어
 - **Domain / Mode**: `PRODUCT` / `feature_reaction`
 - **Primary / Secondary Anchor**: `의자` / ``
 - **Evidence**: 제품 신호(의자)
-- **Instruction**: 제품의 의자 기능이나 디자인, 사용 디테일에 관찰자 입장에서 가볍게 반응해. 직접 써본 척하지 마.
+- **Instruction**: 제품의 의자 기능이나 디자인 중 관심 가는 부분에 짧고 편하게 반응해. 직접 써본 척하지 마.
 
 ### [pers_01_exam_pass] 기사 자격증 최종 합격 후기
 - **Domain / Mode**: `PERSONAL` / `writer_feeling`

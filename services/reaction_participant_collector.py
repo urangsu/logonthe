@@ -46,7 +46,7 @@ class ReactionParticipantCollector:
                     const countEl = document.querySelector(".count, .num, em.point, strong.point, .u_likeit_list_count");
                     let displayedCount = null;
                     if (countEl) {
-                        const m = countEl.innerText.match(/\\d+/);
+                        const m = countEl.innerText.replace(/,/g, '').match(/\\d+/);
                         if (m) displayedCount = parseInt(m[0], 10);
                     }
 
@@ -58,16 +58,13 @@ class ReactionParticipantCollector:
                         const href = a.href || "";
                         let targetId = null;
 
-                        if (href.includes("blogId=")) {
-                            const m = href.match(/blogId=([a-zA-Z0-9_-]+)/);
-                            if (m) targetId = m[1];
-                        } else if (href.includes("m.blog.naver.com/")) {
-                            const part = href.split("m.blog.naver.com/")[1];
-                            targetId = part.split("?")[0].split("/")[0];
-                        } else if (href.includes("blog.naver.com/")) {
-                            const part = href.split("blog.naver.com/")[1];
-                            targetId = part.split("?")[0].split("/")[0];
-                        }
+                        try {
+                            const u = new URL(href, location.href);
+                            if (['http:', 'https:'].includes(u.protocol) && ['blog.naver.com', 'm.blog.naver.com'].includes(u.hostname)) {
+                                const candidate = u.searchParams.get('blogId') || (u.pathname === '/GoBlog.naver' ? u.searchParams.get('userId') : u.pathname.split('/').filter(Boolean)[0]);
+                                if (/^[a-zA-Z0-9_-]{1,50}$/.test(candidate || '')) targetId = candidate.toLowerCase();
+                            }
+                        } catch (_) {}
 
                         if (targetId && !seen.has(targetId) && !targetId.includes("Post") && !targetId.includes("Sympathy") && !targetId.includes("Buddy")) {
                             seen.add(targetId);
@@ -90,7 +87,7 @@ class ReactionParticipantCollector:
             displayed_cnt = res_data.get("displayedCount")
 
             state: Literal["complete", "partial", "failed"] = "complete"
-            if displayed_cnt is not None and len(likers_data) < displayed_cnt:
+            if displayed_cnt is None or len(likers_data) < displayed_cnt or (stop_event and stop_event.is_set()):
                 state = "partial"
 
             return likers_data, state, displayed_cnt

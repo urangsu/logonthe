@@ -42,6 +42,8 @@ class TestProcessorHistoryPipeline(unittest.TestCase):
         ]
 
         config = {
+            "like_popularity_guard_enabled": False,
+            "daily_visitor_guard_enabled": False,
             "comment_style_preset": "thoughtful",
             "gemini_web_enabled": False,  # skip network, test prompt & context building
             "ai_clipboard_enabled": True,

@@ -113,6 +113,10 @@ class DraftService:
         if not raw_text or not raw_text.strip():
             return None
 
+        from services.comments.community_rhythm import ResponseContaminationGate
+        if ResponseContaminationGate.validate(raw_text).code == "response_meta_contamination":
+            return None
+
         text = raw_text.strip()
 
         # 1. Request ID 마커 우선 추출 및 불일치 거부

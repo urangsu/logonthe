@@ -1,0 +1,4 @@
+interface:
+  display_name: "네이버 댓글 파이프라인 검토"
+  short_description: "등록 이력과 입력·출력 경계를 근거 중심으로 검토합니다"
+  default_prompt: "$naver-runtime-review로 이번 변경 또는 등록 댓글을 검토하고 확정·미검증·기각과 남은 검증을 구분해 주세요."

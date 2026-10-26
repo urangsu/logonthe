@@ -309,10 +309,10 @@ class LikeTransactionService:
             except Exception:
                 max_scroll = 0
 
-        # 본문이 충분히 길고(max_scroll >= 400) 남은 시간이 2.5초 이상일 때만 2~4회 스크롤
+        # 짧은 본문은 생략하고 기존 대기시간 안에서 무작위 횟수만큼 스크롤한다.
         cur_rem = target_deadline - time.monotonic()
         if max_scroll >= 400 and cur_rem >= 2.5:
-            num_scrolls = min(4, max(2, int(cur_rem // 1.5)))
+            num_scrolls = random.randint(3, 15)
         else:
             num_scrolls = 0
 

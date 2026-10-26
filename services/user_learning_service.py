@@ -131,6 +131,9 @@ class UserLearningService:
         if not text or not isinstance(text, str):
             return False
         s = text.strip()
+        from services.comments.community_rhythm import ResponseContaminationGate
+        if ResponseContaminationGate.validate(s).is_contaminated:
+            return False
         if len(s) < 8 or len(s) > 100:
             return False
         s_lower = s.lower()

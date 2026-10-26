@@ -1,6 +1,6 @@
 """
 Gemini Concurrency Pipeline Tests
-Validates the speculative early Gemini generation lifecycle, order of operations,
+Validates eligibility-first Gemini generation, order of operations,
 await_ready call counts, and zero-orphan RID invariants with real GeminiExtensionBridge.
 """
 import time
@@ -45,6 +45,8 @@ class TestGeminiConcurrencyPipeline(unittest.TestCase):
             "comment_style_preset": "community",
             "comment_template": "좋은 글 잘 보았습니다.",
             "skip_on_comment_failure": True,
+            "like_popularity_guard_enabled": False,
+            "daily_visitor_guard_enabled": False,
         }
         self.post = FeedPost(
             key="concurrency:post_001",
@@ -54,6 +56,72 @@ class TestGeminiConcurrencyPipeline(unittest.TestCase):
             excerpt="서귀포에 위치한 신선한 해물 파스타 전문점 리뷰입니다.",
         )
         self.mock_page = MagicMock()
+
+    def test_excluded_neighbor_never_generates_even_with_likes_disabled(self):
+        for likes_enabled in (True, False):
+            for status in (LikeEligibility.SKIP_LIKE_COUNT, LikeEligibility.SKIP_DAILY_VISITORS,
+                           LikeEligibility.UNKNOWN_DAILY_VISITORS):
+                with self.subTest(likes_enabled=likes_enabled, status=status), \
+                        patch("app.processor.TargetPostGuard.verify"), \
+                        patch("app.processor.LikeEligibilityService.evaluate", return_value=LikeEligibilityResult(
+                            eligible=False, status=status, reason=status.value)), \
+                        patch("app.processor.LikeTransactionService.execute_like_transaction") as like, \
+                        patch("app.processor.CommentInteractionService.open_comment_layer") as open_comment:
+                    bridge = MagicMock()
+                    processor = PostProcessor(self.config, like_enabled=likes_enabled,
+                        comment_enabled=True, gemini_web_enabled=True, gemini_extension_bridge=bridge)
+                    with patch.object(processor, "_prepare_comment_generation_context") as prompt:
+                        result = processor.process(self.mock_page, self.post)
+                    self.assertEqual(result.comment_result.error, f"post_guard:{status.value}")
+                    bridge.publish.assert_not_called()
+                    prompt.assert_not_called()
+                    like.assert_not_called()
+                    open_comment.assert_not_called()
+
+    def test_duplicate_or_closed_comments_never_publish(self):
+        for presence_state, open_ok in ((CommentPresenceState.PRESENT, True),
+                                        (CommentPresenceState.UNKNOWN, True),
+                                        (CommentPresenceState.ABSENT, False)):
+            with self.subTest(presence=presence_state, open_ok=open_ok), \
+                    patch("app.processor.TargetPostGuard.verify"), \
+                    patch("app.processor.LikeTransactionService.resolve_like_state", return_value=LikeStateResult(
+                        state=LikeState.LIKED, confidence=LikeConfidence.HIGH)), \
+                    patch("app.processor.CommentInteractionService.open_comment_layer", return_value=(open_ok, "comment_disabled")), \
+                    patch("app.processor.ServerCommentDuplicateGuard.scan_page_for_my_comment", return_value=CommentPresenceResult(
+                        state=presence_state, confidence="high")):
+                bridge = MagicMock()
+                processor = PostProcessor(self.config, like_enabled=True, comment_enabled=True,
+                    gemini_web_enabled=True, gemini_extension_bridge=bridge)
+                with patch.object(processor, "_prepare_comment_generation_context") as prompt:
+                    processor.process(self.mock_page, self.post)
+                bridge.publish.assert_not_called()
+                prompt.assert_not_called()
+
+    def test_meta_followup_never_reaches_comment_editor(self):
+        bridge = MagicMock()
+        bridge.await_ready.return_value = MagicMock(ready=True)
+        bridge.wait_for_result.side_effect = lambda cmd, **kwargs: GeminiResult(
+            request_id=cmd.request_id, post_key=cmd.post_key,
+            navigation_version=cmd.navigation_version, status=GeminiResultStatus.COMPLETED,
+            text="에스카르고 식감이 골뱅이랑 비슷하다니 저두 한번 도전해보고 싶네요 ㅎㅎ\n이 느낌이 괜찮으신가요, 아니면 와인이나 디저트(크림 브륄레) 쪽으로 포인트를 바꿔볼까요?",
+        )
+        with patch("app.processor.TargetPostGuard.verify"), \
+                patch("app.processor.CommentInteractionService.open_comment_layer", return_value=(True, "ok")), \
+                patch("app.processor.ServerCommentDuplicateGuard.scan_page_for_my_comment", return_value=CommentPresenceResult(
+                    state=CommentPresenceState.ABSENT, confidence="high")), \
+                patch("app.processor.ContentContextExtractor.extract", return_value=MagicMock(
+                    title="짜장과 군만두", excerpt="짜장 소스가 넉넉하고 군만두는 바삭하게 나왔어요. 군만두를 짜장 소스에 찍어 먹는 조합이 좋았어요.")), \
+                patch("app.processor.CommentEditorAdapter.set_text") as write, \
+                patch("app.processor.CommentInteractionService.submit_and_verify") as submit:
+            processor = PostProcessor(self.config, like_enabled=False, comment_enabled=True,
+                gemini_web_enabled=True, gemini_extension_bridge=bridge)
+            result = processor.process(self.mock_page, self.post)
+        self.assertEqual(result.comment_result.status, CommentSubmitState.SKIPPED)
+        self.assertEqual(result.comment_result.error, "response_meta_contamination")
+        self.assertEqual(bridge.publish.call_count, 2)
+        self.assertIn("만족 여부", bridge.publish.call_args_list[1].args[0].prompt)
+        write.assert_not_called()
+        submit.assert_not_called()
 
     @patch("app.processor.TargetPostGuard.verify")
     @patch("app.processor.ContentContextExtractor.extract")
@@ -82,7 +150,7 @@ class TestGeminiConcurrencyPipeline(unittest.TestCase):
     ):
         """
         Verify exact execution order:
-        publish < pre_like < resolve_like_state < like_transaction < post_like < comment_open < duplicate_scan < wait_for_result
+        resolve_like_state < like_transaction < post_like < comment_open < duplicate_scan < publish < wait_for_result
         and bridge.await_ready.call_count == 1 (no second preflight in comment phase).
         """
         execution_order = []
@@ -99,6 +167,9 @@ class TestGeminiConcurrencyPipeline(unittest.TestCase):
         mock_elig.return_value = LikeEligibilityResult(
             eligible=True, status=LikeEligibility.ELIGIBLE, reason="ok", like_count=10, daily_visitors=100
         )
+        mock_elig.side_effect = lambda **kwargs: (
+            execution_order.append("eligibility"), mock_elig.return_value
+        )[1]
         mock_tx.side_effect = lambda page, stop_event=None, post=None, *args, **kwargs: (
             execution_order.append("like_transaction"),
             LikeProcessResult(state_before=LikeState.NOT_LIKED, action_taken=True, state_after=LikeState.LIKED)
@@ -162,15 +233,17 @@ class TestGeminiConcurrencyPipeline(unittest.TestCase):
 
         # 1. Verify exact chronological milestone sequence
         expected_order = [
-            "publish",
+            "eligibility",
             "resolve_like_state",
             "like_transaction",
             "post_like",
             "comment_open",
             "duplicate_scan",
+            "publish",
             "wait_for_result",
         ]
         self.assertEqual(execution_order, expected_order)
+        mock_elig.assert_called_once()
 
         # 2. Verify readiness check count: strictly 1 call (initial pre-publish only)
         self.assertEqual(mock_bridge.await_ready.call_count, 1)
@@ -252,8 +325,7 @@ class TestGeminiConcurrencyPipeline(unittest.TestCase):
     ):
         """
         Using real GeminiExtensionBridge:
-        When stop requested during pre-like pacing, the early command is cleanly cancelled,
-        bridge._command is None, bridge._active_request_id is None, and RID is in _cancel_requests.
+        A stop before like completion never publishes a generation command.
         """
         mock_extract.return_value = MagicMock(
             title="테스트 맛집 탐방",
@@ -291,8 +363,8 @@ class TestGeminiConcurrencyPipeline(unittest.TestCase):
         with bridge._condition:
             self.assertIsNone(bridge._command)
             self.assertIsNone(bridge._active_request_id)
-            self.assertEqual(bridge._command_state, "cancelled")
-            self.assertGreaterEqual(len(bridge._cancel_requests), 1)
+            self.assertEqual(bridge._command_state, "idle")
+            self.assertEqual(len(bridge._cancel_requests), 0)
 
     @patch("app.processor.TargetPostGuard.verify")
     @patch("app.processor.ContentContextExtractor.extract")
@@ -304,8 +376,7 @@ class TestGeminiConcurrencyPipeline(unittest.TestCase):
     ):
         """
         Using real GeminiExtensionBridge:
-        When skip requested during pre-like pacing, the early command is cleanly cancelled,
-        bridge._command is None, bridge._active_request_id is None, and RID is in _cancel_requests.
+        A skip before like completion never publishes a generation command.
         """
         mock_extract.return_value = MagicMock(
             title="테스트 맛집 탐방",
@@ -342,8 +413,8 @@ class TestGeminiConcurrencyPipeline(unittest.TestCase):
         with bridge._condition:
             self.assertIsNone(bridge._command)
             self.assertIsNone(bridge._active_request_id)
-            self.assertEqual(bridge._command_state, "cancelled")
-            self.assertGreaterEqual(len(bridge._cancel_requests), 1)
+            self.assertEqual(bridge._command_state, "idle")
+            self.assertEqual(len(bridge._cancel_requests), 0)
 
     @patch("app.processor.TargetPostGuard.verify")
     @patch("app.processor.ContentContextExtractor.extract")
@@ -353,8 +424,7 @@ class TestGeminiConcurrencyPipeline(unittest.TestCase):
     ):
         """
         Using real GeminiExtensionBridge:
-        When an unexpected exception occurs in like processing,
-        finally block cleanly cancels the early command with zero leaks.
+        An exception in like processing leaves the generation bridge idle.
         """
         mock_extract.return_value = MagicMock(
             title="테스트 맛집 탐방",
@@ -382,12 +452,12 @@ class TestGeminiConcurrencyPipeline(unittest.TestCase):
         with self.assertRaises(RuntimeError):
             processor.process(self.mock_page, self.post)
 
-        # Invariant check: finally block cleanly cancelled command
+        # No generation command existed before the like failure.
         with bridge._condition:
             self.assertIsNone(bridge._command)
             self.assertIsNone(bridge._active_request_id)
-            self.assertEqual(bridge._command_state, "cancelled")
-            self.assertGreaterEqual(len(bridge._cancel_requests), 1)
+            self.assertEqual(bridge._command_state, "idle")
+            self.assertEqual(len(bridge._cancel_requests), 0)
 
     @patch("app.processor.TargetPostGuard.verify")
     @patch("app.processor.ContentContextExtractor.extract")

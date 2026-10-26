@@ -10,7 +10,7 @@ from playwright.sync_api import Page
 from app.models import (
     FeedPost, PostProcessResult, LikeProcessResult, CommentProcessResult,
     UserAction, CommentSubmitState, LikeState, FailureReason, FeedSourceType, PostActionPlan,
-    WorkerCommandType, SubmitOrigin, CommentSubmitOutcome
+    WorkerCommandType, SubmitOrigin, CommentSubmitOutcome, PostEligibilityResult
 )
 from app.state import StateManager, FeedState
 from app.errors import (
@@ -528,6 +528,11 @@ class PostProcessor:
             hist_submits = self.history_store.get_recent_submitted_comments(limit=5)
             if hist_submits:
                 recent_submits = hist_submits
+        from services.comments.community_rhythm import ResponseContaminationGate
+        if not getattr(self, "_meta_guard_logged", False):
+            logger.log(f"[COMMENT][META_GUARD_READY] version={ResponseContaminationGate.VERSION}")
+            self._meta_guard_logged = True
+        recent_submits = [text for text in recent_submits if ResponseContaminationGate.validate(text).ok]
 
         from services.user_learning_service import UserLearningService
         corpus_examples, corpus_stats, style_profile = UserLearningService.get_learning_context(
@@ -844,13 +849,37 @@ class PostProcessor:
             if self.state_mgr:
                 self.state_mgr.update(inc_guard_allowed=True)
 
-        # [사전 전송 준비] 좋아요 누르기 전에 댓글 생성부터 제미나이에 사전 전송하여 지체 시간 최소화
-        early_gemini_command: Optional[GeminiCommand] = None
+        elif not is_sweep_mode and (effective_comment or effective_like):
+            self.current_stage = "post_eligibility"
+            eligibility = LikeEligibilityService.evaluate(
+                detail_page=detail_page, stats_page=self.stats_page, post=post,
+                config=self.config, stop_event=self.stop_event,
+            )
+            result.eligibility = PostEligibilityResult(
+                allowed=eligibility.eligible, reason=eligibility.status.value,
+                metrics={"likes": {"value": eligibility.like_count},
+                         "visitors": {"value": eligibility.daily_visitors}},
+            )
+            if not eligibility.eligible:
+                result.like_result.eligibility_reason = eligibility.reason
+                result.comment_result = CommentProcessResult(
+                    status=CommentSubmitState.SKIPPED,
+                    error=f"post_guard:{eligibility.status.value}",
+                )
+                logger.log(f"[POST_ELIGIBILITY] post={post.key} allowed=False reason={eligibility.status.value}")
+                if self.state_mgr:
+                    self.state_mgr.update(inc_guard_excluded=True)
+                return result
+            if self.state_mgr:
+                self.state_mgr.update(inc_guard_allowed=True)
 
-        def _cancel_early_command(reason: str) -> bool:
-            nonlocal early_gemini_command
+        # 생성 명령은 모든 제외/중복 검사를 통과한 뒤 발행하고 범위 종료 시 정리한다.
+        active_gemini_command: Optional[GeminiCommand] = None
 
-            cmd = early_gemini_command
+        def _cancel_active_command(reason: str) -> bool:
+            nonlocal active_gemini_command
+
+            cmd = active_gemini_command
             if cmd is None or self.gemini_extension_bridge is None:
                 return False
 
@@ -858,18 +887,13 @@ class PostProcessor:
 
             if cancelled:
                 logger.log(
-                    f"[GEMINI][EARLY_CANCEL] rid={cmd.request_id} reason={reason}"
+                    f"[GEMINI][COMMAND_CANCEL] rid={cmd.request_id} reason={reason}"
                 )
-                early_gemini_command = None
+                active_gemini_command = None
 
             return cancelled
 
         try:
-            early_gen_ctx: Optional[GenerationContext] = None
-            early_suffix: Optional[str] = None
-            early_preset: Optional[str] = None
-            early_request_id: Optional[str] = None
-            early_ai_prompt: str = ""
             sample_selected: bool = True
 
             if effective_comment and self.auto_comment_submit_enabled:
@@ -894,46 +918,15 @@ class PostProcessor:
                         f"  🎲 [COMMENT] 랜덤 댓글 작성 대상 선정 ({int(self.auto_comment_chance * 100)}%, roll={roll:.2f}) - Gemini 댓글 생성 및 자동 등록을 진행합니다."
                     )
 
-            if effective_comment and effective_like:
-                if detail_context is None:
-                    detail_context = ContentContextExtractor.extract(detail_page, post, max_chars=self.ai_context_max_chars)
-                    post.title = detail_context.title or post.title
-                    if detail_context.excerpt and detail_context.excerpt.strip():
-                        post.excerpt = detail_context.excerpt
-                    if pre_like_target_delay > 0:
-                        pre_like_anchor_monotonic = time.monotonic()
-                        pre_like_deadline = pre_like_anchor_monotonic + pre_like_target_delay
-                if (post.excerpt or "").strip():
-                    if self.gemini_web_enabled and self.gemini_browser_mode == "extension_existing_chrome" and self.gemini_extension_bridge:
-                        if not (self.stop_event and self.stop_event.is_set()) and not (self.skip_event and self.skip_event.is_set()):
-                            self.current_stage = "gemini_preflight"
-                            preflight = self.gemini_extension_bridge.await_ready(
-                                timeout=3.0,
-                                stop_event=self.stop_event,
-                                skip_event=self.skip_event
-                            )
-                            if preflight and preflight.ready:
-                                early_gen_ctx, early_request_id, early_ai_prompt, early_suffix, early_preset = self._prepare_comment_generation_context(
-                                    post=post, action_plan=action_plan, detail_page=detail_page
-                                )
-                                if early_ai_prompt and not early_gen_ctx.needs_more_context:
-                                    gemini_timeout = float(self.config.get("gemini_response_timeout", 55.0))
-                                    early_cmd = GeminiCommand.create(
-                                        post_key=post.key,
-                                        navigation_version=navigation_version,
-                                        prompt=early_ai_prompt,
-                                        request_id=early_request_id,
-                                        timeout_seconds=gemini_timeout,
-                                    )
-                                    if hasattr(self, "run_control") and self.run_control:
-                                        self.run_control.checkpoint("before_gemini_publish")
-                                    if self.gemini_extension_bridge.publish(early_cmd, stop_event=self.stop_event, skip_event=self.skip_event):
-                                        early_gemini_command = early_cmd
-                                        logger.log(f"  🚀 [GEMINI] 좋아요 누르기 전 댓글 생성 요청 사전 전송 완료 (rid={early_request_id}) - 공감/페이싱과 병행 생성")
-                                        if self.state_mgr:
-                                            self.state_mgr.update(message="Gemini 댓글 생성 중 (공감 병행)...")
+            if effective_comment and effective_like and detail_context is None:
+                detail_context = ContentContextExtractor.extract(detail_page, post, max_chars=self.ai_context_max_chars)
+                post.title = detail_context.title or post.title
+                if detail_context.excerpt and detail_context.excerpt.strip():
+                    post.excerpt = detail_context.excerpt
+                if pre_like_target_delay > 0:
+                    pre_like_deadline = time.monotonic() + pre_like_target_delay
 
-            # 2. 공감(하트) 처리 (Re-ordered Like Pipeline: State -> Popularity Guard -> Transaction)
+            # 2. 공감(하트) 처리: 확정된 제외 판정의 수치를 재사용한다.
             if effective_like:
                 if self.state_mgr:
                     self.state_mgr.update(new_state=FeedState.CHECKING_LIKE, message="공감 상태 및 조건 확인 중...")
@@ -950,7 +943,7 @@ class PostProcessor:
                     result.like_result = LikeProcessResult(state_before=like_state_res.state, action_taken=False, state_after=like_state_res.state, error="low_confidence_skip")
                 else:
                     # 2-2. NOT_LIKED + HIGH인 경우에만 Popularity Guard 평가 (공감 훑기 모드에서는 가드 면제)
-                    if is_sweep_mode or post.source == FeedSourceType.RECOMMENDATION:
+                    if is_sweep_mode or result.eligibility is not None:
                         elig_ok = True
                         guard_metrics = result.eligibility.metrics if result.eligibility else {}
                         elig_like_cnt = guard_metrics.get("likes", {}).get("value")
@@ -999,7 +992,7 @@ class PostProcessor:
                         self.current_result = result
 
                         if tx_res.error == "user_skipped_pre_like" or (self.skip_event and self.skip_event.is_set()):
-                            _cancel_early_command("pre_like_pacing_skipped")
+                            _cancel_active_command("pre_like_pacing_skipped")
                             result.like_result.error = "user_skipped"
                             result.comment_result.status = CommentSubmitState.SKIPPED
                             result.comment_result.error = "user_skipped"
@@ -1007,7 +1000,7 @@ class PostProcessor:
                                 self.state_mgr.update(new_state=FeedState.SKIPPING, inc_skip=True)
                             return result
                         if tx_res.error == "stopped_pre_like" or (self.stop_event and self.stop_event.is_set()):
-                            _cancel_early_command("pre_like_pacing_stopped")
+                            _cancel_active_command("pre_like_pacing_stopped")
                             raise StopRequestedException("작업 중지 요청됨")
 
                         if tx_res.action_taken and tx_res.state_after == LikeState.LIKED:
@@ -1020,18 +1013,18 @@ class PostProcessor:
                                     logger.log(f"  ⚠️ [CHECKPOINT] Like checkpoint 기록 실패: {cp_err}", "WARNING")
 
             if self.stop_event and self.stop_event.is_set():
-                _cancel_early_command("stop_before_post_like")
+                _cancel_active_command("stop_before_post_like")
                 raise StopRequestedException("작업 중지 요청됨")
 
             # 액션 사이 Pacing 대기
             if self.pacing:
                 p_res = self.pacing.wait_post_like() if effective_like else self.pacing.wait_action()
                 if p_res.stopped or (self.stop_event and self.stop_event.is_set()):
-                    _cancel_early_command("post_like_pacing_stopped")
+                    _cancel_active_command("post_like_pacing_stopped")
                     raise StopRequestedException("작업 중지 요청됨")
                 if p_res.skipped or (self.skip_event and self.skip_event.is_set()):
                     logger.log("  ⏭️ [USER] 공감 후 대기 중 다음 글로 건너뛰기 요청됨 (댓글 단계 스킵).")
-                    _cancel_early_command("post_like_pacing_skipped")
+                    _cancel_active_command("post_like_pacing_skipped")
                     result.comment_result.status = CommentSubmitState.SKIPPED
                     result.comment_result.error = "user_skipped"
                     return result
@@ -1040,7 +1033,7 @@ class PostProcessor:
             if effective_comment:
                 if self.skip_event and self.skip_event.is_set():
                     logger.log("  ⏭️ [USER] 댓글 단계 진입 전 다음 글로 건너뛰기 요청됨 (스킵).")
-                    _cancel_early_command("skip_before_comment")
+                    _cancel_active_command("skip_before_comment")
                     result.comment_result.status = CommentSubmitState.SKIPPED
                     result.comment_result.error = "user_skipped"
                     if self.state_mgr:
@@ -1062,7 +1055,7 @@ class PostProcessor:
                 if hasattr(self, "run_control") and self.run_control:
                     self.run_control.checkpoint("after_comment_open")
                 if not open_ok:
-                    _cancel_early_command(f"comment_open_fail:{open_reason}")
+                    _cancel_active_command(f"comment_open_fail:{open_reason}")
                     if open_reason == "user_skipped":
                         logger.log("  ⏭️ [USER] 댓글 레이어 준비 중 다음 글로 건너뛰기 요청됨 (스킵).")
                         result.comment_result.status = CommentSubmitState.SKIPPED
@@ -1094,7 +1087,7 @@ class PostProcessor:
                     presence_frame = comment_context["frame"] if comment_context else detail_page
                     presence = ServerCommentDuplicateGuard.scan_page_for_my_comment(presence_frame, stop_event=self.stop_event)
                     if presence.state == CommentPresenceState.PRESENT:
-                        _cancel_early_command("server_comment_duplicate_present")
+                        _cancel_active_command("server_comment_duplicate_present")
                         logger.log("  🛑 [COMMENT] 서버 댓글 목록에 이미 내 댓글이 존재합니다! (AI 호출/입력 0, 동기화 완료)")
                         result.comment_result = CommentProcessResult(
                             status=CommentSubmitState.SUBMITTED,
@@ -1108,7 +1101,7 @@ class PostProcessor:
                                 logger.log(f"  ⚠️ [CHECKPOINT] Comment checkpoint 기록 실패: {cp_err}", "WARNING")
                         return result
                     elif presence.state == CommentPresenceState.UNKNOWN:
-                        _cancel_early_command("server_comment_duplicate_unknown")
+                        _cancel_active_command("server_comment_duplicate_unknown")
                         logger.log("  ⚠️ [COMMENT] 댓글 목록이 불완전하여 중복 방지를 위해 안전하게 작성을 스킵합니다.", "WARNING")
                         result.comment_result = CommentProcessResult(status=CommentSubmitState.SKIPPED, error="server_duplicate_check_unknown")
                         return result
@@ -1120,7 +1113,7 @@ class PostProcessor:
                             post.excerpt = context.excerpt
 
                         if not (post.excerpt or "").strip():
-                            _cancel_early_command("content_extraction_insufficient")
+                            _cancel_active_command("content_extraction_insufficient")
                             logger.log("  ⚠️ [COMMENT] 본문을 확인하지 못해 제목만으로 댓글을 만들지 않았습니다. 페이지를 확인하거나 발췌문을 보완해 주세요.", "WARNING")
                             result.comment_result = CommentProcessResult(
                                 status=CommentSubmitState.FAILED,
@@ -1131,7 +1124,7 @@ class PostProcessor:
                             return result
 
                         if (self.stop_event and self.stop_event.is_set()) or (self.skip_event and self.skip_event.is_set()):
-                            _cancel_early_command("stop_or_skip_before_draft")
+                            _cancel_active_command("stop_or_skip_before_draft")
                             if self.stop_event and self.stop_event.is_set():
                                 logger.log("  ⏹️ [USER] Gemini 생성 시작 전 정지 요청 감지 -> 즉시 중단합니다.")
                                 raise StopRequestedException("User stopped before Gemini generation")
@@ -1145,19 +1138,12 @@ class PostProcessor:
                                     self.state_mgr.update(new_state=FeedState.SKIPPING, inc_skip=True)
                                 return result
 
-                        if early_gen_ctx is not None:
-                            gen_ctx = early_gen_ctx
-                            request_id = early_request_id
-                            ai_prompt = early_ai_prompt
-                            suffix = early_suffix
-                            preset = early_preset
-                        else:
-                            gen_ctx, request_id, ai_prompt, suffix, preset = self._prepare_comment_generation_context(
-                                post=post, action_plan=action_plan, detail_page=detail_page
-                            )
+                        gen_ctx, request_id, ai_prompt, suffix, preset = self._prepare_comment_generation_context(
+                            post=post, action_plan=action_plan, detail_page=detail_page
+                        )
 
                         if self.gemini_web_enabled and gen_ctx.needs_more_context:
-                            _cancel_early_command("insufficient_context")
+                            _cancel_active_command("insufficient_context")
                             logger.log("  ⚠️ [COMMENT] 유의미한 본문 근거 부족(needs_more_context)으로 댓글 생성을 건너뜁니다 (SKIP).")
                             result.comment_result = CommentProcessResult(
                                 status=CommentSubmitState.SKIPPED,
@@ -1181,7 +1167,7 @@ class PostProcessor:
                         use_local_requested = False
                         if self.gemini_web_enabled and ai_prompt:
                             if (self.stop_event and self.stop_event.is_set()) or (self.skip_event and self.skip_event.is_set()):
-                                _cancel_early_command("stop_or_skip_before_gemini_loop")
+                                _cancel_active_command("stop_or_skip_before_gemini_loop")
                                 if self.stop_event and self.stop_event.is_set():
                                     logger.log("  ⏹️ [USER] Gemini 생성 시작 전 정지 요청 감지 -> 즉시 중단합니다.")
                                     raise StopRequestedException("User stopped before Gemini generation")
@@ -1201,7 +1187,7 @@ class PostProcessor:
                             if self.gemini_browser_mode == "extension_existing_chrome":
                                 while not gemini_answer and not use_local_requested:
                                     if (self.stop_event and self.stop_event.is_set()) or (self.skip_event and self.skip_event.is_set()):
-                                        _cancel_early_command("stop_or_skip_in_gemini_loop")
+                                        _cancel_active_command("stop_or_skip_in_gemini_loop")
                                         if self.stop_event and self.stop_event.is_set():
                                             logger.log("  ⏹️ [USER] Gemini 루프 시작 전 정지 요청 감지 -> 중단합니다.")
                                             raise StopRequestedException("User stopped before Gemini loop")
@@ -1220,9 +1206,9 @@ class PostProcessor:
                                     validated_final_text = None
                                     command = None
 
-                                    if early_gemini_command is not None:
-                                        command = early_gemini_command
-                                        logger.log(f"  ⚡ [GEMINI] 좋아요 누르기 전 사전 전송한 명령(rid={command.request_id}) 결과를 바로 대기합니다.")
+                                    if active_gemini_command is not None:
+                                        command = active_gemini_command
+                                        logger.log(f"[GEMINI] 진행 중인 명령 결과 대기 (rid={command.request_id})")
                                     else:
                                         preflight = (
                                             self.gemini_extension_bridge.await_ready(
@@ -1270,6 +1256,7 @@ class PostProcessor:
                                                 failure = "publish_rejected"
                                                 logger.log(f"[GEMINI/EXTENSION] 명령 발행 거부: {failure}", "ERROR")
                                                 break
+                                            active_gemini_command = command
 
                                     if command is not None:
                                         extension_result = self.gemini_extension_bridge.wait_for_result(
@@ -1278,9 +1265,9 @@ class PostProcessor:
                                             skip_event=self.skip_event,
                                         )
                                         if extension_result is not None:
-                                            early_gemini_command = None
+                                            active_gemini_command = None
                                         else:
-                                            _cancel_early_command("wait_result_timeout")
+                                            _cancel_active_command("wait_result_timeout")
 
                                         if hasattr(self, "run_control") and self.run_control:
                                             self.run_control.checkpoint("after_gemini_publish")
@@ -1355,9 +1342,9 @@ class PostProcessor:
                                             )
 
                                             # P0-3: Response Contamination Gate
-                                            contam_check = ResponseContaminationGate.validate(extension_result.text or "")
+                                            contam_check = ResponseContaminationGate.validate(extension_result.text or "", strict=True)
                                             if not contam_check.is_contaminated and gemini_answer:
-                                                contam_check = ResponseContaminationGate.validate(gemini_answer)
+                                                contam_check = ResponseContaminationGate.validate(gemini_answer, strict=True)
 
                                             if contam_check.is_contaminated:
                                                 logger.log(
@@ -1376,14 +1363,18 @@ class PostProcessor:
                                                             self.state_mgr.update(new_state=FeedState.SKIPPING, inc_skip=True)
                                                         return result
                                                     request_id = uuid.uuid4().hex
-                                                    ai_prompt = gen_ctx.build_prompt(request_id=request_id)
+                                                    ai_prompt = gen_ctx.build_prompt(
+                                                        request_id=request_id,
+                                                        rewrite_feedback="댓글 본문만 한 줄로 작성하고 말투·포인트 변경이나 만족 여부를 묻지 마."
+                                                        if contam_check.code in {"response_meta_contamination", "response_multiline", "response_wrapper"} else None,
+                                                    )
                                                     gemini_answer = None
                                                     continue
                                                 else:
                                                     logger.log("❌ [GEMINI/EXTENSION] UI 오염 재생성 후에도 오염 지속 -> fail-closed 스킵 처리", "ERROR")
                                                     result.comment_result = CommentProcessResult(
                                                         status=CommentSubmitState.SKIPPED if self.config.get("skip_on_comment_failure", True) else CommentSubmitState.FAILED,
-                                                        error="response_ui_contamination",
+                                                        error=contam_check.code,
                                                     )
                                                     if self.state_mgr:
                                                         self.state_mgr.update(new_state=FeedState.SKIPPING, inc_skip=True)
@@ -1404,6 +1395,8 @@ class PostProcessor:
                                                     if self.config.get("allow_soft_emoji") is False else gemini_answer,
                                                     post_key=post.key,
                                                     recent_comments=_recent_norm_comments,
+                                                    allow_emoji_sampling=False,
+                                                    emoji_history_window=0,
                                                 )
                                                 logger.log(
                                                     f"[COMMENT][STYLE_NORMALIZE] emoji_found={_style_norm_res.emoji_found or 'none'} "
@@ -2340,4 +2333,4 @@ class PostProcessor:
             self.current_stage = "completed"
             return result
         finally:
-            _cancel_early_command("scope_exit_cleanup")
+            _cancel_active_command("scope_exit_cleanup")

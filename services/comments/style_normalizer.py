@@ -42,6 +42,8 @@ SOFT_EMOJI_WHITELIST: Set[str] = frozenset({
     "☕",  # 커피/카페
     "🌿",  # 자연/분위기
     "🙌",  # 호응
+    "🥹", "🥲", "🙂", "☺", "😌", "🤭", "🫶", "🍀",
+    "💛", "💚", "💙", "🩷", "🤎", "😅", "🙏", "😍", "😢",
 })
 
 
@@ -200,7 +202,8 @@ class CommentStyleNormalizer:
         else:
             # 단일 1개 이모지
             emoji = emojis[0]
-            if emoji not in cls.SOFT_EMOJI_WHITELIST:
+            emoji_base = re.sub(r"[\ufe0e\ufe0f\U0001F3FB-\U0001F3FF]", "", emoji)
+            if emoji not in cls.SOFT_EMOJI_WHITELIST and emoji_base not in cls.SOFT_EMOJI_WHITELIST:
                 # 권장되지 않는 과장/이질적 이모지 (예: 🔥, 💀 등) 제거
                 emoji_found = emoji
                 emoji_action = "removed"

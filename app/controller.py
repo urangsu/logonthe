@@ -40,6 +40,7 @@ from naver.editor_adapter import MobileDOMResolver
 from services.sampling_service import SamplingHistoryManager
 from services.style_service import StylePlanService
 from services.gemini_extension_bridge import GeminiExtensionBridge
+from services.display_awake import DisplayAwakeGuard
 from src.logger import logger
 
 
@@ -80,6 +81,7 @@ class FeedController:
         self.command_bridge = command_bridge or ClipboardCommandBridge()
         self.gemini_extension_bridge = gemini_extension_bridge
         self.session: Optional[BrowserSession] = None
+        self._display_awake = DisplayAwakeGuard()
 
         if run_control is not None:
             self.run_control = run_control
@@ -423,6 +425,8 @@ class FeedController:
         final_close_reason = "completed"
 
         try:
+            if comment_enabled:
+                self._display_awake.start()
             self.session.start()
 
             is_logged_in, missing_cookies = NaverAuthGuard.check_login_cookies(self.session.context)
@@ -1133,6 +1137,7 @@ class FeedController:
             logger.log(f"💥 [ASSISTANT] 예기치 않은 오류 발생: {e}\n{traceback.format_exc()}", "ERROR")
             final_close_reason = "fatal_error"
         finally:
+            self._display_awake.stop()
             if self.session:
                 self.session.close(reason=final_close_reason)
                 self.session = None

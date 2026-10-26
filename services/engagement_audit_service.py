@@ -9,6 +9,7 @@ from services.my_blog_recent_posts import MyBlogRecentPostService
 from services.reaction_participant_collector import ReactionParticipantCollector
 from services.comment_participant_collector import CommentParticipantCollector
 from services.engagement_audit_store import EngagementAuditStore
+from services.buddy_request_collector import BuddyRequestCollector
 
 
 class EngagementAuditService:
@@ -49,28 +50,49 @@ class EngagementAuditService:
         recent_post_count: int = 5,
         stop_event: Optional[Any] = None,
         output_dir: Optional[str] = None,
+        target_scope: str = "buddies",
     ) -> Dict[str, Any]:
         """
         내 블로그 전체 이웃 기준 감사 실행
         """
         b_id = my_blog_id.strip() if my_blog_id else ""
+        if target_scope not in ("buddies", "applicants", "all"):
+            return {"success": False, "error": "invalid_audit_scope"}
+        applicants = target_scope == "applicants"
+        combined = target_scope == "all"
+        comments_only = applicants or combined
         if not b_id:
             logger.log("❌ [AUDIT] 블로그 ID가 지정되지 않았습니다.", "ERROR")
             return {"success": False, "error": "empty_blog_id"}
 
-        logger.log(f"👥 [AUDIT] '{b_id}' 블로그 전체 이웃 기준 감사 시작...")
+        target_label = "기존 이웃 및 서로이웃 신청자" if combined else "서로이웃 신청자" if applicants else "기존 이웃"
+        logger.log(f"[AUDIT] '{b_id}' {target_label} 반응 조회 시작...")
 
         # [Step 1] 전체 이웃 목록 전수 수집
-        buddy_result: BuddyCollectionResult = BuddyListCollector.collect_all_buddies(
+        collector = BuddyRequestCollector.collect_received if applicants else BuddyListCollector.collect_all_buddies
+        buddy_result: BuddyCollectionResult = collector(
             page=page,
             blog_id=b_id,
             stop_event=stop_event
         )
+        request_result = None
+        existing_state = buddy_result.state
+        existing_members = dict(buddy_result.buddies) if combined else {}
+        if combined and not (stop_event and stop_event.is_set()):
+            request_result = BuddyRequestCollector.collect_received(page=page, blog_id=b_id, stop_event=stop_event)
 
         if stop_event and stop_event.is_set():
             return {"success": False, "error": "stop_requested"}
 
-        if buddy_result.state == "failed" or not buddy_result.buddies:
+        if combined:
+            members = {**request_result.buddies, **existing_members}
+            buddy_result = BuddyCollectionResult(
+                members,
+                "complete" if buddy_result.state == request_result.state == "complete" else "partial" if members else "failed",
+                None, len(members), buddy_result.pages_visited + request_result.pages_visited, [],
+            )
+        empty_requests = (applicants or combined) and buddy_result.state == "complete" and not buddy_result.buddies
+        if buddy_result.state == "failed" or (not buddy_result.buddies and not empty_requests):
             logger.log("❌ [AUDIT] 이웃 목록 수집에 실패하여 감사를 중단합니다.", "ERROR")
             return {"success": False, "error": "buddy_collection_failed"}
 
@@ -78,14 +100,14 @@ class EngagementAuditService:
         logger.log(f"📌 [AUDIT] 베이스라인 이웃: 총 {len(all_buddies)}명 (수집 상태: {buddy_result.state})")
 
         # [Step 2] 최근 일반 공개 포스트 최대 N개 목록 조회
-        posts = MyBlogRecentPostService.fetch_recent_posts(
+        posts = [] if empty_requests else MyBlogRecentPostService.fetch_recent_posts(
             page=page,
             blog_id=b_id,
             max_count=recent_post_count,
             stop_event=stop_event
         )
 
-        if not posts:
+        if not posts and not empty_requests:
             logger.log("⚠️ [AUDIT] 최근 공개 글을 찾지 못했습니다.", "WARNING")
             return {"success": False, "error": "no_recent_posts_found"}
 
@@ -97,6 +119,8 @@ class EngagementAuditService:
         master_buddies_map: Dict[str, Dict[str, Any]] = {}
         for b_id_key, b_info in all_buddies.items():
             feed_state = getattr(b_info, "news_feed_state", "확인 불가")
+            if applicants:
+                feed_state = "미조회"
             if feed_state == "확인 불가" and hasattr(b_info, "new_posts_setting"):
                 s_val = str(getattr(b_info, "new_posts_setting", "") or "").strip().upper()
                 if s_val in {"ON", "OFF"}:
@@ -109,6 +133,7 @@ class EngagementAuditService:
                 "group_name": b_info.group_name,
                 "buddy_type": b_info.buddy_type,
                 "added_date": b_info.added_date,
+                "requested_date": getattr(b_info, "requested_date", None) or "",
                 "last_post_date": b_info.last_post_date or "",
                 "news_feed_state": feed_state,
                 "new_posts_setting": feed_state,
@@ -123,14 +148,16 @@ class EngagementAuditService:
                 "commented_only": False,
                 "both_like_and_comment": False,
                 "no_reaction": True,
-                "is_recent_buddy": cls.is_grace_period(b_info.added_date, days=2),
+                "is_recent_buddy": not applicants and cls.is_grace_period(b_info.added_date, days=2),
                 "reaction_category": "확인 불가",
                 "scan_complete": True
             }
 
+        post_scans = []
         # [Step 3] 최근 N개 포스트별 반응자 수집 및 Master Join
         for idx, p in enumerate(posts, 1):
             if stop_event and stop_event.is_set():
+                all_post_scans_complete = False
                 break
 
             log_no = p["log_no"]
@@ -138,23 +165,42 @@ class EngagementAuditService:
             logger.log(f"📌 [{idx}/{len(posts)}] '{title[:30]}...' (LogNo: {log_no}) 반응자 분석 중...")
 
             # 3-1. 공감 참여자
-            likers, liker_state, _ = ReactionParticipantCollector.collect(
-                page=page,
-                blog_id=b_id,
-                log_no=log_no,
-                stop_event=stop_event
-            )
+            likers, liker_state = [], "complete"
+            if not comments_only:
+                likers, liker_state, _ = ReactionParticipantCollector.collect(
+                    page=page,
+                    blog_id=b_id,
+                    log_no=log_no,
+                    stop_event=stop_event
+                )
+            if stop_event and stop_event.is_set():
+                all_post_scans_complete = False
+                break
 
             # 3-2. 댓글 작성자
-            commenters, commenter_state, _ = CommentParticipantCollector.collect(
+            commenters, commenter_state, displayed_comments = CommentParticipantCollector.collect(
                 page=page,
                 blog_id=b_id,
                 log_no=log_no,
                 stop_event=stop_event
             )
+            if stop_event and stop_event.is_set():
+                all_post_scans_complete = False
 
             if liker_state != "complete" or commenter_state != "complete":
                 all_post_scans_complete = False
+            matched_entries = sum(c["comment_entry_count"] for c in commenters)
+            post_scans.append({
+                "log_no": log_no,
+                "comment_state": commenter_state,
+                "comment_displayed": displayed_comments,
+                "identified_comment_entries": matched_entries,
+            })
+            logger.log(
+                f"[AUDIT][POST_COMMENTS] post={b_id}:{log_no} state={commenter_state} "
+                f"displayed={displayed_comments} identifiedEntries={matched_entries}",
+                "INFO" if commenter_state == "complete" else "WARNING",
+            )
 
             post_liker_ids = {l["blog_id"]: l for l in likers}
             post_commenter_ids = {c["blog_id"]: c for c in commenters}
@@ -178,6 +224,8 @@ class EngagementAuditService:
                 mb["engaged_post_count"] += 1
 
         # [Step 4] Master Table Flag 계산 및 무반응자 추출
+        if stop_event and stop_event.is_set():
+            all_post_scans_complete = False
         master_rows: List[Dict[str, Any]] = []
         unresponsive_rows: List[Dict[str, Any]] = []
 
@@ -227,7 +275,7 @@ class EngagementAuditService:
 
         news_feed_on_count = sum(1 for r in master_rows if r.get("news_feed_state") == "ON")
         news_feed_off_count = sum(1 for r in master_rows if r.get("news_feed_state") == "OFF")
-        news_feed_unknown_count = sum(1 for r in master_rows if r.get("news_feed_state") not in ("ON", "OFF"))
+        news_feed_unknown_count = 0 if applicants else sum(1 for r in master_rows if r.get("news_feed_state") not in ("ON", "OFF"))
 
         active_buddies_count = sum(1 for r in master_rows if r.get("reaction_category") == "우수 반응(3회이상)")
         audit_state: Literal["complete", "partial", "failed"] = "complete" if all_post_scans_complete else "partial"
@@ -235,6 +283,13 @@ class EngagementAuditService:
         report = {
             "generated_at": checked_time_str,
             "blog_id": b_id,
+            "target_scope": target_scope,
+            "comments_only": comments_only,
+            "request_collection_state": request_result.state if request_result else None,
+            "existing_collection_state": existing_state,
+            "existing_buddies_count": len(existing_members) if combined else 0,
+            "total_applicants_count": len(request_result.buddies) if combined else total_buddies if applicants else 0,
+            "collection_state": buddy_result.state,
             "audit_state": audit_state,
             "recent_post_count": len(posts),
             "total_buddies_count": total_buddies,
@@ -251,17 +306,33 @@ class EngagementAuditService:
             "news_feed_off_count": news_feed_off_count,
             "news_feed_unknown_count": news_feed_unknown_count,
             "master_buddies": master_rows,
+            "post_scans": post_scans,
             "unresponsive_buddies": unresponsive_rows,
         }
 
         # [Step 6] 이웃별 누적 집계 CSV 하나만 원자적으로 저장
-        summary_csv = EngagementAuditStore.save_summary(report, output_dir=output_dir)
+        if combined:
+            summary_paths = []
+            for scope, members in (("buddies", existing_members), ("applicants", request_result.buddies)):
+                rows = [dict(row) for row in master_rows if row["blog_id"] in members]
+                if scope == "applicants":
+                    for row in rows:
+                        row["requested_date"] = members[row["blog_id"]].requested_date or ""
+                subset = {**report, "target_scope": scope, "master_buddies": rows}
+                summary_paths.append(EngagementAuditStore.save_summary(subset, output_dir=output_dir))
+            summary_csv = summary_paths[0]
+        else:
+            summary_csv = EngagementAuditStore.save_summary(report, output_dir=output_dir)
+            summary_paths = [summary_csv]
 
         logger.log(f"==================================================")
-        logger.log(f"🎉 [AUDIT] 전체 이웃 {total_buddies}명 기준 무반응 감사 완료! (상태: {audit_state.upper()})")
-        logger.log(f"   👥 전체 등록 이웃 (Master): {total_buddies}명")
-        logger.log(f"   🔔 새글소식: ON {news_feed_on_count}명 / OFF(차단) {news_feed_off_count}명 (확인불가: {news_feed_unknown_count}명)")
-        logger.log(f"   ❤️ 최근 글에 반응한 이웃: {reacted_buddies_count}명 (우수 반응 3회 이상: {active_buddies_count}명, 공감+댓글 모두: {both_count}명, 공감만: {liked_only_count}명, 댓글만: {commented_only_count}명)")
+        logger.log(f"[AUDIT] {target_label} {total_buddies}명 반응 조회 완료 (상태: {audit_state.upper()})")
+        if not applicants:
+            logger.log(f"   새글소식(내 수신 설정): ON {news_feed_on_count}명 / OFF {news_feed_off_count}명 (확인불가: {news_feed_unknown_count}명)")
+        if comments_only:
+            logger.log(f"   신청자 댓글 확인: {reacted_buddies_count}명 / 댓글 없음 확인: {unresponsive_count}명 (공감 조회 안 함)")
+        else:
+            logger.log(f"   ❤️ 최근 글에 반응한 이웃: {reacted_buddies_count}명 (우수 반응 3회 이상: {active_buddies_count}명, 공감+댓글 모두: {both_count}명, 공감만: {liked_only_count}명, 댓글만: {commented_only_count}명)")
         logger.log(f"   🚫 최근 글 무반응 이웃: {unresponsive_count}명 (추가일 기준 참고: {grace_count}명 / 확인된 무반응: {real_unresponsive_count}명)")
         logger.log(f"   이웃별 누적 반응 CSV: {summary_csv}")
 
@@ -270,4 +341,5 @@ class EngagementAuditService:
             "audit_state": audit_state,
             "report": report,
             "summary_csv_path": summary_csv,
+            "summary_csv_paths": summary_paths,
         }

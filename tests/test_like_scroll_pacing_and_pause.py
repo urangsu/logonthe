@@ -182,8 +182,13 @@ class TestLikeScrollPacingAndPause(unittest.TestCase):
 
         self.assertEqual(len(scroll_calls), 0, "짧은 글에서는 스크롤이 생략되어야 함")
 
-    def test_long_body_with_sufficient_time_scrolls_2_to_4_times(self):
-        """4. 본문이 충분히 길고 시간이 남은 글에서만 2~4회 작은 폭 스크롤"""
+    def test_long_body_random_scroll_count_can_reach_fifteen(self):
+        self._assert_random_scroll_count(15)
+
+    def test_long_body_random_scroll_count_can_start_at_three(self):
+        self._assert_random_scroll_count(3)
+
+    def _assert_random_scroll_count(self, expected_count):
         now_mono = time.monotonic()
         not_before = now_mono + 3.2  # 남은 시간 3.2초 (충분)
 
@@ -206,7 +211,9 @@ class TestLikeScrollPacingAndPause(unittest.TestCase):
         summary_mock = MagicMock()
         summary_mock.count.return_value = 0
 
-        with patch("services.like_transaction.LikeTransactionService.resolve_reaction_state", side_effect=[rx_before, rx_after]), \
+        with patch("services.like_transaction.random.randint", side_effect=lambda lo, hi: expected_count if (lo, hi) == (3, 15) else 200) as random_count, \
+             patch("services.like_transaction.random.uniform", return_value=0), \
+             patch("services.like_transaction.LikeTransactionService.resolve_reaction_state", side_effect=[rx_before, rx_after]), \
              patch("services.like_transaction.MobileDOMResolver.get_reaction_like_option", return_value=like_opt), \
              patch("services.like_transaction.MobileDOMResolver.get_reaction_summary_button", return_value=summary_mock):
             LikeTransactionService.execute_like_transaction(
@@ -214,8 +221,8 @@ class TestLikeScrollPacingAndPause(unittest.TestCase):
                 not_before_monotonic=not_before,
             )
 
-        self.assertGreaterEqual(len(scroll_calls), 2)
-        self.assertLessEqual(len(scroll_calls), 4)
+        random_count.assert_any_call(3, 15)
+        self.assertEqual(len(scroll_calls), expected_count)
 
     def test_summary_button_scrolled_into_view_at_end_of_wait(self):
         """5. 공감 버튼 선이동이 대기 끝으로 옮겨졌는지 호출 순서 검증"""

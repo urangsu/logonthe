@@ -41,6 +41,7 @@ class BuddyInfo:
     setting_observed_at: Optional[str] = None
     setting_evidence: Optional[str] = None
     buddy_type_evidence: Optional[str] = None
+    requested_date: Optional[str] = None
 
     @property
     def news_feed_state(self) -> str:

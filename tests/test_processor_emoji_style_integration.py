@@ -6,8 +6,8 @@ PostProcessor 단위의 이모지 및 스타일 정규화 엔드투엔드 통합
 1. P0 — frozen CommentStylePolicy 직접 수정 제거 (dataclasses.replace 기반 candidate policy 검증)
 2. P1 — style_profile.emoji_ratio 런타임 강제변경 제거 검증 (사용자 학습 프로필 오염 방지)
 3. sampled + single 😋 → 실제 FINAL_TEXT 및 에디터 주입 텍스트에 😋 존재
-4. sampling miss → 😋 제거
-5. recent cooldown → 최근 등록 이력에 같은 이모지가 있으면 제거
+4. sampling miss에도 자연스러운 단일 이모지 보존
+5. 최근 같은 이모지가 있어도 단일 이모지 보존
 6. 😋😋🔥 등 다중/과장형 이모티콘 → 전면 제거
 7. 20℃, 1.5㎏, ©, ™ 등 일반 단위 및 특수 기호 → 100% 원형 유지
 8. kept emoji 상태로 editor readback + submit 검증까지 PASS
@@ -40,6 +40,8 @@ class TestProcessorEmojiStyleIntegration(unittest.TestCase):
         self.mock_page.url = "https://m.blog.naver.com/testuser/12345"
 
         self.config = {
+            "like_popularity_guard_enabled": False,
+            "daily_visitor_guard_enabled": False,
             "skip_on_comment_failure": True,
             "gemini_browser_mode": "extension_existing_chrome",
             "gemini_web_enabled": True,
@@ -155,8 +157,8 @@ class TestProcessorEmojiStyleIntegration(unittest.TestCase):
         # 3. 등록 성공 후 processor의 _recent_submitted_comments에 기록 확인
         self.assertTrue(any("😋" in c for c in processor._recent_submitted_comments))
 
-    def test_sampling_miss_emoji_stripped(self):
-        """sampling miss(20% 확률 밖) → 단일 이모지라도 쿨하게 제거되어 주입된다"""
+    def test_sampling_miss_emoji_preserved(self):
+        """자연스러운 단일 이모지는 확률로 삭제하지 않는다."""
         unsampled_pk = self._find_sampled_post_key(should_sample=False)
         raw_text = "솥뚜껑 삼겹살에 김치 조합 비주얼부터 맛있어 보여요 😋"
 
@@ -166,10 +168,10 @@ class TestProcessorEmojiStyleIntegration(unittest.TestCase):
 
         self.assertEqual(result.comment_result.status, CommentSubmitState.SUBMITTED)
         self.assertIsNotNone(injected_text)
-        self.assertNotIn("😋", injected_text)
+        self.assertIn("😋", injected_text)
 
-    def test_recent_cooldown_emoji_stripped(self):
-        """최근 등록 댓글 5개 중 같은 이모지가 있으면 제거된다"""
+    def test_recent_emoji_is_preserved(self):
+        """반복 완화는 프롬프트에서 하고 생성된 단일 이모지는 보존한다."""
         sampled_pk = self._find_sampled_post_key(should_sample=True)
         raw_text = "솥뚜껑 삼겹살에 김치 조합 비주얼부터 맛있어 보여요 😋"
 
@@ -181,7 +183,21 @@ class TestProcessorEmojiStyleIntegration(unittest.TestCase):
 
         self.assertEqual(result.comment_result.status, CommentSubmitState.SUBMITTED)
         self.assertIsNotNone(injected_text)
-        self.assertNotIn("😋", injected_text)
+        self.assertIn("😋", injected_text)
+
+    def test_soft_teary_emoji_survives_editor_and_submit(self):
+        result, injected_text, _ = self._run_processor_with_answer(
+            "솥뚜껑 삼겹살 비주얼 보니 배고파지네요 🥹",
+            self._find_sampled_post_key(False), ["아쉽네요 🥹"])
+        self.assertEqual(result.comment_result.status, CommentSubmitState.SUBMITTED)
+        self.assertIn("🥹", injected_text)
+
+    def test_implicit_experience_never_reaches_editor(self):
+        result, injected_text, _ = self._run_processor_with_answer(
+            "삼겹살 맛있긴 한데 몇 접시 집다 보면 가격 진짜 훅 나오더라구요",
+            self._find_sampled_post_key(False))
+        self.assertNotEqual(result.comment_result.status, CommentSubmitState.SUBMITTED)
+        self.assertIsNone(injected_text)
 
     def test_different_recent_emoji_is_preserved(self):
         result, injected_text, _ = self._run_processor_with_answer(

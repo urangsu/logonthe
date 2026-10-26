@@ -129,6 +129,11 @@ _CODE_CATEGORIES: dict = {
     "length_exceeded": "format_error",
     "length_below_minimum": "format_error",
     "need_more_context": "format_error",
+    "response_meta_contamination": "format_error",
+    "response_multiline": "format_error",
+    "response_wrapper": "format_error",
+    "stale_season_reference": "style_penalty",
+    "overused_phrase": "style_penalty",
 }
 
 
@@ -205,6 +210,30 @@ class ContaminationResult:
 class ResponseContaminationGate:
     """Pre-gate to inspect model response text for UI chrome, thinking, or status contamination."""
 
+    VERSION = "2026-10-20-meta-v4"
+
+    META_PATTERNS: ClassVar[Tuple[re.Pattern, ...]] = (
+        re.compile(r"(?:이|이런|지금)\s*(?:느낌|톤|말투|댓글|문구|버전|방향).{0,24}(?:괜찮으신가요|괜찮으세요|마음에\s*드시나요|어떠신가요)"),
+        re.compile(r"(?:이대로|(?:이|이런)\s*(?:댓글|문구|초안|답글|버전).{0,20}그대로).{0,35}(?:사용|올리|쓰|등록).{0,25}(?:괜찮|될까요)"),
+        re.compile(r"(?:포인트|초점|톤|말투|스타일|버전)(?:을|를|은|는)?\s*(?:바꿔|바꾸어|변경해)\s*볼까요"),
+        re.compile(r"(?:다른|추가)\s*(?:톤|말투|스타일|버전|포인트).{0,160}(?:확인해\s*보시겠|다듬어\s*드릴|바꿔\s*볼까요)"),
+        re.compile(r"(?:다른|원하시는|원하는|추가|더)\s*(?:톤|말투|스타일|버전|포인트|표현|댓글|분위기|느낌|어조)[^\n]{0,180}(?:필요하(?:시면|신가요|세요)|원하시(?:면|나요)|말씀(?:해)?\s*주(?:세요|시면)|알려\s*주(?:세요|시면)|(?:써|적어|작성해|만들어|수정해|바꿔|추천해|다듬어)\s*드릴)"),
+        re.compile(r"(?:댓글|문구|초안|버전)[^\n]{0,120}필요하(?:신가요|세요|시면)"),
+        re.compile(r"(?:원하시면|필요하시면)[^\n]{0,100}(?:댓글|답글|초안|문구)[^\n]{0,80}(?:작성|생성|수정|만들|써)[^\n]{0,30}드릴"),
+        re.compile(r"(?:댓글|답글|초안|문구)[^\n]{0,100}(?:작성|생성|수정|다듬|고쳐|만들|써)[^\n]{0,30}드릴(?:까요|게요|\s*수)"),
+        re.compile(r"원하시면[^\n]{0,60}(?:말씀|알려|바꿔|수정|다듬|짧게|길게|더\s*\S+게)"),
+        re.compile(r"(?:언제든|필요하(?:시)?면|원하시면|수정이?\s*필요)[^\n]{0,40}(?:말씀|알려)\s*주세요"),
+        re.compile(r"(?:바꿔|다듬어|수정해|써|작성해|만들어)\s*드릴게요"),
+        re.compile(r"(?:이런|이)\s*(?:느낌|톤|스타일|문구|댓글)\S*\s*어떠(?:세요|신가요|실까요|까요)"),
+    )
+
+    # 어시스턴트 래퍼(머리말/꼬리 괄호 설명) 패턴. strict 검증에서만 사용한다.
+    WRAPPER_PATTERNS: ClassVar[Tuple[re.Pattern, ...]] = (
+        re.compile(r"^\s*(?:here\s+(?:is|are)|sure|certainly|of\s+course)\b", re.IGNORECASE),
+        re.compile(r"^\s*(?:물론이죠|물론입니다|네[,!]\s*(?:알겠|그럼|여기))"),
+        re.compile(r"\((?:[^()\n]{0,40})(?:톤으로|버전|작성했|설명|참고|초안)(?:[^()\n]{0,30})\)\s*$"),
+    )
+
     CONTAMINATION_PATTERNS: ClassVar[Tuple[re.Pattern, ...]] = (
         re.compile(r"initiating\s*the\s*analysis", re.IGNORECASE),
         re.compile(r"gemini의\s*응답", re.IGNORECASE),
@@ -234,7 +263,8 @@ class ResponseContaminationGate:
     )
 
     @classmethod
-    def validate(cls, text: str) -> ContaminationResult:
+    def validate(cls, text: str, strict: bool = False) -> ContaminationResult:
+        """strict=True: 모델 원시 응답용. 여러 줄 응답과 어시스턴트 래퍼도 오염으로 본다."""
         if not text:
             return ContaminationResult(
                 is_contaminated=False,
@@ -242,7 +272,32 @@ class ResponseContaminationGate:
                 reason="Text is empty"
             )
 
-        norm = text.strip()
+        norm = re.sub(r"[\u200B-\u200F\u202A-\u202E\u2060-\u206F\uFEFF]", "", text).strip()
+        meta_text = re.sub(r"\s+", " ", norm)
+        for pattern in cls.META_PATTERNS:
+            match = pattern.search(meta_text)
+            if match:
+                return ContaminationResult(
+                    is_contaminated=True, code="response_meta_contamination",
+                    matched_pattern=match.group(0),
+                    reason="Model follow-up offer is not a blog comment",
+                )
+        if strict:
+            lines = [ln for ln in norm.splitlines() if ln.strip()]
+            if len(lines) >= 2:
+                return ContaminationResult(
+                    is_contaminated=True, code="response_multiline",
+                    matched_pattern=lines[1][:40],
+                    reason="Comment must be a single line",
+                )
+            for pattern in cls.WRAPPER_PATTERNS:
+                match = pattern.search(norm)
+                if match:
+                    return ContaminationResult(
+                        is_contaminated=True, code="response_wrapper",
+                        matched_pattern=match.group(0),
+                        reason="Assistant wrapper text around the comment",
+                    )
         for sub in cls.CONTAMINATION_EXACT_SUBSTRINGS:
             if sub in norm:
                 return ContaminationResult(
@@ -508,7 +563,10 @@ class FinalQualityGate:
     _FAKE_EXPERIENCE_RE: ClassVar[re.Pattern[str]] = re.compile(
         r"(?:(?:저도|저는|제가|저희|우리)\s*(?:어제|지난번에?|지난|전에?|예전에?|직접|이미|한번|최근에?)?\s*"
         r"(?:가봤|먹어봤|써봤|구매했|구매해봤|이용해봤|주문해봤|다녀왔|방문했|사용해봤))|"
-        r"(?:(?<![가-힣])(?:먹|가|써|사먹|다녀|주문해|시켜|구매해|방문해|이용해|사용해)(?:어|아)?(?:보니까|보니|봤는데|봤더니|본\s*(?:결과|경험)|봤어요|봤습니다))"
+        r"(?:(?<![가-힣])(?:먹|가|써|사먹|다녀|주문해|시켜|구매해|방문해|이용해|사용해)(?:어|아)?(?:보니까|보니|봤는데|봤더니|본\s*(?:결과|경험)|봤어요|봤습니다))|"
+        r"(?:(?<![가-힣])(?:직접\s*)?(?:갔더니|먹었더니|써봤더니|다녀왔더니))|"
+        r"(?:(?:먹|쓰|사용하|집)다\s*보(?:니|면)[^.!?\n]{0,50}더(?:라구요|라고요|군요|라))|"
+        r"(?:(?:가격|금액|계산|총액)[^.!?\n]{0,25}(?:나오|나가|들|붙|비싸|비싸지)더(?:라구요|라고요|군요|라))"
     )
 
     # P0-9 ~ P0-11: "먹다 + 재미" 기계적 결합 금지 패턴
@@ -614,6 +672,9 @@ class FinalQualityGate:
         )
         if not isinstance(text, str):
             return result(False, "invalid_text", "comment text must be a string")
+        contamination = ResponseContaminationGate.validate(normalized)
+        if contamination.code == "response_meta_contamination":
+            return result(False, contamination.code, contamination.reason, matched=contamination.matched_pattern)
         period_match = cls._FORBIDDEN_PERIOD_RE.search(normalized)
         if not effective_allow_period and not legacy and period_match:
             matched = period_match.group(0)

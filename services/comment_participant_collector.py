@@ -53,15 +53,20 @@ class CommentParticipantCollector:
             # 댓글 작성자 파싱
             res_data = page.evaluate("""
                 () => {
-                    const countEl = document.querySelector(".u_cbox_count, .count, em.point");
                     let displayedCount = null;
-                    if (countEl) {
-                        const m = countEl.innerText.match(/\\d+/);
-                        if (m) displayedCount = parseInt(m[0], 10);
+                    const countSelectors = [".u_cbox_count", ".u_cbox_comment_count", "[class*='cbox_count']", "[class*='comment_count']", "button[data-click-area*='.re']", "button.Interact__comment_btn--Wbuoq"];
+                    for (const sel of countSelectors) {
+                        const el0 = document.querySelector(sel);
+                        if (!el0) continue;
+                        const m = (el0.innerText || "").replace(/,/g, '').match(/\\d+/);
+                        if (m) { displayedCount = parseInt(m[0], 10); break; }
                     }
+                    const moreEl = document.querySelector("a.u_cbox_btn_more, button.u_cbox_btn_more");
+                    const moreVisible = !!(moreEl && moreEl.offsetParent !== null);
 
                     const items = Array.from(document.querySelectorAll("li.u_cbox_comment, li[class*='cbox_comment']"));
                     const userMap = {};
+                    let unresolvedEntries = 0;
 
                     for (let el of items) {
                         // 내 댓글 제외
@@ -77,16 +82,13 @@ class CommentParticipantCollector:
                         let profileUrl = "";
                         if (userLink) {
                             const href = userLink.href || "";
-                            if (href.includes("blogId=")) {
-                                const m = href.match(/blogId=([a-zA-Z0-9_-]+)/);
-                                if (m) targetId = m[1];
-                            } else if (href.includes("m.blog.naver.com/")) {
-                                const part = href.split("m.blog.naver.com/")[1];
-                                targetId = part.split("?")[0].split("/")[0];
-                            } else if (href.includes("blog.naver.com/")) {
-                                const part = href.split("blog.naver.com/")[1];
-                                targetId = part.split("?")[0].split("/")[0];
-                            }
+                            try {
+                                const u = new URL(href, location.href);
+                                if (['http:', 'https:'].includes(u.protocol) && ['blog.naver.com', 'm.blog.naver.com'].includes(u.hostname)) {
+                                    const candidate = u.searchParams.get('blogId') || (u.pathname === '/GoBlog.naver' ? u.searchParams.get('userId') : u.pathname.split('/').filter(Boolean)[0]);
+                                    if (/^[a-zA-Z0-9_-]{1,50}$/.test(candidate || '')) targetId = candidate.toLowerCase();
+                                }
+                            } catch (_) {}
                             profileUrl = targetId ? ("https://m.blog.naver.com/" + targetId) : href;
                         }
 
@@ -102,12 +104,16 @@ class CommentParticipantCollector:
                                 };
                             }
                             userMap[targetId].comment_entry_count += 1;
+                        } else {
+                            unresolvedEntries += 1;
                         }
                     }
 
                     return {
                         displayedCount: displayedCount,
+                        moreVisible: moreVisible,
                         totalLoadedEntries: items.length,
+                        unresolvedEntries: unresolvedEntries,
                         items: Object.values(userMap)
                     };
                 }
@@ -118,8 +124,24 @@ class CommentParticipantCollector:
             total_loaded = res_data.get("totalLoadedEntries", 0)
 
             state: Literal["complete", "partial", "failed"] = "complete"
-            if displayed_cnt is not None and total_loaded < displayed_cnt:
+            reasons = []
+            if displayed_cnt is None:
+                # 표시 댓글 수를 읽지 못해도 더보기 버튼이 더 없으면 로드된 목록이 전체임
+                if res_data.get("moreVisible") or not total_loaded:
+                    reasons.append("displayed_count_unavailable")
+            elif total_loaded < displayed_cnt:
+                reasons.append("entries_not_fully_loaded")
+            if res_data.get("unresolvedEntries", 0):
+                reasons.append("author_identity_unresolved")
+            if stop_event and stop_event.is_set():
+                reasons.append("stop_requested")
+            if reasons:
                 state = "partial"
+                logger.log(
+                    f"[AUDIT][COMMENT_INCOMPLETE] post={blog_id}:{log_no} "
+                    f"reasons={','.join(reasons)} displayed={displayed_cnt} loaded={total_loaded} "
+                    f"unresolved={res_data.get('unresolvedEntries', 0)}", "WARNING"
+                )
 
             return commenters, state, displayed_cnt
         except Exception as e:

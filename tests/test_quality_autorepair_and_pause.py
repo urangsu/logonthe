@@ -34,6 +34,8 @@ class TestQualityAutoRepairAndPause(unittest.TestCase):
             log_no="12345",
         )
         self.config = {
+            "like_popularity_guard_enabled": False,
+            "daily_visitor_guard_enabled": False,
             "skip_on_comment_failure": False,
             "gemini_browser_mode": "extension_existing_chrome",
             "gemini_web_enabled": True,
