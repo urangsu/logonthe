@@ -107,11 +107,13 @@ class GeminiCommand:
     timeout_seconds: float = 55.0
     delivery_reserve_seconds: float = 9.0
     target_tab_id: Optional[int] = None
+    reuse_chat: bool = False
+    max_reuse_turns: int = 30
 
     DELIVERY_RESERVE_SECONDS: float = 9.0
 
     @classmethod
-    def create(cls, post_key: str, navigation_version: int, prompt: str, request_id: Optional[str] = None, timeout_seconds: float = 55.0, delivery_reserve_seconds: Optional[float] = None):
+    def create(cls, post_key: str, navigation_version: int, prompt: str, request_id: Optional[str] = None, timeout_seconds: float = 55.0, delivery_reserve_seconds: Optional[float] = None, reuse_chat: bool = False, max_reuse_turns: int = 30):
         now = time.time()
         timeout = max(10.0, float(timeout_seconds or 55.0))
         delivery_reserve = float(delivery_reserve_seconds) if delivery_reserve_seconds is not None else cls.DELIVERY_RESERVE_SECONDS
@@ -132,6 +134,8 @@ class GeminiCommand:
             acceptance_deadline_at_ms=int(acceptance_deadline * 1000),
             timeout_seconds=timeout,
             delivery_reserve_seconds=delivery_reserve,
+            reuse_chat=bool(reuse_chat),
+            max_reuse_turns=max(1, int(max_reuse_turns or 30)),
         )
 
     def to_json(self) -> Dict[str, object]:
@@ -160,6 +164,9 @@ class GeminiCommand:
             "timeoutSeconds": self.timeout_seconds,
             "deliveryReserveSeconds": self.delivery_reserve_seconds,
         }
+        if self.reuse_chat:
+            payload["reuseChat"] = True
+            payload["maxReuseTurns"] = int(self.max_reuse_turns)
         if self.target_tab_id is not None:
             if type(self.target_tab_id) is not int or not 0 < self.target_tab_id <= 2**53 - 1:
                 raise ValueError("invalid_target_tab_id")

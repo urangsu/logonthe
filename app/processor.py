@@ -849,7 +849,8 @@ class PostProcessor:
             if self.state_mgr:
                 self.state_mgr.update(inc_guard_allowed=True)
 
-        elif not is_sweep_mode and (effective_comment or effective_like):
+        elif not is_sweep_mode and effective_comment:
+            # 이웃글 인기도 제한(공감수/일 방문자)은 댓글에만 적용한다. 공감은 제한 없이 진행한다.
             self.current_stage = "post_eligibility"
             eligibility = LikeEligibilityService.evaluate(
                 detail_page=detail_page, stats_page=self.stats_page, post=post,
@@ -869,8 +870,12 @@ class PostProcessor:
                 logger.log(f"[POST_ELIGIBILITY] post={post.key} allowed=False reason={eligibility.status.value}")
                 if self.state_mgr:
                     self.state_mgr.update(inc_guard_excluded=True)
-                return result
-            if self.state_mgr:
+                if not effective_like:
+                    return result
+                effective_comment = False
+                logger.log("  ❤️ [LIKE] 인기도 제한은 댓글에만 적용됩니다. 공감은 그대로 진행합니다.")
+                result.like_result.eligibility_reason = None
+            elif self.state_mgr:
                 self.state_mgr.update(inc_guard_allowed=True)
 
         # 생성 명령은 모든 제외/중복 검사를 통과한 뒤 발행하고 범위 종료 시 정리한다.
@@ -942,8 +947,8 @@ class PostProcessor:
                     logger.log(f"  ⚠️ [LIKE] 리액션 상태 확신도 부족(state={like_state_res.state.value}, conf={like_state_res.confidence.value})으로 취소 방지 위해 스킵", "WARNING")
                     result.like_result = LikeProcessResult(state_before=like_state_res.state, action_taken=False, state_after=like_state_res.state, error="low_confidence_skip")
                 else:
-                    # 2-2. NOT_LIKED + HIGH인 경우에만 Popularity Guard 평가 (공감 훑기 모드에서는 가드 면제)
-                    if is_sweep_mode or result.eligibility is not None:
+                    # 공감은 인기도 제한 없이 항상 진행한다 (제한은 댓글에만 적용). 추천글은 위 단계에서 이미 판정됨.
+                    if is_sweep_mode or result.eligibility is not None or post.source != FeedSourceType.RECOMMENDATION:
                         elig_ok = True
                         guard_metrics = result.eligibility.metrics if result.eligibility else {}
                         elig_like_cnt = guard_metrics.get("likes", {}).get("value")
@@ -1237,6 +1242,8 @@ class PostProcessor:
                                                 prompt=ai_prompt,
                                                 request_id=request_id,
                                                 timeout_seconds=gemini_timeout,
+                                                reuse_chat=bool(self.config.get("gemini_reuse_chat", True)),
+                                                max_reuse_turns=int(self.config.get("gemini_reuse_chat_max_turns", 30)),
                                             )
                                             if hasattr(self, "run_control") and self.run_control:
                                                 self.run_control.checkpoint("before_gemini_publish")

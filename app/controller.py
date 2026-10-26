@@ -1017,7 +1017,8 @@ class FeedController:
                         self.skip_event.clear()
                     else:
                         eligibility = getattr(result, "eligibility", None) if result else None
-                        guard_excluded = bool(eligibility and not eligibility.allowed)
+                        like_acted = bool(getattr(like_res, "action_taken", False))
+                        guard_excluded = bool(eligibility and not eligibility.allowed) and not like_acted
                         topic_excluded = str(getattr(comment_res, "error", "") or "").startswith("topic_blocked:")
                         if guard_excluded or topic_excluded:
                             logger.log("[PACING][GUARD_EXCLUDED] 제외 글도 공감→댓글 대기 설정을 적용합니다.")

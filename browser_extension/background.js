@@ -169,6 +169,32 @@ async function confirmStableFreshChat(tabId, first) {
     && second.conversationEpoch === first.conversationEpoch);
 }
 
+// 같은 Gemini 대화를 이어서 쓴다. 대화 목록이 무한히 늘어나는 것을 막기 위한 모드.
+// 입력창이 비어 있고, 대화 경로가 정상이며, 누적 질문 수가 한도 미만일 때만 재사용한다.
+async function tryReuseGeminiConversation(tabId, maxTurns) {
+  if (typeof tabId !== 'number') return { ok: false, error: 'missing_tab_id' };
+  const limit = Number.isFinite(maxTurns) && maxTurns > 0 ? maxTurns : 30;
+  const tab = await chrome.tabs.get(tabId).catch(() => null);
+  let path = '';
+  try { path = new URL(tab?.url || '').pathname; } catch (_) {}
+  if (!/^\/app(?:\/[a-zA-Z0-9_-]+)?\/?$/.test(path)) return { ok: false, error: 'reuse_route_unsupported' };
+  const res = await new Promise(resolve => {
+    try {
+      chrome.tabs.sendMessage(tabId, { type: 'NFA_CHECK_FRESH_CHAT' }, r => {
+        if (chrome.runtime.lastError || !r?.ok) resolve(null); else resolve(r);
+      });
+    } catch (_) { resolve(null); }
+  });
+  if (!res || !res.composerAvailable || !res.composerEmpty) return { ok: false, error: 'reuse_composer_unavailable' };
+  const turns = Math.max(res.userQueryCount || 0, res.userUniqueTurns || 0);
+  if (turns >= limit) {
+    console.log('[GEMINI][BACKGROUND] REUSE_LIMIT_REACHED -> starting new chat', { tabId, turns, limit });
+    return { ok: false, error: 'reuse_turn_limit' };
+  }
+  console.log('[GEMINI][BACKGROUND] REUSE_CHAT_READY', { tabId, turns, limit });
+  return { ok: true, reason: 'reuse_chat', tabId, contentInstanceId: res.contentInstanceId, conversationEpoch: res.conversationEpoch };
+}
+
 async function ensureFreshGeminiConversation(tabId) {
   if (typeof tabId !== 'number') return { ok: false, error: 'missing_tab_id' };
   const contract = await getRuntimeContract();
@@ -506,7 +532,11 @@ async function runCommandCycle() {
     await bridgeFetch('/v1/result', 'POST', { requestId: command.requestId, postKey: command.postKey, navigationVersion: command.navigationVersion, status: 'failed', text: '', error: foreground.error }, 10000).catch(() => {});
     return;
   }
-  const freshCheck = await ensureFreshGeminiConversation(activeRuntime.tabId);
+  let freshCheck = null;
+  if (command.reuseChat === true) {
+    freshCheck = await tryReuseGeminiConversation(activeRuntime.tabId, command.maxReuseTurns);
+  }
+  if (!freshCheck?.ok) freshCheck = await ensureFreshGeminiConversation(activeRuntime.tabId);
   if (!freshCheck.ok) {
     console.warn('[GEMINI][BACKGROUND] fresh chat verification failed:', freshCheck.error);
     await bridgeFetch('/v1/result', 'POST', { requestId: command.requestId, postKey: command.postKey, navigationVersion: command.navigationVersion, status: 'dom_unsupported', text: '', error: 'fresh_chat_not_verified' }, 10000).catch(() => {});

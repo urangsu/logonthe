@@ -29,7 +29,7 @@
     '[data-test-id="model-response"]', '.response-container-content', 'message-content', '.model-response-text'
   ].join(', ');
   let runtimeContract = {
-    extensionVersion: '13.2.9', runtimeBuild: '13.2.9-focus-settle-v1', protocolVersion: 3, bridgeSchemaVersion: 2
+    extensionVersion: '13.2.9', runtimeBuild: '13.2.9-reuse-chat-v1', protocolVersion: 3, bridgeSchemaVersion: 2
   };
   const ROUTE_ALLOCATION_GRACE_MS = 11000;
 
@@ -1022,9 +1022,10 @@
     function emitEvent(type,payload={}) { if (isExecutionCancelled()) return; try { chrome.runtime.sendMessage({ type:'NFA_EVENT', event:{ type, rid:command.requestId, ...payload } }); } catch (_) {} }
     const initialUserInv = getUserInventory();
     const initialCandInv = getCandidateInventory();
-    const freshChatVerified = initialCandInv.responseUniqueTurns === 0 && initialUserInv.userUniqueTurns === 0
-      && composerEmpty(editor()) && !findActiveStopButton();
-    if (!freshChatVerified) return {status:'failed',text:'',error:'fresh_chat_not_verified'};
+    const composerReady = composerEmpty(editor()) && !findActiveStopButton();
+    const freshChatVerified = initialCandInv.responseUniqueTurns === 0 && initialUserInv.userUniqueTurns === 0 && composerReady;
+    // reuseChat: 기존 대화를 이어 쓰되 입력창이 비어 있고 생성 중이 아닐 때만 진행한다.
+    if (!freshChatVerified && !(command.reuseChat === true && composerReady)) return {status:'failed',text:'',error:'fresh_chat_not_verified'};
     if (freshChatVerified) {
       console.log('[GEMINI][FRESH_CHAT_EXEC_READY]', JSON.stringify({ tab:command.tabId||null, instance:INSTANCE_ID, epoch:conversationEpoch }));
       emitEvent('FRESH_CHAT_EXEC_READY', { tab:command.tabId||null, instance:INSTANCE_ID, epoch:conversationEpoch });
