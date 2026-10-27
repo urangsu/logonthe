@@ -211,6 +211,7 @@ class MyBlogReplyService:
                     navigation_version=1,
                     prompt=prompt,
                     request_id=req_id,
+                    reuse_chat=True,
                 )
                 published = actual_bridge.publish(cmd)
                 if not published:
@@ -268,6 +269,7 @@ class MyBlogReplyService:
                 navigation_version=1,
                 prompt=retry_prompt,
                 request_id=retry_req_id,
+                reuse_chat=True,
             )
             pub_ok = actual_bridge.publish(retry_cmd)
             if pub_ok:

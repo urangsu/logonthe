@@ -619,6 +619,13 @@ class MainWindow(ctk.CTk):
         )
         self.btn_load_recent_posts.pack(side="left", padx=1)
 
+        self.btn_reply_workbook = ctk.CTkButton(
+            left_top, text="엑셀 3개", width=65, height=22, font=ctk.CTkFont(size=11, weight="bold"),
+            fg_color="#059669", hover_color="#047857",
+            command=self._generate_reply_workbook
+        )
+        self.btn_reply_workbook.pack(side="left", padx=1)
+
         self.reply_posts_scroll = ctk.CTkScrollableFrame(reply_left, label_text="최근 글 (클릭 시 댓글 로드)")
         self.reply_posts_scroll.pack(fill="both", expand=True, padx=2, pady=2)
 
@@ -1730,6 +1737,93 @@ class MainWindow(ctk.CTk):
             self.after(0, update_threads_ui)
 
         threading.Thread(target=worker, daemon=True).start()
+
+    def _generate_reply_workbook(self):
+        """최근 글 3개의 본문·댓글을 모아 Gemini 추천 답글을 글당 1시트 엑셀로 만든다."""
+        import subprocess
+
+        if ((self.worker_thread and self.worker_thread.is_alive())
+                or (self.audit_thread and self.audit_thread.is_alive())):
+            messagebox.showwarning("작업 중", "현재 작업이 끝난 뒤 엑셀 생성을 실행해 주세요.")
+            return
+        blog_id = self.reply_blog_id_entry.get().strip()
+        if not blog_id:
+            messagebox.showwarning("입력 필요", "블로그 ID를 입력해 주세요.")
+            return
+        # 답글 탭이 열어 둔 창이 같은 프로필을 잡고 있으면 먼저 닫는다.
+        if self.reply_session is not None:
+            try:
+                self.reply_session.close()
+            except Exception:
+                pass
+            self.reply_session = None
+            self.reply_page = None
+        if ProfileLockManager.is_locked(USER_DATA_DIR):
+            messagebox.showwarning("알림", "프로필이 사용 중입니다. 실행 중인 브라우저나 작업을 먼저 중지해 주세요.")
+            return
+
+        self.config_service.set("my_blog_id", blog_id)
+        self.audit_stop_event = threading.Event()
+        self.btn_reply_workbook.configure(state="disabled", text="생성 중...")
+        self.btn_start.configure(state="disabled")
+        self.btn_stop.configure(state="normal")
+        self.reply_audit_status_lbl.configure(text="엑셀 생성 준비 중...", text_color="#FBBF24")
+
+        def set_progress(message: str):
+            self.after(0, lambda m=message: self.reply_audit_status_lbl.configure(text=m, text_color="#FBBF24"))
+
+        def task():
+            from services.reply_workbook_service import ReplyWorkbookService
+            session = None
+            result = None
+            error = ""
+            try:
+                session = BrowserSession(headless=True, stop_event=self.audit_stop_event)
+                ctx = session.start()
+                page = ctx.new_page()
+                result = ReplyWorkbookService.run(
+                    page=page,
+                    bridge=self.gemini_extension_bridge,
+                    blog_id=blog_id,
+                    stop_event=self.audit_stop_event,
+                    progress=set_progress,
+                )
+            except Exception as exc:
+                error = str(exc)
+                logger.log(f"[REPLY_BOOK] 실패: {exc}", "ERROR")
+            finally:
+                if session is not None:
+                    try:
+                        session.close()
+                    except Exception:
+                        pass
+
+            def finish():
+                self.btn_reply_workbook.configure(state="normal", text="엑셀 3개")
+                self.btn_start.configure(state="normal")
+                self.btn_stop.configure(state="disabled")
+                if not result or not result.get("success"):
+                    reason = error or (result or {}).get("error", "unknown")
+                    self.reply_audit_status_lbl.configure(text=f"엑셀 생성 실패 ({reason})", text_color="#EF4444")
+                    messagebox.showwarning("엑셀 생성 실패", f"엑셀을 만들지 못했습니다: {reason}")
+                    return
+                lines = []
+                for s in result["sheets"]:
+                    mark = "완료" if s["collection_status"] == "complete" else "일부" if s["collection_status"] == "partial" else "실패"
+                    lines.append(f"- {s['title'][:28]}: 댓글 {s['loaded']}/{s['expected'] if s['expected'] is not None else '?'} ({mark}), 추천 답글 {s['generated']}/{s['eligible']}")
+                color = "#4ADE80" if result["collection_state"] == "complete" else "#F87171"
+                self.reply_audit_status_lbl.configure(text="엑셀 생성 완료", text_color=color)
+                msg = "[답글 추천 엑셀 생성 완료]\n\n" + "\n".join(lines) + f"\n\n{result['path']}\n\n파일을 바로 여시겠습니까?"
+                if messagebox.askyesno("엑셀 생성 완료", msg):
+                    try:
+                        subprocess.run(["open", result["path"]])
+                    except Exception:
+                        pass
+
+            self.after(0, finish)
+
+        self.audit_thread = threading.Thread(target=task, daemon=True)
+        self.audit_thread.start()
 
     def _batch_generate_replies(self):
         # P0-10: Feed Gemini와 Reply Gemini 상호 배제 (Mutex)
